@@ -5,6 +5,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { TENCENT_MEMORY_RESOURCES, checkTencentMemoryResources } = require('./tencent-memory-package.cjs');
 const { validateWindowsIcon } = require('./windows-icon.cjs');
+const { checkElectronRuntime } = require('./provision-electron-runtime.cjs');
 const desktop = path.resolve(__dirname, '../apps/desktop');
 const indexedLanguages = ['python', 'go', 'rust', 'java', 'c', 'cpp', 'csharp'];
 const authoringPackages = new Map([
@@ -221,6 +222,7 @@ module.exports = async context => {
   console.log('Packaged application resource validation passed.');
 };
 if (require.main === module) {
+  checkElectronRuntime();
   check(null);
   const pkg = require(path.join(desktop, 'package.json'));
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);

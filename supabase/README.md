@@ -14,7 +14,7 @@
 
 只通过 SQL Editor、服务端任务或 Supabase Dashboard 写入发布记录。`anon` 角色不能直接写表。
 
-当前源码为1.3.1，维护者已于2026-11-11自行打包。对应发布文件为 [publish-release-1.3.1.sql](publish-release-1.3.1.sql)，已核对本地ZIP、`.zip.json`和`.zip.sha256`，填入实际哈希与字节大小；执行前只需将下载地址占位符换为该ZIP的公开HTTPS直链。下方仍为结构示例，不能原样执行。`publish-release.sql` 保留1.3.0历史公告和元数据，不是当前发布文件。新包须重新核对元数据，不能沿用旧包哈希。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；执行前需部署0003并确认链接中的安装包版本。不要将分享网页标记为ZIP直链。
+当前源码为1.3.2，维护者已于2026-11-12自行打包。对应发布文件为 [publish-release-1.3.2.sql](publish-release-1.3.2.sql)，已核对本地ZIP、`.zip.json`、`.zip.sha256`及ZIP内安装器，填入实际哈希、字节数和维护者提供的GitHub Releases下载直链，可在部署0003后手动执行。下方仍为结构示例，不能原样执行。`publish-release-1.3.1.sql`和`publish-release.sql`保留1.3.1/1.3.0历史元数据。新包须重新核对元数据，不能沿用旧包哈希。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；执行前需部署0003并确认链接中的安装包版本。不要将分享网页标记为ZIP直链。
 
 ```sql
 insert into public.mingshen_app_releases (
@@ -25,7 +25,7 @@ insert into public.mingshen_app_releases (
   is_active, package_format, package_sha256, package_size
 )
 values (
-  '1.3.1',
+  '1.3.2',
   'REPLACE_WITH_PUBLIC_HTTPS_ZIP_URL',
   '修复 ...',
   now(),
@@ -33,16 +33,16 @@ values (
 );
 ```
 
-`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。当前完整可重复执行文件见 `publish-release-1.3.1.sql`；不要原样执行任何下载地址或哈希占位符。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
+`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。当前完整可重复执行文件见 `publish-release-1.3.2.sql`；不要原样执行任何下载地址或哈希占位符。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
 
-1.3.1 ZIP为293688365字节，SHA-256为`d1f65003f805f2c854c2095d097a0f70ff9d67953ab55e06f32854793b6e6dd3`，对应`MingshenHarness-1.3.1-x64.zip`，仅下载直链待填写。`publish-release.sql`继续保留2026-11-10实际1.3.0 ZIP哈希及293630075字节大小。相同版本重新发布不会触发已安装同版本客户端的升级提示。本轮只生成发布文件，没有执行云端SQL或上传包。
+1.3.2 ZIP为293723586字节，SHA-256为`14883fad61715f6f7a03f3a334dead291f983e14f1056c971fd7c84d0e173a23`，对应`MingshenHarness-1.3.2-x64.zip`；下载地址已填为维护者提供的`SkyH1aa/MingshenHarness`仓库`V1.3.2` Release资产直链。本次未重新下载远端ZIP验证内容。1.3.1/1.3.0 SQL保留各自实际元数据，不混用。相同版本重新发布不会触发已安装同版本客户端的升级提示。本轮只生成发布文件，没有执行云端SQL或上传包。
 
 停用错误发布：
 
 ```sql
 update public.mingshen_app_releases
 set is_active = false
-where version = '1.3.1'; -- replace with the exact incorrect release version
+where version = '1.3.2'; -- replace with the exact incorrect release version
 ```
 
 1.2.6 客户端优先通过 `public.mingshen_get_latest_release_v2()` 获取最新一条记录，404 时回退旧 RPC；旧客户端四字段接口保留，不允许直接查询表。

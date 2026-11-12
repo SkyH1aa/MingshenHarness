@@ -18,7 +18,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "package:check": "node ../../scripts/check-package.cjs --source",
-    "package:win": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/generate-icon.ps1 && node ../../scripts/provision-native-runtime.mjs && pnpm build && pnpm package:check && node ../../scripts/package-windows.cjs"
+    "package:win": "node ../../scripts/provision-electron-runtime.cjs && powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/generate-icon.ps1 && node ../../scripts/provision-native-runtime.mjs && pnpm build && pnpm package:check && node ../../scripts/package-windows.cjs"
   },
   "dependencies": {
     "@ast-grep/lang-c": "0.0.6",

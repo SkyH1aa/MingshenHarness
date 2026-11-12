@@ -63,7 +63,7 @@ if not exist "node_modules" (
   if errorlevel 1 goto :error
 )
 
-"%NODE_EXE%" scripts\prepare-experimental-runtime.cjs
+"%NODE_EXE%" scripts\provision-electron-runtime.cjs
 if errorlevel 1 goto :error
 
 if exist "apps\desktop\out\main\index.js" goto :launch
@@ -78,8 +78,8 @@ if errorlevel 1 goto :error
 
 :launch
 echo Starting Mingshen Harness 1.3.2 experimental build...
-set "ELECTRON_RUN_AS_NODE="
-start "" "apps\desktop\node_modules\electron\dist\MingshenHarnessExperimental.exe" "apps\desktop" --mingshen-experimental
+"%NODE_EXE%" scripts\prepare-experimental-runtime.cjs --launch
+if errorlevel 1 goto :error
 exit /b 0
 
 :error

@@ -6,6 +6,7 @@ const { copyRuntimeFile } = require('./package-runtime-copy.cjs');
 const { packageCacheRoot, assertChildPath } = require('./package-paths.cjs');
 const { nativeCopyFor } = require('./package-native-copy.cjs');
 const { createUpdateZip } = require('./create-update-zip.cjs');
+const { provisionElectronRuntime } = require('./provision-electron-runtime.cjs');
 
 const workspace = path.resolve(__dirname, '..');
 const desktop = path.join(workspace, 'apps', 'desktop');
@@ -25,11 +26,7 @@ async function copyRuntimeDirectory(source, destination, nativeCopy) {
 
 async function main() {
   const { values } = parseArgs({ options: { dir: { type: 'boolean', default: false } } });
-  const electronPackage = require.resolve('electron/package.json', { paths: [desktop] });
-  const electron = require(electronPackage);
-  const installed = path.join(path.dirname(electronPackage), 'dist');
-  const version = (await fs.readFile(path.join(installed, 'version'), 'utf8')).trim();
-  if (version !== electron.version) throw new Error('Installed Electron runtime version mismatch. Run pnpm install.');
+  const { dist: installed, version } = provisionElectronRuntime(desktop);
   const cacheRoot = packageCacheRoot();
   await fs.mkdir(cacheRoot, { recursive: true });
   const buildRoot = await fs.mkdtemp(path.join(cacheRoot, `windows-${applicationVersion}-`));

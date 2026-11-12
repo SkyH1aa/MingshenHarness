@@ -173,3 +173,65 @@ README、文档工具说明、双语用户手册和更新日志、工具提示�
 README、双语USER_GUIDE/CHANGELOG/隐私政策、SECURITY、供应商缓存说明和AGENT同步。当前共享模型入口可选择native供应商；审批主备及压缩跨协议回归已通过，记忆分析沿同一请求客户端，无新供应商专用旁路。
 
 全部请求仅发送到自建本地HTTP/SSE服务，官方外观地址由fixture拦截；没有真实Google账户、私人Key、正常用户数据库/记忆或付费API验证，不保证实际缓存率及任意网关兼容。未实现Vertex AI、Interactions、输出媒体或显式缓存资源管理。未生成NSIS/ZIP、安装、升级、云SQL、Git提交、推送或发布。正常退出旧实例后运行`.\run-experimental.cmd`体验本轮构建。
+
+## 2026-11-12 打包资源复核
+
+用户只要求检查资源与提供自行打包命令，本轮不生成正式包。当前工作区为`C:\Users\ASUS\Desktop\MingshenHarness`，开始时Git工作区干净。
+
+- `node scripts/check-package.cjs --source`退出0，33项资源、生产依赖及1.3.2版本通过，含原子ICO、native哈希、TencentDB源/运行时哈希与闭包、文档作者依赖、OCR和七种Windows grammar。
+- 只读核对10处`extraResources`源全部存在，根/桌面package和release常量均1.3.2，清单依赖specifier与lockfile一致。正式包装脚本解析到根`node_modules/electron/dist`，Electron45.2.1及EXE、关键DLL、资源与locales存在；NSIS仍为x64当前用户安装，未签名，使用既定图标。没有新执行afterPack或安装器验证。
+- 默认`.\package-win.cmd --check`退出1，pnpm在资源检查前尝试同步依赖，因无交互终端报`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`。安装状态JSON仍记录迁移前的`C:\Users\ASUS\Documents\ChatGPT\MingshenHarness`绝对路径。仅对后续检查进程设置`pnpm_config_verify_deps_before_run=warn`后，同入口退出0，33资源通过，workspace不同步警告仍保留；不是首次默认入口通过。
+
+附加测试命令：
+
+```powershell
+node --test scripts/package-paths.test.cjs scripts/package-runtime-copy.test.cjs scripts/package-document-runtime.test.cjs scripts/tencent-memory-package.test.cjs scripts/windows-icon.test.cjs scripts/generate-icon.test.cjs scripts/prepare-experimental-runtime.test.cjs
+```
+
+退出1：54项中46通过、8失败、0跳过（9.91秒）。8项失败均在实验准备测试访问固定的`apps/desktop/node_modules/electron/dist/electron.exe`时返回ENOENT；默认实验准备实现也固定此路径。当前hoisted安装的Electron位于根`node_modules`，正式打包脚本使用模块解析，已确认可定位其运行时。本轮没有改实验脚本或测试，不把失败隐藏成跳过或全部通过；未运行会写LocalAppData BuildCache的package-native-copy专项。
+
+维护者在有交互的PowerShell先同步依赖，再检查和打包：
+
+```powershell
+Set-Location 'C:\Users\ASUS\Desktop\MingshenHarness'
+& 'C:\Users\ASUS\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd' install --frozen-lockfile
+.\package-win.cmd --check
+.\package-win.cmd
+```
+
+pnpm已在PATH时，第二行可直接使用`pnpm install --frozen-lockfile`；安装和检查成功后再执行下一条。完整打包自动准备图标/native、重建应用、预检及afterPack，预期输出为`apps/desktop/release-artifacts/MingshenHarness-1.3.2-x64.exe`、`.zip`、`.zip.sha256`、`.zip.json`。当前该目录只有历史版本发布材料，未见1.3.2包。本轮没有实际同步依赖、永久关闭校验、修改node_modules、生产构建、完整Vitest、解包/NSIS/ZIP、安装升级、云SQL、用户数据操作、提交或推送；本次只追加检查记录。
+
+## 2026-11-12 迁移后运行时缺失修复
+
+用户随后已成功冻结lockfile重装依赖，安装状态指向Desktop新路径；自行打包在生产构建和预检后因缺少`node_modules/electron/dist/version`失败。实际安装的Electron45.2.1 npm包没有postinstall，提供独立`install-electron`/`install.js`，依赖重装未恢复dist及path.txt。此次原因与上节旧workspace元数据不同，修复没有再次重装全部依赖。
+
+- 新增`scripts/provision-electron-runtime.cjs`，通过模块解析定位当前Electron，验证Windows x64运行时版本、path.txt和关键文件；缺失时调用包内官方安装器，保留包内ZIP校验和并复检。
+- 桌面`package:win`在生产构建前准备Electron；`package-windows.cjs`直接入口同样保护。`--check`保持只读，新增运行时检查，缺失时给出明确准备命令。
+- 实验准备、其测试及`run-experimental.cmd`使用解析后的EXE路径，兼容根hoisted及app-local依赖；不修改原始electron.exe。README和交接中的当前打包路径、1.3.2输出说明同步。
+
+实际执行`node scripts/provision-electron-runtime.cjs`退出0，官方安装器成功恢复根`node_modules/electron/dist`中的45.2.1。随后执行：
+
+```powershell
+node --test scripts/provision-electron-runtime.test.cjs scripts/package-paths.test.cjs scripts/package-runtime-copy.test.cjs scripts/package-native-copy.test.cjs scripts/package-document-runtime.test.cjs scripts/tencent-memory-package.test.cjs scripts/windows-icon.test.cjs scripts/generate-icon.test.cjs scripts/prepare-experimental-runtime.test.cjs
+.\package-win.cmd --check
+.\package-win.cmd --dir
+```
+
+- Node专项9文件，**63通过、0失败、0跳过**（20.78秒）；含迁移后中文/空格路径、hoisted/app-local解析、缺失运行时的只读失败、版本/平台/伴随文件异常、实际子进程调用fixture安装器、完整运行时复用、失败及不完整安装拒绝，以及原生复制/图标/资源专项。测试不访问网络；真实Electron安装是前述独立步骤。
+- 默认`--check`退出0：33项资源、生产依赖、Electron及1.3.2版本通过，没有设置`pnpm_config_verify_deps_before_run=warn`。
+- 完整`--dir`退出0：生产构建main112/preload3/renderer2236模块，25份TencentDB源哈希通过；原版Electron暂存、EXE优先部署、ASAR生产依赖和afterPack资源检查均通过。builder提示未配置签名及其他平台可选依赖未打包，Windows x64依赖检查通过。
+- 实际解包EXE：`C:\Users\ASUS\AppData\Local\MingshenHarness\BuildCache\windows-1.3.2-7F7wF4\output\win-unpacked\MingshenHarness.exe`。
+
+这次验证包含解包构建，不含正式NSIS编译、ZIP生成、安装/升级或GUI验收；未运行全量应用Vitest，部分历史桌面smoke固定app-local路径的问题仍未纳入此次修复范围。未修改版本/图标、用户profile/数据库/Key、云服务或发布材料，未提交/推送。当前维护者直接运行`.\package-win.cmd`生成正式安装包，无需再次安装全部依赖；未来重新迁移则先在新目录正常同步依赖，再由入口准备Electron。
+
+## 2026-11-12 已有1.3.2安装包发布SQL
+
+维护者已自行完成正式打包，并提供GitHub Releases的`V1.3.2/MingshenHarness-1.3.2-x64.zip`下载直链。新增完整可执行的[supabase/publish-release-1.3.2.sql](../supabase/publish-release-1.3.2.sql)，保留旧版本SQL，不沿用旧包元数据。当前SQL填入：
+
+- 版本`1.3.2`、格式`zip`，下载地址为`https://github.com/SkyH1aa/MingshenHarness/releases/download/V1.3.2/MingshenHarness-1.3.2-x64.zip`。
+- 本地ZIP重新计算SHA-256：`14883fad61715f6f7a03f3a334dead291f983e14f1056c971fd7c84d0e173a23`。
+- ZIP实际大小：**293723586字节**；与`.zip.json`及`.zip.sha256`完全一致。
+- ZIP根目录仅有`MingshenHarness-1.3.2-x64.exe`，解压长度293737762字节；流式计算包内EXE SHA-256，与旁置EXE一致。
+- SQL沿用现有表/字段及`on conflict (version)`，公告涵盖Gemini原生协议、Gemini/DeepSeek状态及缓存兼容、表格富内容和原生公式、数据迁移及Windows构建修复，检查1000字符上限。
+
+Supabase README及部署指南同步到1.3.2。此次只读取本地产物并生成SQL/文档，未重新下载远端ZIP、运行云端SQL、认证线上RPC生效、重打包、安装/升级、上传、提交或推送；不是智能体完成正式打包。此前“未生成NSIS/ZIP”保留为相应开发阶段的历史边界。维护者在已执行0003迁移的Supabase SQL Editor手动执行新文件，再运行`select * from public.mingshen_get_latest_release_v2();`核对。

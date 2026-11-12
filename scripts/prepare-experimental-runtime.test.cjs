@@ -6,9 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { prepareExperimentalRuntime } = require('./prepare-experimental-runtime.cjs');
 const { validateWindowsIcon } = require('./windows-icon.cjs');
+const { resolveElectronRuntime } = require('./provision-electron-runtime.cjs');
 
 const desktop = path.resolve(__dirname, '../apps/desktop');
-const source = path.join(desktop, 'node_modules/electron/dist/electron.exe');
+const source = resolveElectronRuntime(desktop).executable;
 const approvedPng = path.join(desktop, 'build/icon.png');
 const defaultIcon = path.join(desktop, 'build/icon.ico');
 const windowsOnly = { skip: process.platform !== 'win32' };

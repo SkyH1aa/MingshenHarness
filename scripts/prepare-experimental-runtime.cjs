@@ -1,8 +1,9 @@
 const { createHash, randomUUID } = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { validateWindowsIcon } = require('./windows-icon.cjs');
+const { checkElectronRuntime, resolveElectronRuntime } = require('./provision-electron-runtime.cjs');
 
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
@@ -40,7 +41,7 @@ function loadIconArtwork(iconPath, resedit) {
 
 function prepareExperimentalRuntime(options = {}) {
   const desktop = options.desktop ?? path.resolve(__dirname, '../apps/desktop');
-  const source = options.source ?? path.join(desktop, 'node_modules/electron/dist/electron.exe');
+  const source = options.source ?? checkElectronRuntime(resolveElectronRuntime(desktop)).executable;
   const target = options.target ?? path.join(path.dirname(source), 'MingshenHarnessExperimental.exe');
   if (path.resolve(source).toLowerCase() === path.resolve(target).toLowerCase())
     throw new Error('The experimental executable must not replace the original Electron runtime.');
@@ -100,4 +101,13 @@ if (require.main === module) {
   console.log(result.changed
     ? `Experimental runtime prepared with the approved icon: ${result.target}`
     : 'Experimental runtime executable and icon integrity verified.');
+  if (process.argv.includes('--launch')) {
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const child = spawn(result.target, [path.resolve(__dirname, '../apps/desktop'), '--mingshen-experimental'], {
+      detached: true, stdio: 'ignore', env,
+    });
+    child.once('error', error => { console.error(error); process.exitCode = 1; });
+    child.once('spawn', () => child.unref());
+  }
 }

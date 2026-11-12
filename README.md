@@ -52,6 +52,7 @@
 
 ```powershell
 pnpm install --frozen-lockfile
+node scripts/provision-electron-runtime.cjs
 node scripts/provision-native-runtime.mjs
 pnpm dev
 ```
@@ -145,7 +146,9 @@ pnpm build
 .\package-win.cmd
 ```
 
-脚本自动寻找 Node.js/pnpm，仅为当前进程补齐 PATH。已配置好环境时也可使用 `pnpm package:win`。完整打包会准备图标与固定沙箱、构建应用、校验必需资源和第三方哈希，并在 afterPack 再次检查。
+脚本自动寻找 Node.js/pnpm，仅为当前进程补齐 PATH。已配置好环境时也可使用 `pnpm package:win`。完整打包会先检查 Electron，缺少运行时时调用已安装 Electron 包的官方安装器，再准备图标与固定沙箱、构建应用、校验必需资源和第三方哈希，并在 afterPack 再次检查。
+
+迁移仓库目录后，在新目录先执行 `pnpm install --frozen-lockfile`，同步依赖安装路径。`--check` 只检查，不下载；如果报告 Electron 运行时缺失，可执行 `node scripts/provision-electron-runtime.cjs` 后重新检查，也可直接运行完整打包入口，由它自动准备。运行时按当前工作区的模块解析定位，兼容根目录 hoisted 与桌面应用本地依赖布局。
 
 当前目标为未签名、当前用户安装的 x64 NSIS，输出目录为 `apps/desktop/release-artifacts/`：
 
