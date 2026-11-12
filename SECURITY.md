@@ -1,5 +1,19 @@
 # Security Policy and Threat Model
 
+## Public Materials and Hosted Services
+
+本仓库完整公开 Supabase 后端数据库的[建库与迁移 SQL](supabase/migrations/)及[部署说明](docs/SUPABASE_DEPLOY.md)，并公开[智能体工作交接协议](AGENT.md)及其[入口](AGENTS.md)。公开这些资料不构成对作者线上服务的安全测试授权。未经作者事先明确授权，请勿通过逆向分析、漏洞利用、渗透测试、网络扫描或其他网络安全手段攻击、探测、干扰或越权访问作者的服务器、Supabase 项目、数据库及其他线上基础设施。安全验证请在自行部署且拥有权限的环境中进行；发现潜在漏洞请按下方 Reporting 说明私下报告。
+
+This repository publishes the Supabase database creation and migration SQL,
+deployment instructions, and agent work handoff protocol linked above. Publication
+does not authorize security testing of the author's hosted services. Without the
+author's prior explicit authorization, do not use reverse engineering,
+vulnerability exploitation, penetration testing, network scanning or other security
+techniques to attack, probe, disrupt or gain unauthorized access to the author's
+servers, Supabase projects, databases or other hosted infrastructure. Perform
+security validation in your own authorized deployment and privately report
+suspected vulnerabilities as described under Reporting below.
+
 ## Verified ZIP updates (1.2.6+)
 
 Explicit confirmation authorizes downloading and launching a newer version. Metadata comes from the fixed Supabase latest-release RPC; the original RPC stays available to older clients. ZIP downloads use public HTTPS, validate up to five redirects, omit app/model credentials and browser cookies, and support system proxies in an isolated Chromium session. Direct connections revalidate the actual socket DNS lookup; a configured proxy remains a trusted DNS/network boundary. ZIPs require a metadata SHA-256, bounded byte counts (2 GiB) and one root installer matching the version and x64 artifact name. Traversal, duplicate paths, links, additional scripts/executables and excessive extraction ratios are rejected. The installer is hashed again before handoff. Active tasks drain first; handoff blocks new runs and closes services and SQLite before Electron relaunches the installer. Failure/cancellation does not execute it. Hashes are not publisher signing or protection against a compromised release account/Windows user. SmartScreen and installer policy remain in force.
