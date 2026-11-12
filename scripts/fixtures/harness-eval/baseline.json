@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "name": "Mingshen Harness task baseline",
+  "applicationVersion": "1.3.0",
+  "tasks": [
+    {
+      "id": "responses-state",
+      "requires": "openai_responses",
+      "inputs": {
+        "input/state.json": "{\n  \"first\": 23,\n  \"second\": 19,\n  \"release\": \"1.3.0\"\n}\n"
+      },
+      "prompts": [
+        "Read input/state.json with a file tool. Then run a separate tool to check that the file still exists. Use both real results and create out/state.json containing {\"sum\":42,\"release\":\"1.3.0\"}. Preserve all fixture inputs. Finish only after checking the generated JSON."
+      ],
+      "checks": [
+        { "id": "state-artifact", "kind": "artifact_json", "path": "out/state.json", "equals": { "sum": 42, "release": "1.3.0" } },
+        { "id": "state-tool-loop", "kind": "tools", "names": ["read_file"], "minimum": 1 },
+        { "id": "state-replay", "kind": "observation", "key": "responsesReplay", "equals": true }
+      ],
+      "fixtureOutputs": { "out/state.json": "{\"sum\":42,\"release\":\"1.3.0\"}\n" },
+      "fixtureTools": [{ "name": "read_file", "arguments": { "path": "input/state.json" } }]
+    },
+    {
+      "id": "visual-inspection",
+      "requires": "image",
+      "inputs": {},
+      "prompts": [
+        "Inspect input/evidence.png with the image viewing tool. Write out/vision.json with the left and right half colors as lowercase English names and the exact image width and height. Do not infer colors from a filename or source code. Preserve the input image."
+      ],
+      "checks": [
+        { "id": "vision-artifact", "kind": "artifact_json", "path": "out/vision.json", "equals": { "left": "magenta", "right": "cyan", "width": 64, "height": 32 } },
+        { "id": "vision-tool", "kind": "tools", "names": ["view_image"], "minimum": 1 },
+        { "id": "vision-native-input", "kind": "observation", "key": "nativeImageInput", "equals": true }
+      ],
+      "fixtureOutputs": { "out/vision.json": "{\"left\":\"magenta\",\"right\":\"cyan\",\"width\":64,\"height\":32}\n" },
+      "fixtureTools": [{ "name": "view_image", "arguments": { "path": "input/evidence.png" } }]
+    },
+    {
+      "id": "long-command",
+      "inputs": {
+        "input/long-task.mjs": "import { mkdir, writeFile } from 'node:fs/promises';\nconsole.log('PHASE_ONE');\nawait new Promise(resolve => setTimeout(resolve, 1800));\nawait mkdir('out', { recursive: true });\nawait writeFile('out/command.json', JSON.stringify({ phases: 2, completed: true }) + '\\n');\nconsole.log('PHASE_TWO');\n"
+      },
+      "prompts": [
+        "Start node input/long-task.mjs with exec_command and yield_time_ms=100. Use write_stdin to poll the returned session until it finishes, without running the command a second time. Verify out/command.json and create out/command-output.txt with the two phase markers from the real command output, in order. Do not copy a marker from source as evidence that the process finished. Preserve input/long-task.mjs."
+      ],
+      "checks": [
+        { "id": "command-artifact", "kind": "artifact_json", "path": "out/command.json", "equals": { "phases": 2, "completed": true } },
+        { "id": "command-output", "kind": "artifact_text", "path": "out/command-output.txt", "contains": ["PHASE_ONE", "PHASE_TWO"] },
+        { "id": "command-tool", "kind": "tools", "names": ["exec_command"], "minimum": 1 },
+        { "id": "command-poll", "kind": "tools", "names": ["write_stdin"], "minimum": 1 }
+      ],
+      "fixtureOutputs": { "out/command.json": "{\"phases\":2,\"completed\":true}\n", "out/command-output.txt": "PHASE_ONE\nPHASE_TWO\n" },
+      "fixtureTools": [{ "name": "exec_command", "arguments": { "command": "node input/long-task.mjs", "yield_time_ms": 100 } }, { "name": "write_stdin", "arguments": { "session_id": "fixture-session" } }]
+    },
+    {
+      "id": "file-pagination",
+      "inputs": {},
+      "prompts": [
+        "Read only lines 601 through 700 of input/large.txt with the paginated file reader. Find the release marker and create out/page.json with its exact value and one-based line number. Preserve input/large.txt."
+      ],
+      "checks": [
+        { "id": "page-artifact", "kind": "artifact_json", "path": "out/page.json", "equals": { "marker": "MINGSHEN_RELEASE_1.3.0", "line": 637 } },
+        { "id": "page-bounded-read", "kind": "observation", "key": "boundedFileRead", "equals": true }
+      ],
+      "fixtureOutputs": { "out/page.json": "{\"marker\":\"MINGSHEN_RELEASE_1.3.0\",\"line\":637}\n" },
+      "fixtureTools": [{ "name": "read_file", "arguments": { "path": "input/large.txt", "start_line": 601, "limit": 100 } }]
+    },
+    {
+      "id": "multiagent",
+      "inputs": {
+        "input/left.json": "[3,5,8,13]\n",
+        "input/right.json": "[2,7,11,17]\n"
+      },
+      "prompts": [
+        "Delegate the sum of input/left.json and input/right.json to two independent read-only subagents, one input per subagent. Continue independent work while they run, collect their actual results, and create out/sums.json with left, right and total. The parent must verify the JSON. Preserve both inputs."
+      ],
+      "checks": [
+        { "id": "multiagent-artifact", "kind": "artifact_json", "path": "out/sums.json", "equals": { "left": 29, "right": 37, "total": 66 } },
+        { "id": "multiagent-spawn", "kind": "tools", "names": ["spawn_subagent"], "minimum": 2 },
+        { "id": "multiagent-collect", "kind": "tools", "names": ["wait_subagents"], "minimum": 1 }
+      ],
+      "fixtureOutputs": { "out/sums.json": "{\"left\":29,\"right\":37,\"total\":66}\n" },
+      "fixtureTools": [{ "name": "spawn_subagent", "arguments": { "task": "left" } }, { "name": "spawn_subagent", "arguments": { "task": "right" } }, { "name": "wait_subagents", "arguments": {} }]
+    },
+    {
+      "id": "history-retention",
+      "inputs": {},
+      "prompts": [
+        "Remember the final artifact requirements for this fixed task: version 1.3.0, locale zh-CN, preserve the identifier alpha_charlie_637, and do not add dependencies. Acknowledge only; no output file yet.",
+        "Continue holding the original artifact requirements. Describe one reversible verification step; do not create the final file yet.",
+        "The task is still active. Keep the original version, locale, identifier and dependency constraint; acknowledge.",
+        "Continue the same task and preserve all original requirements. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Keep the original task requirements unchanged. Acknowledge.",
+        "Now write out/retained.json with version, locale, identifier and addedDependencies from the first instruction. addedDependencies must be an empty array. Read and verify the artifact."
+      ],
+      "checks": [
+        { "id": "history-artifact", "kind": "artifact_json", "path": "out/retained.json", "equals": { "version": "1.3.0", "locale": "zh-CN", "identifier": "alpha_charlie_637", "addedDependencies": [] } }
+      ],
+      "fixtureOutputs": { "out/retained.json": "{\"version\":\"1.3.0\",\"locale\":\"zh-CN\",\"identifier\":\"alpha_charlie_637\",\"addedDependencies\":[]}\n" },
+      "fixtureTools": []
+    }
+  ]
+}

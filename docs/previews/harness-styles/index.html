@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN" data-style="orbit" data-theme="night" data-motion="full" data-view="chat">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="description" content="Mingshen Harness 1.3.0：光轨、折光与脉冲三种界面方向的独立交互预览。" />
+    <title>Mingshen Harness · 界面方向预览</title>
+    <link rel="icon" type="image/png" href="assets/brand-icon.png" />
+    <link rel="stylesheet" href="preview.css" />
+    <link rel="stylesheet" href="optical.css" />
+    <script src="assets/icons.js" defer></script>
+    <script src="preview.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#conversation">跳到对话</a>
+    <header class="preview-bar">
+      <div class="identity">
+        <img src="assets/brand-icon.png" width="32" height="32" alt="" />
+      <div class="identity-name">MINGSHEN<span>INTELLIGENCE HARNESS <span class="version">1.3.0</span></span></div>
+        <span class="preview-label">界面预览</span>
+      </div>
+      <div class="style-switch" role="group" aria-label="界面风格">
+        <button type="button" data-style-choice="orbit" aria-pressed="true">
+          <svg><use href="#orbit"></use></svg><span>光轨</span>
+        </button>
+        <button type="button" data-style-choice="prism" aria-pressed="false">
+          <svg><use href="#layers"></use></svg><span>折光</span>
+        </button>
+        <button type="button" data-style-choice="pulse" aria-pressed="false">
+          <svg><use href="#activity"></use></svg><span>脉冲</span>
+        </button>
+      </div>
+      <div class="preview-controls">
+        <label class="motion-control">
+          <svg aria-hidden="true"><use href="#sparkles"></use></svg>
+          <select id="motion-select" aria-label="动效强度">
+            <option value="full">完整动效</option>
+            <option value="reduced">轻量动效</option>
+            <option value="off">关闭动效</option>
+          </select>
+        </label>
+        <button type="button" class="icon-button theme-button" id="theme-toggle" aria-label="切换为日间" title="切换为日间">
+          <svg class="sun-icon"><use href="#sun"></use></svg>
+          <svg class="moon-icon"><use href="#moon"></use></svg>
+        </button>
+        <button type="button" class="icon-button" id="info-button" aria-label="查看预览说明" title="预览说明">
+          <svg><use href="#info"></use></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="workbench" id="workbench">
+      <nav class="tool-rail" aria-label="工作区">
+        <button type="button" class="rail-mark" id="home-button" aria-label="返回示例会话" title="返回示例会话">
+          <img src="assets/brand-icon.png" width="28" height="28" alt="" />
+        </button>
+        <div class="rail-main">
+          <button type="button" class="icon-button is-selected" data-rail-view="chat" aria-label="对话视图" title="对话视图">
+            <svg><use href="#messages"></use></svg>
+          </button>
+          <button type="button" class="icon-button" data-rail-view="code" aria-label="代码视图" title="代码视图">
+            <svg><use href="#code"></use></svg>
+          </button>
+          <button type="button" class="icon-button" data-rail-view="agents" aria-label="协作视图" title="协作视图">
+            <svg><use href="#network"></use></svg>
+          </button>
+          <span class="rail-divider"></span>
+          <button type="button" class="icon-button" id="rail-terminal" aria-label="打开示例终端" title="终端">
+            <svg><use href="#terminal"></use></svg>
+          </button>
+          <button type="button" class="icon-button" id="rail-files" aria-label="打开示例文件" title="文件">
+            <svg><use href="#files"></use></svg>
+          </button>
+        </div>
+        <div class="rail-bottom">
+          <button type="button" class="icon-button" id="settings-button" aria-label="外观设置" title="外观设置">
+            <svg><use href="#settings"></use></svg>
+          </button>
+          <span class="profile-mark" title="本地示例项目">M</span>
+        </div>
+      </nav>
+
+      <aside class="session-sidebar" id="session-sidebar" aria-label="项目与会话">
+        <div class="sidebar-heading">
+          <span>工作空间</span>
+          <button type="button" class="icon-button small" id="close-sessions" aria-label="收起会话栏" title="收起会话栏">
+            <svg><use href="#panel-left"></use></svg>
+          </button>
+        </div>
+        <button type="button" class="new-session" id="new-session">
+          <svg><use href="#plus"></use></svg><span>新对话</span>
+          <svg class="new-session-arrow"><use href="#arrow-up-right"></use></svg>
+        </button>
+        <label class="search-field">
+          <svg aria-hidden="true"><use href="#search"></use></svg>
+          <input id="session-search" type="search" placeholder="搜索会话" aria-label="搜索会话" autocomplete="off" />
+        </label>
+        <div class="session-scroll">
+          <div class="project-row">
+            <svg><use href="#chevron-down"></use></svg>
+            <svg><use href="#folder"></use></svg>
+            <span>memory-workbench</span>
+            <span class="project-count" id="session-count">3</span>
+          </div>
+          <div class="session-list" id="session-list">
+            <button type="button" class="session-item is-current" data-session="memory" aria-current="true">
+              <span class="session-dot running"></span>
+              <span class="session-copy"><strong>本地记忆引擎优化</strong><span>去重策略与检索边界</span></span>
+              <span class="session-time">现在</span>
+            </button>
+            <button type="button" class="session-item" data-session="ui">
+              <span class="session-dot"></span>
+              <span class="session-copy"><strong>工作台界面探索</strong><span>布局与日夜主题</span></span>
+              <span class="session-time">刚刚</span>
+            </button>
+            <button type="button" class="session-item" data-session="docs">
+              <span class="session-dot"></span>
+              <span class="session-copy"><strong>整理项目文档</strong><span>使用手册与维护记录</span></span>
+              <span class="session-time">昨天</span>
+            </button>
+          </div>
+          <p class="empty-search" id="empty-search" hidden>没有匹配的会话</p>
+          <div class="project-row second-project">
+            <svg><use href="#chevron-right"></use></svg>
+            <svg><use href="#folder"></use></svg>
+            <span>design-system</span>
+          </div>
+          <div class="sidebar-note">
+            <svg><use href="#git-branch"></use></svg>
+            <span>main</span>
+            <span class="subtle-dot"></span>
+            <span>本地项目</span>
+          </div>
+        </div>
+        <div class="sidebar-footer">
+          <span class="connection-dot"></span><span>本地示例</span>
+          <svg><use href="#shield"></use></svg>
+        </div>
+      </aside>
+
+      <div class="optical-scene" aria-hidden="true"><span></span><span></span></div>
+      <header class="workspace-header">
+        <div class="workspace-title">
+          <button type="button" class="icon-button mobile-sessions" id="open-sessions" aria-label="显示项目与会话" title="项目与会话">
+            <svg><use href="#panel-left"></use></svg>
+          </button>
+          <svg class="workspace-folder"><use href="#folder"></use></svg>
+          <span class="workspace-project">memory-workbench</span><span class="breadcrumb-slash">/</span>
+          <h1 id="session-title">本地记忆引擎优化</h1>
+        </div>
+        <div class="view-switch" role="group" aria-label="工作视图">
+          <button type="button" data-view-choice="chat" aria-pressed="true" title="对话">
+            <svg><use href="#messages"></use></svg><span>对话</span>
+          </button>
+          <button type="button" data-view-choice="code" aria-pressed="false" title="代码">
+            <svg><use href="#code"></use></svg><span>代码</span>
+          </button>
+          <button type="button" data-view-choice="agents" aria-pressed="false" title="协作">
+            <svg><use href="#network"></use></svg><span>协作</span>
+          </button>
+        </div>
+        <button type="button" class="icon-button inspector-toggle" id="inspector-toggle" aria-label="切换工具面板" title="工具面板" aria-expanded="true">
+          <svg><use href="#panel-right"></use></svg>
+        </button>
+      </header>
+
+      <main class="conversation" id="conversation" tabindex="-1">
+        <div class="conversation-scroll" id="conversation-scroll">
+          <div class="conversation-content">
+            <div class="conversation-context"><svg><use href="#git-branch"></use></svg><span>main</span><span class="context-divider"></span><span>示例会话</span></div>
+            <div class="user-message" id="initial-user-message">
+              <div class="message-meta"><span class="user-avatar">M</span><span>你</span><time>10:42</time></div>
+              <p>为本地记忆引擎补上去重测试，检查重复记录与边界条件，保留现有检索行为。</p>
+            </div>
+            <article class="assistant-message" id="initial-assistant-message">
+              <div class="message-meta"><img src="assets/brand-icon.png" width="24" height="24" alt="" /><span>Mingshen</span><span class="agent-role">主 Agent</span><time>10:42</time></div>
+              <div class="assistant-body">
+                <p>我会先核对写入与检索流程，再检查重复记录的合并条件。测试会分别覆盖完全重复、内容更新和不同项目隔离。</p>
+                <details class="activity-details" open>
+                  <summary><span class="activity-heading"><svg><use href="#workflow"></use></svg><span>执行记录</span><span class="activity-count" id="activity-count">3</span></span><svg class="details-chevron"><use href="#chevron-down"></use></svg></summary>
+                  <div class="activity-list">
+                    <div class="activity-item"><span class="activity-node complete"><svg><use href="#check"></use></svg></span><div><span>检查记忆写入入口</span><code>src/memory/local-store.ts</code></div><span class="activity-result">已完成</span></div>
+                    <div class="activity-item"><span class="activity-node complete"><svg><use href="#check"></use></svg></span><div><span>读取现有去重测试</span><code>src/memory/dedup.test.ts</code></div><span class="activity-result">已完成</span></div>
+                    <div class="activity-item active-activity"><span class="activity-node running"><span class="mini-spinner"></span></span><div><span id="active-tool-label">核对记录合并边界</span><code id="active-tool-code">memory.deduplicate</code></div><span class="activity-result" id="active-tool-state">进行中</span></div>
+                  </div>
+                </details>
+                <p class="assistant-finding">去重需要区分“相同内容”和“相同来源的新版本”。我把这两个路径拆开检查，避免合并掉有效更新。</p>
+                <button type="button" class="changed-file" data-open-file="local-store">
+                  <svg><use href="#file-code"></use></svg>
+                  <span><strong>local-store.ts</strong><span>src / memory</span></span>
+                  <span class="diff-count"><span class="added">+6</span><span class="removed">−1</span></span>
+                  <svg class="file-arrow"><use href="#arrow-up-right"></use></svg>
+                </button>
+              </div>
+            </article>
+            <div id="extra-messages"></div>
+            <div class="working-indicator" id="working-indicator"><span class="working-mark"><span></span><span></span><span></span></span><span id="working-label">正在核对边界条件</span><button type="button" class="text-button" id="pause-run" title="暂停示例执行"><svg><use href="#pause"></use></svg><span>暂停</span></button></div>
+          </div>
+        </div>
+        <div class="composer-area">
+          <div class="composer-frame">
+            <div class="composer-top">
+              <button type="button" class="selector-button" id="model-button" aria-haspopup="menu" aria-expanded="false">
+                <span class="model-mark"><svg><use href="#cpu"></use></svg></span><span id="model-label">工作台示例模型</span><svg class="small-chevron"><use href="#chevron-down"></use></svg>
+              </button>
+              <span class="composer-top-divider"></span>
+              <button type="button" class="selector-button agent-selector" id="agent-button" aria-haspopup="menu" aria-expanded="false"><svg><use href="#bot"></use></svg><span id="agent-label">Mingshen</span><svg class="small-chevron"><use href="#chevron-down"></use></svg></button>
+              <span class="composer-local"><svg><use href="#folder"></use></svg><span>memory-workbench</span></span>
+            </div>
+            <form id="composer-form">
+              <textarea id="composer-input" rows="2" placeholder="继续这项任务…" aria-label="演示消息" maxlength="4000"></textarea>
+              <div class="composer-bottom">
+                <div class="composer-actions">
+                  <button type="button" class="icon-button" id="attach-button" aria-label="添加示例引用" title="添加示例引用"><svg><use href="#plus"></use></svg></button>
+                  <button type="button" class="permission-button" id="permission-button"><svg><use href="#shield-check"></use></svg><span>请求批准</span><svg class="small-chevron"><use href="#chevron-down"></use></svg></button>
+                </div>
+                <div class="send-actions">
+                  <button type="button" class="reasoning-button" id="reasoning-button" aria-label="思考等级：高，点击切换"><svg><use href="#brain"></use></svg><span id="reasoning-label">高</span></button>
+                  <button type="submit" class="send-button" id="send-button" aria-label="发送演示消息" title="发送演示消息" disabled><svg><use href="#arrow-up"></use></svg></button>
+                </div>
+              </div>
+            </form>
+          </div>
+          <div class="composer-caption"><span id="reference-label">示例内容 · 无模型连接</span><span class="context-indicator"><svg><use href="#hard-drive"></use></svg>本地工作空间</span></div>
+        </div>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-label="工具面板">
+        <div class="inspector-top">
+          <div class="inspector-tabs" role="tablist" aria-label="工具面板内容">
+            <button type="button" role="tab" id="tab-changes" data-inspector-tab="changes" aria-controls="panel-changes" aria-selected="true"><svg><use href="#git-pull-request"></use></svg><span>变更</span><span class="tab-count">2</span></button>
+            <button type="button" role="tab" id="tab-files" data-inspector-tab="files" aria-controls="panel-files" aria-selected="false" tabindex="-1"><svg><use href="#files"></use></svg><span>文件</span></button>
+            <button type="button" role="tab" id="tab-terminal" data-inspector-tab="terminal" aria-controls="panel-terminal" aria-selected="false" tabindex="-1"><svg><use href="#terminal"></use></svg><span>终端</span></button>
+          </div>
+          <button type="button" class="icon-button small close-inspector" id="close-inspector" aria-label="关闭工具面板" title="关闭工具面板"><svg><use href="#x"></use></svg></button>
+        </div>
+        <div class="inspector-panel" id="panel-changes" role="tabpanel" aria-labelledby="tab-changes">
+          <div class="changes-heading"><span>当前轮次</span><span>2 个文件</span></div>
+          <button type="button" class="file-row is-selected" data-open-file="local-store"><svg><use href="#file-code"></use></svg><span>local-store.ts</span><span class="diff-count"><span class="added">+6</span><span class="removed">−1</span></span></button>
+          <button type="button" class="file-row" data-open-file="dedup-test"><svg><use href="#file-code"></use></svg><span>dedup.test.ts</span><span class="diff-count"><span class="added">+8</span></span></button>
+          <div class="code-preview-header"><span id="code-file-label">local-store.ts</span><button type="button" class="icon-button small" id="copy-code" aria-label="复制示例代码" title="复制示例代码"><svg><use href="#copy"></use></svg></button></div>
+          <div class="code-preview" id="code-preview" aria-label="示例代码变更">
+            <div class="code-line"><span>24</span><code><b>export function</b> deduplicate(</code></div>
+            <div class="code-line"><span>25</span><code>  records: MemoryRecord[],</code></div>
+            <div class="code-line"><span>26</span><code>): MemoryRecord[] {</code></div>
+            <div class="code-line removed-line"><span>27</span><code>−  return unique(records);</code></div>
+            <div class="code-line added-line"><span>27</span><code>+  <b>const</b> seen = <b>new</b> Map();</code></div>
+            <div class="code-line added-line"><span>28</span><code>+  <b>for</b> (<b>const</b> record <b>of</b> records) {</code></div>
+            <div class="code-line added-line"><span>29</span><code>+    <b>const</b> key = identity(record);</code></div>
+            <div class="code-line added-line"><span>30</span><code>+    mergeLatest(seen, key, record);</code></div>
+            <div class="code-line added-line"><span>31</span><code>+  }</code></div>
+            <div class="code-line added-line"><span>32</span><code>+  <b>return</b> [...seen.values()];</code></div>
+            <div class="code-line"><span>33</span><code>}</code></div>
+          </div>
+          <div class="code-note"><svg><use href="#git-branch"></use></svg><span>工作区变更</span><span>示例</span></div>
+        </div>
+        <div class="inspector-panel" id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden>
+          <div class="changes-heading"><span>memory-workbench</span><span>示例文件</span></div>
+          <div class="file-tree">
+            <div class="tree-folder"><svg><use href="#chevron-down"></use></svg><svg><use href="#folder"></use></svg><span>src</span></div>
+            <div class="tree-folder nested"><svg><use href="#chevron-down"></use></svg><svg><use href="#folder"></use></svg><span>memory</span></div>
+            <button type="button" class="file-row tree-file" data-open-file="local-store"><svg><use href="#file-code"></use></svg><span>local-store.ts</span><span class="file-modified">M</span></button>
+            <button type="button" class="file-row tree-file" data-open-file="dedup-test"><svg><use href="#file-code"></use></svg><span>dedup.test.ts</span><span class="file-modified">M</span></button>
+            <button type="button" class="file-row tree-file" data-open-file="retrieval"><svg><use href="#file-code"></use></svg><span>retrieval.ts</span></button>
+          </div>
+        </div>
+        <div class="inspector-panel terminal-panel" id="panel-terminal" role="tabpanel" aria-labelledby="tab-terminal" hidden>
+          <div class="terminal-heading"><span><span class="connection-dot"></span>PowerShell</span><span>示例输出</span></div>
+          <div class="terminal-output" id="terminal-output"><p class="terminal-path">memory-workbench <span>main</span></p><p><span class="terminal-prompt">PS&gt;</span> pnpm test -- dedup</p><p class="terminal-muted">RUN  memory / dedup.test.ts</p><p><span class="terminal-ok">PASS</span> 完全重复记录合并</p><p><span class="terminal-ok">PASS</span> 不同项目记录隔离</p><p id="terminal-active"><span class="terminal-wait">&gt;</span> 正在检查内容更新边界<span class="terminal-cursor"></span></p></div>
+        </div>
+      </aside>
+
+      <section class="task-dock" aria-label="任务进度">
+        <div class="task-dock-heading"><span><svg><use href="#list-checks"></use></svg><strong>任务</strong><span class="task-fraction" id="task-fraction">1 / 3</span></span><button type="button" class="icon-button small" id="replay-button" aria-label="播放示例执行" title="播放示例执行"><svg><use href="#play"></use></svg></button></div>
+        <p class="empty-task-state" id="empty-tasks" hidden>当前会话没有示例任务</p>
+        <div class="task-list">
+          <div class="task-item" data-task="0"><span class="task-symbol complete"><svg><use href="#check"></use></svg></span><span><strong>核对写入与检索</strong><span>确认现有行为</span></span><span class="task-state">已完成</span></div>
+          <div class="task-item is-running" data-task="1"><span class="task-symbol running"><span class="mini-spinner"></span></span><span><strong>补齐去重边界</strong><span>记录合并与项目隔离</span></span><span class="task-state">进行中</span></div>
+          <div class="task-item" data-task="2"><span class="task-symbol pending"></span><span><strong>运行回归检查</strong><span>验证检索结果</span></span><span class="task-state">待执行</span></div>
+        </div>
+        <div class="task-dock-footer"><svg><use href="#network"></use></svg><span>测试 Agent</span><span id="child-agent-state">等待验证</span></div>
+      </section>
+
+      <footer class="status-bar">
+        <div><span class="connection-dot"></span><span>示例项目</span><span class="status-divider"></span><svg><use href="#git-branch"></use></svg><span>main</span></div>
+        <div class="style-caption" id="style-caption">光轨 · 精密工作台</div>
+        <div><svg><use href="#shield-check"></use></svg><span>本地预览</span><span class="status-divider"></span><span>1.3.0</span></div>
+      </footer>
+    </div>
+
+    <button type="button" class="drawer-scrim" id="drawer-scrim" aria-label="关闭侧栏" hidden></button>
+    <div class="popover" id="model-menu" role="menu" aria-label="示例模型" hidden>
+      <span class="menu-heading">示例模型</span>
+      <button type="button" role="menuitemradio" aria-checked="true" data-model="工作台示例模型"><svg><use href="#cpu"></use></svg>工作台示例模型<svg class="menu-check"><use href="#check"></use></svg></button>
+      <button type="button" role="menuitemradio" aria-checked="false" data-model="轻量示例模型"><svg><use href="#zap"></use></svg>轻量示例模型<svg class="menu-check"><use href="#check"></use></svg></button>
+    </div>
+    <div class="popover" id="agent-menu" role="menu" aria-label="示例 Agent" hidden>
+      <span class="menu-heading">Agent</span>
+      <button type="button" role="menuitemradio" aria-checked="true" data-agent="Mingshen"><svg><use href="#bot"></use></svg>Mingshen<svg class="menu-check"><use href="#check"></use></svg></button>
+      <button type="button" role="menuitemradio" aria-checked="false" data-agent="Plan"><svg><use href="#list-checks"></use></svg>Plan<svg class="menu-check"><use href="#check"></use></svg></button>
+      <button type="button" role="menuitemradio" aria-checked="false" data-agent="测试 Agent"><svg><use href="#flask"></use></svg>测试 Agent<svg class="menu-check"><use href="#check"></use></svg></button>
+    </div>
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <div class="dialog-heading"><h2 id="settings-title">外观</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭外观设置" title="关闭"><svg><use href="#x"></use></svg></button></div>
+      <div class="settings-rows">
+        <div class="setting-row"><label for="dialog-style">界面风格</label><select id="dialog-style"><option value="orbit">光轨</option><option value="prism">折光</option><option value="pulse">脉冲</option></select></div>
+        <div class="setting-row"><label for="dialog-theme">明暗主题</label><select id="dialog-theme"><option value="night">夜间</option><option value="day">日间</option></select></div>
+        <div class="setting-row"><label for="dialog-motion">动效</label><select id="dialog-motion"><option value="full">完整动效</option><option value="reduced">轻量动效</option><option value="off">关闭动效</option></select></div>
+      </div>
+      <div class="dialog-footer"><span>当前预览页内生效</span><button type="button" class="primary-button" data-close-dialog>完成</button></div>
+    </dialog>
+    <dialog id="info-dialog" aria-labelledby="info-title">
+      <div class="dialog-heading"><h2 id="info-title">Mingshen Harness 1.3.0</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭预览说明" title="关闭"><svg><use href="#x"></use></svg></button></div>
+      <p class="info-copy">光轨、折光、脉冲三种界面方向的独立设计预览。项目、会话、文件与执行结果均为示例。</p>
+      <p class="info-copy">页面不连接模型，不读取项目或用户数据，也不修改 Harness 设置。正式应用的风格切换仍计划在重启后生效。</p>
+      <div class="dialog-footer"><span>本地资源 · 无需联网</span><button type="button" class="primary-button" data-close-dialog>知道了</button></div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden><svg><use href="#check"></use></svg><span id="toast-text"></span></div>
+    <noscript><p class="noscript-message">启用 JavaScript 后可切换三种界面风格。当前显示光轨夜间静态预览。</p></noscript>
+  </body>
+</html>

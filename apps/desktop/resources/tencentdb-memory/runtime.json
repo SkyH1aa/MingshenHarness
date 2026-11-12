@@ -1,0 +1,23 @@
+{
+  "version": "2.0.3",
+  "commit": "084bed45cad6bb7f877455082cee82835d65671a",
+  "files": {
+    "LICENSE": "c3b1edc3da9748a53c8c7743b358f4bf4fd6cf7129f835934ac255b0ebae6097",
+    "NOTICE.md": "ba92e9c3923d49663dd99d136b21e240f4e6ae916081118a7a3a6e36d72de9b0",
+    "package.json": "89c47db7851f89caec72da4f215ebc21cf1e294aeef3b45d2583562d846ab035",
+    "upstream.json": "6260f2ef365dbf0e6e5864c91ca93c396b6ffd82209cc23516174c6d04a77a7b",
+    "upstream/adapters/disabled-embedding.js": "285ab9a3019ee5c9f79e1953d42fa939ff46c8319a5fa44af7d4332a5df2e918",
+    "upstream/adapters/disabled-observability.js": "93a7b6fce33e0f53fec731c96a44c448df84f2540093ac5759ea7dd56b30076d",
+    "upstream/adapters/disabled-runner.js": "bd0fc40a37f73f21b4e70c39d945124d328a7aea85afa0a3d255dcfeb6040abc",
+    "upstream/adapters/tokenize.js": "764d1a532d3a696640b0598bfc86f82dd0f6649792873c7ab3a84cce8211985e",
+    "upstream/chunk-Bnagl06m.js": "48d5a56d42ec464c7e3b66a96be4e7bc1e3b3b688858f4e7eabd68454d41ad9e",
+    "upstream/chunk-Btt5RBuN.js": "25a23b7682e62055fe7aa89045bc12205c90894651124f8e8ea182f2b3862525",
+    "upstream/chunk-Cn-07ziM.js": "cde0606a4948edcd190099e3fd1a853cab06044bb9dcb6a13d4b512b284d7e13",
+    "upstream/chunk-CnWcW_21.js": "c7ea531fcd9e9b87ec1a10c094c8d6125f939a4c09d12bc5c27b5fb0fabfd1b2",
+    "upstream/chunk-ta3EaYLJ.js": "a79be1554611b971d76dc8e7c16705a375db7fd99a82da5c5ac747a3f9f7de13",
+    "upstream/l1-extractor.js": "250392dda324f43a947a6d7bd26de4d17df3c5869b0f8d6223d19de53b6c973b",
+    "upstream/l1-writer.js": "19948fd17c3549d689ecfce05167ed85c063f4090763fe5154f6f47cca373875",
+    "upstream/memory-search.js": "8429f675cf74ca010cc3e5a158e470241a9860e9cabf3f9e2e48b361a534ce32",
+    "upstream/memory-store.js": "b05e7a61bef1f4a510ef467b7545d4464284d49f452e9c0669964727369a9254"
+  }
+}

@@ -1,0 +1,62 @@
+# Dependencies and build caches
+node_modules/
+.pnpm-store/
+.vite/
+.tsbuild/
+*.tsbuildinfo
+
+# Build and release output; keep apps/desktop/build/ icons in Git
+out/
+dist/
+release/
+apps/desktop/release-artifacts/
+
+# Local QA output and temporary files, including temporary icons
+.impeccable/
+coverage/
+playwright-report/
+test-results/
+*.log
+.tmp-*
+.tmp/
+/tmp/
+*.dmp
+
+# Workspace memories and local SQLite data (including sidecars)
+.harness-memory/
+.harness-tencent-memory/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Environment secrets and private signing / SSH keys
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Restore the pinned executable with scripts/provision-native-runtime.mjs
+# Keep its LICENSE, NOTICE and PROVENANCE.md in Git.
+apps/desktop/resources/native/*.exe

@@ -1,0 +1,31 @@
+{
+  "version": "2.0.3",
+  "commit": "084bed45cad6bb7f877455082cee82835d65671a",
+  "files": {
+    "core/prompts/l1-extraction.ts": "4a443a170a5c6d754c8212728a2fa23b1d1f647d49f960b7e10b6a6cc5761816",
+    "core/prompts/l1-dedup.ts": "be6c909e78bc9d8d8fa58b1111e6d7d5de41af0778fd7062ceeeababd497f389",
+    "utils/sanitize.ts": "f8953b19d70263846dd59e9a784f9414b5614e1b8780f07103f1631e457eebff",
+    "core/types.ts": "1ec3b531661e7e63371242c053c38a9dbb5f9aa70148c40f227f541cf841ef4d",
+    "core/record/l1-dedup.ts": "359cae39a3b2659760b4bf2656b7753a2c3c4dce7d0b180ee6ded6a1649204f7",
+    "core/memory-prompt/composer.ts": "085269d76f3052f184d81e8dd00b2dd137b6fd77f89d34db0053d4936e730bda",
+    "core/record/l1-extractor.ts": "eb354b4571ed088398ccd1885baee7800933d4005b4dad4e42b755d0d3ef7e7b",
+    "core/tools/memory-search.ts": "e6dc7ee33d527c4d7c2017f5a345fd4f5430f616b62d314b2c54888af3e312e8",
+    "core/skill/skill-store-ddl.ts": "0f868d156900fe103dd87e8845591fc31aa24f425fa75bccad13b62ce4ac0fad",
+    "core/store/sqlite/memory-store.ts": "3b1f68e0e068d99ba35b39d062b5d118b7b4c0d179e90ba137108a900623ff72",
+    "core/store/isolation.ts": "e9426032b390c37a340cec13207a1447bbdcc017d704421179ae7b26be9d43f3",
+    "core/profile/profile-scope.ts": "b6dea457b7ab2e9142a0e8da98d0adcd10e59e0af9e8090dfdf9d24b166fb206",
+    "core/scene/scene-derive.ts": "651369d72297187f2e3f3d9bfa84ed7b5fc7fc4fab15658ff606631cec6dd264",
+    "core/scene/scene-navigation.ts": "c67a3a45a46ee1ff2888b5e4d3d2cbc7e2ee782133d2f0e7135acdabc408017f",
+    "core/storage/profile-row-backend.ts": "42bbfd86dc104067b57af4a8321ef000bd0a37dd1bccaefc95b16577cfa0f891",
+    "core/storage/composite-backend.ts": "1258101bd99bc7aa5d88119e80a1b2b426f5292661ac7d58d8c5ce64c8d28461",
+    "core/storage/adapter.ts": "776637b25e7862a8204be8a8562426d6d7e79b10072f79e2fe925a3dd383a7af",
+    "core/memory-generation-log/types.ts": "2e8f1c66aa3056c63b7f491cef5d716a794ef2beb077433a81c9294ff158a0bd",
+    "core/tools/l1-candidate-recall.ts": "1f30af090002921c2209b78a7e97166c6eb2b71ca243c29262250d432c273668",
+    "core/storage/types.ts": "c1b96815d343a0fefc9c5b05466983ad9a3aff25bd5459424316c7f1882b9ec7",
+    "core/record/l1-writer.ts": "3856e6dd65de1bf780520e27d8f17e7c626fcd3871594a05d61a14a6ffa1232c",
+    "core/storage/list-page.ts": "8b6bdfd56ae23f29eea0b748f882fbc1eda5fbc0ac1e94d9d40df603fde3af68",
+    "core/storage/local-backend.ts": "f076a738bd06e40f8bf9076e729d51362ec15735f1022c8cbef089efc3c92d86",
+    "core/store/types.ts": "d3bb97a9a1bdea76467c050715c4da861784c0bf5a107b1232d2fb52a5b6744d",
+    "core/scene/scene-format.ts": "d4a7a908633869c3163f93d3ce8c08ce005b7afe745c4b3fa8f5e2bdad0604c6"
+  }
+}

@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { resolve, sep } from 'node:path';
+import { createRequire } from 'node:module';
+
+const require=createRequire(resolve('apps/desktop/package.json'));
+const {zipSync,strToU8}=require('fflate');
+const temporary=await mkdtemp(resolve(tmpdir(),'mingshen-v127-'));
+const profile=resolve(temporary,'profile'),screenshots=resolve('.impeccable/review');
+const requests=[],passed=[],errors=[];
+const sleep=ms=>new Promise(done=>setTimeout(done,ms));
+let child,main,renderer,holdReview=false,invalidReview=false,documentRequests=0;
+const messageText=message=>typeof message?.content==='string'?message.content:(message?.content??[]).map(part=>part.text??'').join('\n');
+function latestPlanContext(body){
+  const text=(body.input??[]).filter(item=>item.role==='user').map(messageText).findLast(value=>value.startsWith('[HOST_CONTEXT plan]'));
+  assert.equal(typeof text,'string','The real request must include the latest host plan snapshot');
+  const line=text.split('\n').findLast(value=>value.startsWith('{"revision":'));
+  assert.ok(line,'The latest host plan snapshot must include its structured revision and steps');
+  const plan=JSON.parse(line);
+  assert.ok(Number.isInteger(plan.revision)&&Array.isArray(plan.steps),'The host plan snapshot must contain a valid revision and steps');
+  return {text,plan};
+}
+const server=createServer(async(request,response)=>{
+  try {
+    const chunks=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));
+    const body=JSON.parse(Buffer.concat(chunks).toString());requests.push(body);
+    response.writeHead(200,{'Content-Type':'text/event-stream'});
+    const event=value=>response.write(`data: ${JSON.stringify(value)}\n\n`);
+    const done=()=>{event({type:'response.completed',response:{usage:{input_tokens:1800,output_tokens:60}}});response.end();};
+    const tool=(name,args)=>{event({type:'response.output_item.added',output_index:0,item:{type:'function_call',call_id:`${name}-${requests.length}`,name,arguments:''}});event({type:'response.function_call_arguments.delta',output_index:0,delta:JSON.stringify(args)});done();};
+    const {plan}=latestPlanContext(body);
+    const latest=(body.input??[]).findLast(item=>item.role==='user'&&!messageText(item).startsWith('[HOST_CONTEXT '));
+    assert.ok(latest,'The real request must contain an actual user message distinct from host state');
+    const text=messageText(latest);
+    if(plan.reviewRequired){
+      if(invalidReview){event({type:'response.output_text.delta',delta:'Unable to provide a structured plan decision.'});done();return;}
+      while(holdReview&&!response.destroyed){response.write(': review\n\n');await sleep(80);}
+      if(!response.destroyed)tool('review_plan',{revision:plan.revision,action:text.includes('UNRELATED')?'discard':'keep',reason:text.includes('UNRELATED')?'The latest request is unrelated to the interrupted plan.':'The latest request continues the same unfinished work.'});return;
+    }
+    if(text.includes('NEW_PLAN')&&!plan.steps.length){tool('update_todos',{todos:[{id:'new',content:'New request only',status:'pending',priority:'medium'}]});return;}
+    if(text.includes('DOCUMENT')){assert.ok(JSON.stringify(body.input).includes('V127 Word attachment'));assert.ok(JSON.stringify(body.input).includes('V127 PDF attachment'));documentRequests++;}
+    event({type:'response.output_text.delta',delta:'Verified current plan and uploaded document content.'});done();
+  }catch(cause){errors.push(String(cause));response.destroy();}
+});
+async function connect(port){
+  let target;for(let i=0;i<140;i++){try{target=(await fetch(`http://127.0.0.1:${port}/json`).then(r=>r.json())).find(t=>t.webSocketDebuggerUrl);if(target)break;}catch{}await sleep(70);}assert.ok(target,`No debugger ${port}`);
+  const socket=new WebSocket(target.webSocketDebuggerUrl),pending=new Map();let next=0;
+  await new Promise((done,reject)=>{socket.addEventListener('open',done,{once:true});socket.addEventListener('error',reject,{once:true});});
+  socket.addEventListener('message',event=>{const v=JSON.parse(String(event.data));if(v.method==='Runtime.exceptionThrown')errors.push(v.params.exceptionDetails.exception?.description||v.params.exceptionDetails.text);const p=pending.get(v.id);if(!p)return;pending.delete(v.id);clearTimeout(p.timer);v.error?p.reject(new Error(v.error.message)):p.done(v.result);});
+  const send=(method,params={})=>new Promise((done,reject)=>{const id=++next,timer=setTimeout(()=>{pending.delete(id);reject(new Error(`Timeout ${method}`));},20000);pending.set(id,{done,reject,timer});socket.send(JSON.stringify({id,method,params}));});
+  const evaluate=async expression=>{const v=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(v.exceptionDetails)throw new Error(v.exceptionDetails.exception?.description||v.exceptionDetails.text);return v.result.value;};return{send,evaluate,close:()=>socket.close()};
+}
+async function launch(){const env={...process.env,MSH_EXPERIMENTAL:'1',MSH_USER_DATA_DIR:profile,MSH_DISABLE_AUTO_DEPENDENCIES:'1',MSH_NOTIFICATION_FIXTURE:'1'};delete env.ELECTRON_RUN_AS_NODE;child=spawn(resolve('apps/desktop/node_modules/electron/dist/MingshenHarnessExperimental.exe'),['--inspect=9376','.','--remote-debugging-port=9375'],{cwd:resolve('apps/desktop'),env,windowsHide:true,stdio:'ignore'});main=await connect(9376);await main.evaluate('globalThis.__fetch=fetch;globalThis.fetch=(url,options)=>String(url).includes("/rest/v1/rpc/")?Promise.resolve(Response.json([])):globalThis.__fetch(url,options);true');renderer=await connect(9375);await renderer.send('Runtime.enable');}
+async function until(expression,timeout=30000){const end=Date.now()+timeout;while(Date.now()<end){if(await renderer.evaluate(expression))return;await sleep(60);}throw new Error(`Timed out: ${expression}`);}
+async function click(selector,text){const find=`[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>!el.disabled&&el.textContent.trim()===${JSON.stringify(text)})`;await until(`Boolean(${find})`);await renderer.evaluate(`${find}.click();true`);}
+async function shot(name){const result=await renderer.send('Page.captureScreenshot',{format:'png'});await writeFile(resolve(screenshots,`${name}.png`),Buffer.from(result.data,'base64'));}
+async function close(){if(!child)return;const process=child,ended=new Promise(done=>process.once('exit',done));await renderer?.evaluate('setTimeout(()=>{void window.mingshen.desktopAction("quit")},100);true').catch(()=>{});renderer?.close();main?.close();renderer=null;main=null;await Promise.race([ended,sleep(7000)]);if(process.exitCode===null){process.kill();await ended;}child=null;}
+function pdf(){const content='BT /F1 12 Tf 50 700 Td (V127 PDF attachment) Tj ET',objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',`<< /Length ${content.length} >>\nstream\n${content}\nendstream`];let value='%PDF-1.4\n';const offsets=[];for(const [i,o]of objects.entries()){offsets.push(Buffer.byteLength(value));value+=`${i+1} 0 obj\n${o}\nendobj\n`;}const xref=Buffer.byteLength(value);return Buffer.from(value+`xref\n0 6\n0000000000 65535 f \n${offsets.map(n=>`${String(n).padStart(10,'0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);}
+try{
+  await mkdir(screenshots,{recursive:true});await new Promise(done=>server.listen(0,'127.0.0.1',done));execFileSync(process.execPath,[resolve('scripts/prepare-experimental-runtime.cjs')],{windowsHide:true,stdio:'pipe'});
+  await launch();await until('Boolean(document.querySelector(".policy-consents"))');await renderer.evaluate('document.querySelectorAll(".policy-consents input").forEach(el=>el.click());true');await click('.policy-dialog button','同意并继续');await click('.policy-dialog button','开始使用');await until('!document.querySelector(".policy-dialog")');
+  const session=await renderer.evaluate(`(async()=>{const p=await window.mingshen.createProvider({name:'V127 fixture',baseUrl:'http://127.0.0.1:${server.address().port}/v1',protocol:'openai_responses',authMode:'bearer',apiKey:'local-v127-fixture',keyLabel:'Fixture',neverReveal:true});const configured=await window.mingshen.createModel({providerId:p.id,modelId:'fixture',contextWindow:200000,maxOutputTokens:4096,inputModalities:['text'],toolCalls:true,parallelToolCalls:false,reasoningLevels:[],anthropicNoneBehavior:'disabled'});for(const s of await window.mingshen.listMcpServers())if(s.enabled)await window.mingshen.setMcpServerEnabled(s.id,false);return window.mingshen.createSession({title:'Plan lifecycle 127',providerId:p.id,modelId:configured.models[0].id,workspacePath:null,reasoningLevel:null,permissionMode:'full_access',agentProfileId:'primary'});})()`);
+  await renderer.evaluate(`(async()=>window.mingshen.saveUiPreferences({...await window.mingshen.getUiPreferences(),defaultLayout:'agents'}))()`);
+  const id=JSON.stringify(session.id);await renderer.send('Page.reload');await until('Boolean(document.querySelector(".task-workbench"))');
+  const step=(name,status)=>({id:name,content:`Task ${name}`,status,priority:'medium',updatedAt:''});
+  async function setPlan(steps,paused=false){return renderer.evaluate(`(async()=>{const s=await window.mingshen.getWorkbench(${id});return window.mingshen.updatePlan({sessionId:${id},revision:s.plan.revision,steps:${JSON.stringify(steps)},paused:${paused}});})()`);}
+  async function send(text){await renderer.evaluate(`window.mingshen.sendChat({sessionId:${id},text:${JSON.stringify(text)}})`);await until(`window.mingshen.getSession(${id}).then(s=>s.status==='idle')`);}
+  await setPlan([step('done','completed')]);await send('NEW_PLAN');let state=await renderer.evaluate(`window.mingshen.getWorkbench(${id})`);assert.deepEqual(state.plan.steps.map(s=>s.id),['new']);const newPlan=latestPlanContext(requests.at(-1));assert.deepEqual(newPlan.plan.steps.map(s=>s.id),['new']);assert.ok(!newPlan.text.includes('Task done'));passed.push('Completed plan clears at next turn; new plan replaces it without reviving historical todos');
+  await setPlan([step('done','completed'),step('unfinished','in_progress')],true);holdReview=true;await renderer.evaluate(`window.mingshen.sendChat({sessionId:${id},text:'UNRELATED: answer a different question'})`);await until('document.querySelector(".task-workbench__paused")?.textContent==="待确认沿用"');assert.equal(await renderer.evaluate('document.querySelectorAll(".plan-step .spin").length'),0);await shot('v127-plan-review-zh-night');holdReview=false;await until(`window.mingshen.getSession(${id}).then(s=>s.status==='idle')`);assert.equal((await renderer.evaluate(`window.mingshen.getWorkbench(${id})`)).plan.steps.length,0);passed.push('Paused obsolete plan accepts new request, shows static review state and model discards it');
+  const kept=await setPlan([step('done','completed'),step('unfinished','in_progress')],true);await send('CONTINUE_RELATED: keep working on the same task');state=await renderer.evaluate(`window.mingshen.getWorkbench(${id})`);assert.deepEqual(state.plan.steps.map(s=>[s.id,s.status]),kept.steps.map(s=>[s.id,s.status]));assert.equal(state.plan.paused,false);assert.equal(state.plan.reviewRequired,false);assert.equal(await renderer.evaluate('document.querySelectorAll(".plan-step .spin").length'),0);passed.push('Related continuation preserves completed/in-progress IDs and ends with static status');
+  await setPlan([step('cancelled','cancelled')],true);await send('Finished cancellation, new question');assert.equal((await renderer.evaluate(`window.mingshen.getWorkbench(${id})`)).plan.steps.length,0);await close();await launch();await until('Boolean(document.querySelector(".task-workbench"))');assert.equal((await renderer.evaluate(`window.mingshen.getWorkbench(${id})`)).plan.steps.length,0);passed.push('Cancelled plans clear and restart does not resurrect removed steps');
+  await setPlan([step('invalid-review','in_progress')],true);invalidReview=true;const beforeInvalid=requests.length;await renderer.evaluate(`window.mingshen.sendChat({sessionId:${id},text:'UNRELATED review failure test'})`);await until(`window.mingshen.getSession(${id}).then(s=>s.status==='error')`);assert.equal(requests.length-beforeInvalid,3);state=await renderer.evaluate(`window.mingshen.getWorkbench(${id})`);assert.equal(state.plan.steps[0].id,'invalid-review');assert.equal(state.plan.reviewRequired,true);assert.equal(await renderer.evaluate('document.querySelectorAll(".plan-step .spin").length'),0);invalidReview=false;await send('UNRELATED retry with valid decision');assert.equal((await renderer.evaluate(`window.mingshen.getWorkbench(${id})`)).plan.steps.length,0);passed.push('Unstructured model reviews stop after three attempts, retain progress without spinning and allow a valid retry');
+  const docx=zipSync({'[Content_Types].xml':strToU8('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),'_rels/.rels':strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),'word/document.xml':strToU8('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>V127 Word attachment</w:t></w:r></w:p></w:body></w:document>')});
+  const docs=[['uploaded.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document',docx],['uploaded.pdf','application/pdf',pdf()]];
+  const files=docs.map(([name,type,bytes])=>({name,type,base64:Buffer.from(bytes).toString('base64')}));
+  await renderer.evaluate('document.querySelector(".extension-trigger").click();true');await until('Boolean(document.querySelector("input[type=file]"))');
+  await renderer.evaluate(`(()=>{const data=new DataTransfer();for(const f of ${JSON.stringify(files)})data.items.add(new File([Uint8Array.from(atob(f.base64),c=>c.charCodeAt(0))],f.name,{type:f.type}));const input=document.querySelector('input[type=file]');input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));return true;})()`);await until('document.querySelectorAll(".draft-attachment").length===2');assert.equal(await renderer.evaluate('document.querySelectorAll(".draft-attachment--incompatible").length'),0);
+  await renderer.evaluate('(()=>{const t=document.querySelector(".composer textarea");Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(t,"DOCUMENT: read both uploaded documents");t.dispatchEvent(new Event("input",{bubbles:true}));return true;})()');await until('Boolean(document.querySelector(".send-button:not(:disabled)"))');await renderer.evaluate('document.querySelector(".send-button").click();true');
+  await until(`window.mingshen.getSessionMessages(${id}).then(messages=>messages.some(m=>m.parts.some(p=>p.type==='attachment'&&p.attachment.extractedContent?.text.includes('V127 PDF attachment'))))`);await until(`window.mingshen.getSession(${id}).then(s=>s.status==='idle')`);assert.equal(documentRequests,1,'The real document request must verify both uploaded documents on the wire');await shot('v127-uploaded-documents-zh-night');passed.push('Actual file-input Word and PDF attachments work with a text-only model; extracted bytes are persisted and sent');
+  await renderer.send('Emulation.setDeviceMetricsOverride',{width:1040,height:680,deviceScaleFactor:1,mobile:false});await renderer.evaluate('window.mingshen.desktopAction("locale","en").then(()=>{localStorage.setItem("mingshen.locale","en");localStorage.setItem("mingshen.theme","day")})');await renderer.send('Page.reload');await until('document.documentElement.lang==="en"&&Boolean(document.querySelector(".task-workbench"))');
+  await setPlan([step('pending-review','in_progress')],true);holdReview=true;await renderer.evaluate(`window.mingshen.sendChat({sessionId:${id},text:'UNRELATED English request'})`);await until('document.querySelector(".task-workbench__paused")?.textContent==="Reviewing previous plan"');assert.equal(await renderer.evaluate('document.querySelectorAll(".plan-step .spin").length'),0);await shot('v127-plan-review-en-day');holdReview=false;await until(`window.mingshen.getSession(${id}).then(s=>s.status==='idle')`);
+  const version=(await renderer.evaluate('window.mingshen.getAppInfo()')).version;
+  for(const locale of ['zh-CN','en'])for(const document of ['terms','privacy','disclaimer','manual','changelog']){const text=await renderer.evaluate(`window.mingshen.readPolicy(${JSON.stringify(document)},${JSON.stringify(locale)})`);assert.ok(text.includes(version));}passed.push('English/day review status and ten embedded documents match current application version');
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({passed,requests:requests.length,screenshots,version:'1.2.7'},null,2));
+}catch(cause){console.error(JSON.stringify({passed,errors,body:await renderer?.evaluate('document.body.innerText').catch(()=>null)},null,2));if(renderer)await shot('v127-failure').catch(()=>{});throw cause;}
+finally{holdReview=false;await close();await new Promise(done=>server.close(done));if(!temporary.startsWith(resolve(tmpdir())+sep))throw new Error('Unsafe cleanup');await rm(temporary,{recursive:true,force:true,maxRetries:3,retryDelay:200});}

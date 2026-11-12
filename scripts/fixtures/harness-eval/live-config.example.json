@@ -1,0 +1,15 @@
+{
+  "isolatedProfile": true,
+  "variants": [
+    {
+      "name": "controlled-profile",
+      "apiUrl": "http://127.0.0.1:4096",
+      "tokenEnv": "MINGSHEN_EVAL_LOCAL_API_TOKEN",
+      "providerId": "replace-with-evaluation-provider-id",
+      "modelId": "replace-with-evaluation-model-config-id",
+      "reasoning": "medium",
+      "agentProfileId": "mingshen",
+      "timeoutMs": 180000
+    }
+  ]
+}

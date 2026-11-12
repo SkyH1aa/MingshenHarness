@@ -1,0 +1,550 @@
+import type { ComposerDraft, SaveComposerDraftInput } from "./composer-draft";
+import type {
+  CompletionNotificationSettings,
+  CompletionNotificationState,
+  DependencyProgress,
+  PolicyConsent,
+  PolicyDocument,
+  UpdateStatus,
+} from "./desktop";
+import type {
+  AgentProfileSaveInput,
+  AgentProfileView,
+  AgentRuntimeSettings,
+  ApprovalDecision,
+  ApprovalModelSettings,
+  ApprovalState,
+  BootstrapData,
+  BrowserProvider,
+  BrowserStatus,
+  ChatRewriteInput,
+  ChatSendInput,
+  ChatStreamEvent,
+  ConnectionTestResult,
+  CustomCommandView,
+  CustomToolView,
+  DiagnosticsReport,
+  DockerRuntimeSettings,
+  ExtensionImportResult,
+  ExtensionView,
+  GitHubConnectionStatus,
+  HeadlessServerStatus,
+  MarketplaceInstallResult,
+  MarketplaceSkill,
+  McpOAuthStartResult,
+  McpServerSaveInput,
+  McpServerTestResult,
+  McpServerView,
+  ModelCreateInput,
+  ModelDiscoveryResult,
+  ModelReference,
+  ModelUpdateInput,
+  ProjectInstructionView,
+  ProviderAddKeyInput,
+  ProviderCreateInput,
+  ProviderUpdateInput,
+  ProviderUpdateKeyInput,
+  ProviderView,
+  QuestionAnswer,
+  QuestionState,
+  ScheduledTaskCreateInput,
+  ScheduledTaskView,
+  SessionCreateInput,
+  SessionMessage,
+  SessionRetentionSettings,
+  SessionRunState,
+  SessionTodo,
+  SessionUpdateInput,
+  SessionView,
+  ShareLinkResult,
+  SnapshotRestoreResult,
+  SnapshotView,
+  ToolingServerStatus,
+  TrajectoryView,
+  UserCommandResult,
+  WorkspaceEntry,
+  WorkspaceFile,
+  WorkspaceGitStatus,
+} from "./domain";
+import type {
+  ModelCatalogPreferences,
+  MoveCatalogProviderInput,
+  SetCatalogModelStarInput,
+} from "./model-catalog";
+import type { ModelRetrySettings } from "./model-retry";
+import type {
+  ProjectMemoryConfiguration,
+  ProjectMemoryConfigurationInput,
+  ProjectMemoryEdit,
+  ProjectMemorySelection,
+  ProjectMemoryView,
+} from "./project-memory";
+import type { RendererErrorReport, RuntimeLogStatus } from "./runtime-log";
+import type { SessionBatchTarget } from "./session-catalog";
+import type { TokenSaverSettings, TokenSaverSnapshot } from "./token-saver";
+import type { UiPreferences } from "./ui-preferences";
+
+export const IPC_CHANNELS = {
+  tokenSaverGet: "token-saver:get",
+  tokenSaverSet: "token-saver:set",
+  tokenSaverRecall: "token-saver:recall",
+  editCommand: "composer:edit-command",
+  projectMemoryGet: "memory:get",
+  projectMemorySelection: "memory:selection",
+  projectMemoryConfigurationGet: "memory:configuration-get",
+  projectMemoryConfigurationSet: "memory:configuration-set",
+  projectMemoryEdit: "memory:edit",
+  projectMemoryCommand: "memory:command",
+  projectMemoryEnabled: "memory:enabled",
+  modelRetryGet: "models:retry-get",
+  modelRetrySet: "models:retry-set",
+  uiPreferencesGet: "ui:preferences-get",
+  uiPreferencesSave: "ui:preferences-save",
+  uiReloadInterface: "ui:reload-interface",
+  runtimeLogStatus: "runtime-log:status",
+  runtimeLogExport: "runtime-log:export",
+  runtimeLogReport: "runtime-log:report",
+  desktopState: "desktop:state",
+  desktopAction: "desktop:action",
+  desktopEvent: "desktop:event",
+  completionState: "notifications:state",
+  completionConfigure: "notifications:configure",
+  completionActiveSession: "notifications:active-session",
+  completionEvent: "notifications:event",
+  completionDraftAck: "notifications:draft-ack",
+  policyRead: "policy:read",
+  policyAccept: "policy:accept",
+  runtimeDependencies: "runtime:dependencies",
+  runtimeInstall: "runtime:install",
+  runtimeProgress: "runtime:progress",
+  updateStatus: "updates:status",
+  updateCheck: "updates:check",
+  updateDownload: "updates:download",
+  updateCancel: "updates:cancel",
+  updateInstall: "updates:install",
+  updateEvent: "updates:event",
+  appInfo: "app:info",
+  bootstrap: "app:bootstrap",
+  workspaceChoose: "workspace:choose",
+  modelCatalogGet: "model:catalog-get",
+  modelCatalogProviderMove: "model:catalog-provider-move",
+  modelCatalogStarSet: "model:catalog-star-set",
+  providerCreate: "provider:create",
+  providerUpdate: "provider:update",
+  providerPromptCachingSet: "provider:prompt-caching-set",
+  providerRemove: "provider:remove",
+  providerAddKey: "provider:key-add",
+  providerUpdateKey: "provider:key-update",
+  providerRemoveKey: "provider:key-remove",
+  providerSetActiveKey: "provider:key-set-active",
+  providerFetchModels: "provider:models-fetch",
+  providerTest: "provider:test",
+  modelCreate: "model:create",
+  modelUpdate: "model:update",
+  modelRemove: "model:remove",
+  sessionCreate: "session:create",
+  sessionCreateInWorkspace: "session:create-in-workspace",
+  sessionFork: "session:fork",
+  sessionOpenWorkspace: "session:open-workspace",
+  sessionUpdate: "session:update",
+  sessionRemove: "session:remove",
+  sessionMessages: "session:messages",
+  sessionOpened: "session:opened",
+  sessionRunState: "session:run-state",
+  sessionRetentionGet: "session:retention-get",
+  sessionRetentionSet: "session:retention-set",
+  chatSend: "chat:send",
+  composerDraftGet: "composer:draft-get",
+  composerDraftSave: "composer:draft-save",
+  composerDraftClear: "composer:draft-clear",
+  composerDraftFlushRequest: "composer:draft-flush-request",
+  composerDraftFlushAck: "composer:draft-flush-ack",
+  chatRewrite: "chat:rewrite",
+  chatStop: "chat:stop",
+  chatCompact: "chat:compact",
+  approvalDecide: "approval:decide",
+  approvalState: "approval:state",
+  approvalModelGet: "approval:model-get",
+  approvalModelSet: "approval:model-set",
+  approvalAutomatic: "approval:automatic",
+  compactionModelGet: "context:model-get",
+  compactionModelSet: "context:model-set",
+  compactionFallbackGet: "context:fallback-get",
+  compactionFallbackSet: "context:fallback-set",
+  contextUsage: "context:usage",
+  questionAnswer: "question:answer",
+  questionState: "question:state",
+  runtimeEvent: "runtime:event",
+  workspaceList: "workspace:list",
+  workspaceRead: "workspace:read",
+  workspaceReadAbsolute: "workspace:read-absolute",
+  workspaceWrite: "workspace:write",
+  workspaceWriteAbsolute: "workspace:write-absolute",
+  workspaceGitStatus: "workspace:git-status",
+  gitChanges: "git:changes",
+  gitLatestBackup: "git:latest-backup",
+  gitDiscard: "git:discard",
+  gitRestoreUndo: "git:restore-undo",
+  workspaceRunCommand: "workspace:run-command",
+  extensionsList: "extensions:list",
+  extensionsChooseDirectory: "extensions:choose-directory",
+  extensionsImport: "extensions:import",
+  extensionsSetEnabled: "extensions:set-enabled",
+  extensionsRemove: "extensions:remove",
+  sessionExtensionsList: "session-extensions:list",
+  sessionExtensionsSet: "session-extensions:set",
+  scheduledTasksList: "scheduled-tasks:list",
+  scheduledTasksCreate: "scheduled-tasks:create",
+  scheduledTasksSetEnabled: "scheduled-tasks:set-enabled",
+  scheduledTasksRemove: "scheduled-tasks:remove",
+  scheduledTasksRunNow: "scheduled-tasks:run-now",
+  marketplaceList: "marketplace:list",
+  marketplaceInstall: "marketplace:install",
+  mcpList: "mcp:list",
+  mcpSave: "mcp:save",
+  mcpRemove: "mcp:remove",
+  mcpSetEnabled: "mcp:set-enabled",
+  mcpTest: "mcp:test",
+  mcpOAuthStart: "mcp:oauth-start",
+  agentProfilesList: "agents:profiles-list",
+  agentProfileSave: "agents:profile-save",
+  agentProfileRemove: "agents:profile-remove",
+  projectInstructions: "agents:project-instructions",
+  projectTrustGet: "workspace:trust-get",
+  projectTrustSet: "workspace:trust-set",
+  diagnosticsRun: "workspace:diagnostics-run",
+  snapshotsList: "workspace:snapshots-list",
+  snapshotRestore: "workspace:snapshot-restore",
+  trajectoriesList: "trajectories:list",
+  trajectoryExport: "trajectories:export",
+  customCommandsList: "commands:list",
+  sessionTodos: "session-todos:list",
+  workbenchGet: "workbench:get",
+  subagentOutput: "workbench:subagent-output",
+  workbenchPlanUpdate: "workbench:plan-update",
+  workbenchResume: "workbench:resume",
+  projectPlansList: "workbench:plans-list",
+  projectPlanSave: "workbench:plan-save",
+  projectPlanApply: "workbench:plan-apply",
+  projectPlanRemove: "workbench:plan-remove",
+  sessionPage: "session:page",
+  sessionDelta: "session:delta",
+  sessionGet: "session:get",
+  sessionGroups: "session:groups",
+  toolingStatus: "tooling:status",
+  customToolsList: "tools:custom-list",
+  agentRuntimeSettingsGet: "agents:runtime-settings-get",
+  agentRuntimeSettingsSet: "agents:runtime-settings-set",
+  dockerSettingsGet: "docker:settings-get",
+  dockerSettingsSet: "docker:settings-set",
+  headlessServerStatus: "server:status",
+  headlessServerStart: "server:start",
+  headlessServerStop: "server:stop",
+  sessionShare: "session:share",
+  sessionExport: "session:export",
+  pluginHooksGet: "extensions:plugin-hooks-get",
+  pluginHooksSet: "extensions:plugin-hooks-set",
+  browserOpen: "browser:open",
+  browserRegisterWebContents: "browser:register-web-contents",
+  browserStatus: "browser:status",
+  browserClose: "browser:close",
+  openExternalUrl: "system:open-external-url",
+  openLocalPath: "system:open-local-path",
+  githubConnectionStatus: "github:connection-status",
+  githubSetToken: "github:set-token",
+  githubDeviceStart: "github:device-start",
+  githubDevicePending: "github:device-pending",
+  githubDevicePoll: "github:device-poll",
+  githubDeviceCancel: "github:device-cancel",
+  githubDisconnect: "github:disconnect",
+} as const;
+
+export interface AppInfo {
+  name: string;
+  version: string;
+  platform: "win32" | "darwin" | "linux";
+  isPackaged: boolean;
+}
+
+export type ComposerDraftFlushPurpose = "save" | "shutdown" | "interface-reload";
+
+export interface MingshenDesktopApi {
+  getTokenSaver(sessionId?: string | null): Promise<TokenSaverSnapshot>;
+  setTokenSaver(settings: TokenSaverSettings): Promise<TokenSaverSettings>;
+  recallContext(
+    sessionId: string,
+    messageId: string,
+    partIndex: number,
+    startLine?: number,
+    charOffset?: number,
+  ): Promise<string>;
+  getProjectMemory(sessionId: string): Promise<ProjectMemoryView>;
+  getProjectMemorySelection(workspacePath: string | null): Promise<ProjectMemorySelection>;
+  getProjectMemoryConfiguration(workspacePath: string): Promise<ProjectMemoryConfiguration>;
+  setProjectMemoryConfiguration(
+    input: ProjectMemoryConfigurationInput,
+  ): Promise<ProjectMemoryConfiguration>;
+  editProjectMemory(input: ProjectMemoryEdit): Promise<void>;
+  projectMemoryCommand(sessionId: string, command: string): Promise<string>;
+  setProjectMemoryEnabled(sessionId: string, enabled: boolean): Promise<void>;
+  editCommand(command: "copy" | "cut" | "paste" | "selectAll"): Promise<void>;
+  getModelRetrySettings(): Promise<ModelRetrySettings>;
+  setModelRetrySettings(settings: ModelRetrySettings): Promise<ModelRetrySettings>;
+  getUiPreferences(): Promise<UiPreferences>;
+  saveUiPreferences(preferences: UiPreferences): Promise<void>;
+  reloadInterface(): Promise<void>;
+  getRuntimeLogStatus(): Promise<RuntimeLogStatus>;
+  exportRuntimeLogs(): Promise<string | null>;
+  reportRuntimeError(report: RendererErrorReport): Promise<void>;
+  getCompletionNotifications(): Promise<CompletionNotificationState>;
+  acknowledgeNotificationDraft(id: string): Promise<void>;
+  configureCompletionNotifications(
+    settings: CompletionNotificationSettings,
+  ): Promise<CompletionNotificationState>;
+  setActiveNotificationSession(sessionId: string | null): Promise<void>;
+  onCompletionNotifications(listener: (state: CompletionNotificationState) => void): () => void;
+  getRuntimeDependencies(): Promise<{
+    native: boolean;
+    nativeDetail: string;
+    wsl: boolean;
+    wslDetail: string;
+    docker: boolean;
+    dockerDetail: string;
+    browserdo: boolean;
+    browserDetail: string;
+  }>;
+  installRuntimeDependency(name: "docker" | "embiody" | "wsl"): Promise<string>;
+  onDependencyProgress(listener: (progress: DependencyProgress) => void): () => void;
+  getUpdateStatus(): Promise<UpdateStatus>;
+  checkForUpdates(): Promise<UpdateStatus>;
+  downloadUpdate(): Promise<UpdateStatus>;
+  cancelUpdate(): Promise<UpdateStatus>;
+  installUpdate(): Promise<UpdateStatus>;
+  onUpdateEvent(listener: (event: { status: UpdateStatus; notify: boolean }) => void): () => void;
+  getDesktopState(): Promise<{
+    accepted: boolean;
+    manualPending: boolean;
+    policyVersion: string;
+    locale: "zh-CN" | "en";
+    closeAction: "ask" | "tray" | "quit";
+    githubClientId: string;
+    maximized: boolean;
+  }>;
+  desktopAction(
+    action:
+      | "minimize"
+      | "show"
+      | "maximize"
+      | "close"
+      | "tray"
+      | "quit"
+      | "cancel-close"
+      | "locale"
+      | "close-preference"
+      | "manual"
+      | "finish-onboarding",
+    value?: string,
+    remember?: boolean,
+  ): Promise<void>;
+  onDesktopEvent(
+    listener: (event: {
+      type:
+        | "close-request"
+        | "select-session"
+        | "window-state"
+        | "open-manual"
+        | "composer-draft-error"
+        | "notification-reply-failed";
+      sessionId?: string;
+      maximized?: boolean;
+      tasks?: number;
+      runningConversations?: number;
+      text?: string;
+      error?: string;
+      draftId?: string;
+    }) => void,
+  ): () => void;
+  readPolicy(document: PolicyDocument, locale?: "en" | "zh-CN"): Promise<string>;
+  acceptPolicies(consent: PolicyConsent): Promise<void>;
+  getAppInfo(): Promise<AppInfo>;
+  bootstrap(options?: { paged?: boolean; selectedId?: string | null }): Promise<BootstrapData>;
+  listSessionPage(
+    input: import("./session-catalog").SessionPageInput,
+  ): Promise<import("./session-catalog").SessionPage>;
+  getSessionDelta(
+    after: number,
+    ids: string[],
+  ): Promise<import("./session-catalog").SessionCatalogDelta>;
+  getSession(sessionId: string): Promise<SessionView | null>;
+  listSessionGroups(): Promise<import("./session-catalog").SessionWorkspaceGroup[]>;
+  chooseWorkspace(): Promise<string | null>;
+  getModelCatalogPreferences(): Promise<ModelCatalogPreferences>;
+  moveCatalogProvider(input: MoveCatalogProviderInput): Promise<ModelCatalogPreferences>;
+  setCatalogModelStar(input: SetCatalogModelStarInput): Promise<ModelCatalogPreferences>;
+  createProvider(input: ProviderCreateInput): Promise<ProviderView>;
+  updateProvider(input: ProviderUpdateInput): Promise<ProviderView>;
+  setProviderPromptCaching(
+    providerId: string,
+    settings: import("./prompt-caching").PromptCachingSettings,
+  ): Promise<ProviderView>;
+  removeProvider(providerId: string): Promise<void>;
+  addProviderKey(input: ProviderAddKeyInput): Promise<ProviderView>;
+  updateProviderKey(input: ProviderUpdateKeyInput): Promise<ProviderView>;
+  removeProviderKey(providerId: string, keyId: string): Promise<ProviderView>;
+  setActiveProviderKey(providerId: string, keyId: string): Promise<ProviderView>;
+  fetchProviderModels(providerId: string): Promise<ModelDiscoveryResult>;
+  testProvider(providerId: string, modelConfigId: string): Promise<ConnectionTestResult>;
+  createModel(input: ModelCreateInput): Promise<ProviderView>;
+  updateModel(input: ModelUpdateInput): Promise<ProviderView>;
+  removeModel(modelConfigId: string): Promise<ProviderView>;
+  createSession(input: SessionCreateInput): Promise<SessionView>;
+  createSessionInWorkspace(workspacePath: string | null): Promise<SessionView>;
+  forkSession(sessionId: string, messageId?: string): Promise<SessionView>;
+  openSessionWorkspace(sessionId: string): Promise<void>;
+  updateSession(input: SessionUpdateInput, expected?: SessionBatchTarget[]): Promise<SessionView>;
+  removeSession(sessionId: string, expected?: SessionBatchTarget[]): Promise<void>;
+  getSessionMessages(sessionId: string): Promise<SessionMessage[]>;
+  markSessionOpened(sessionId: string | null): Promise<void>;
+  getSessionRunState(sessionId: string): Promise<SessionRunState | null>;
+  getSessionRetention(): Promise<SessionRetentionSettings>;
+  setSessionRetention(settings: SessionRetentionSettings): Promise<SessionRetentionSettings>;
+  sendChat(input: ChatSendInput): Promise<{ runId: string }>;
+  getComposerDraft(sessionId: string): Promise<ComposerDraft | null>;
+  saveComposerDraft(input: SaveComposerDraftInput): Promise<void>;
+  clearComposerDraft(sessionId: string, revision: string): Promise<boolean>;
+  onComposerDraftFlush(
+    listener: (requestId: string, purpose: ComposerDraftFlushPurpose) => void,
+  ): () => void;
+  acknowledgeComposerDraftFlush(requestId: string, error?: string): void;
+  rewriteAndSendChat(input: ChatRewriteInput): Promise<{ runId: string }>;
+  stopChat(sessionId: string): Promise<void>;
+  compactChat(sessionId: string): Promise<{ runId: string }>;
+  decideApproval(input: ApprovalDecision): Promise<void>;
+  getApprovalState(): Promise<ApprovalState>;
+  getQuestionState(): Promise<QuestionState>;
+  getApprovalModelSettings(): Promise<ApprovalModelSettings>;
+  setApprovalModelSettings(settings: ApprovalModelSettings): Promise<ApprovalModelSettings>;
+  startAutomaticApproval(sessionId: string): Promise<SessionView>;
+  getGlobalCompactionModel(): Promise<ModelReference | null>;
+  setGlobalCompactionModel(model: ModelReference | null): Promise<ModelReference | null>;
+  getCompactionFallbackModel(): Promise<ModelReference | null>;
+  setCompactionFallbackModel(model: ModelReference | null): Promise<ModelReference | null>;
+  getContextUsage(sessionId: string): Promise<import("./domain").ContextUsageView | null>;
+  answerQuestion(input: QuestionAnswer): Promise<void>;
+  onRuntimeEvent(listener: (event: ChatStreamEvent) => void): () => void;
+  listWorkspace(root: string, relativePath: string): Promise<WorkspaceEntry[]>;
+  readWorkspaceFile(root: string, relativePath: string): Promise<WorkspaceFile>;
+  readAbsoluteFile(path: string): Promise<WorkspaceFile>;
+  writeWorkspaceFile(root: string, relativePath: string, content: string): Promise<void>;
+  writeAbsoluteFile(path: string, content: string): Promise<void>;
+  getGitStatus(root: string): Promise<WorkspaceGitStatus>;
+  getGitChanges(root: string): Promise<{ root: string; paths: string[] }>;
+  getLatestGitBackup(root: string): Promise<string | null>;
+  discardGitChanges(root: string, paths?: string[]): Promise<{ backupId: string; paths: string[] }>;
+  restoreGitUndo(root: string, backupId: string): Promise<void>;
+  runUserCommand(root: string, command: string): Promise<UserCommandResult>;
+  listExtensions(): Promise<ExtensionView[]>;
+  chooseExtensionDirectory(): Promise<string | null>;
+  importExtensions(sourceDirectory: string): Promise<ExtensionImportResult>;
+  setExtensionEnabled(extensionId: string, enabled: boolean): Promise<void>;
+  removeExtension(extensionId: string): Promise<void>;
+  listSessionExtensions(sessionId: string): Promise<string[]>;
+  setSessionExtension(sessionId: string, extensionId: string, enabled: boolean): Promise<void>;
+  listScheduledTasks(): Promise<ScheduledTaskView[]>;
+  createScheduledTask(input: ScheduledTaskCreateInput): Promise<ScheduledTaskView>;
+  setScheduledTaskEnabled(taskId: string, enabled: boolean): Promise<ScheduledTaskView>;
+  removeScheduledTask(taskId: string): Promise<void>;
+  runScheduledTaskNow(taskId: string): Promise<void>;
+  listMarketplaceSkills(
+    source: MarketplaceSkill["source"],
+    forceRefresh?: boolean,
+  ): Promise<MarketplaceSkill[]>;
+  installMarketplaceSkill(
+    source: MarketplaceSkill["source"],
+    path: string,
+  ): Promise<MarketplaceInstallResult>;
+  listMcpServers(): Promise<McpServerView[]>;
+  saveMcpServer(input: McpServerSaveInput): Promise<McpServerView>;
+  removeMcpServer(id: string): Promise<void>;
+  setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerView>;
+  testMcpServer(id: string): Promise<McpServerTestResult>;
+  startMcpOAuth(id: string): Promise<McpOAuthStartResult>;
+  listAgentProfiles(): Promise<AgentProfileView[]>;
+  saveAgentProfile(input: AgentProfileSaveInput): Promise<AgentProfileView>;
+  removeAgentProfile(id: string): Promise<void>;
+  discoverProjectInstructions(workspacePath: string): Promise<ProjectInstructionView[]>;
+  getProjectTrust(workspacePath: string): Promise<boolean>;
+  setProjectTrust(workspacePath: string, trusted: boolean): Promise<void>;
+  runDiagnostics(workspacePath: string, changedPaths: string[]): Promise<DiagnosticsReport>;
+  listSnapshots(sessionId: string): Promise<SnapshotView[]>;
+  restoreSnapshot(snapshotId: string, workspacePath: string): Promise<SnapshotRestoreResult>;
+  listTrajectories(sessionId: string, runId?: string): Promise<TrajectoryView[]>;
+  exportTrajectory(
+    sessionId: string,
+    runId: string,
+    format: "json" | "markdown",
+  ): Promise<string | null>;
+  listCustomCommands(workspacePath: string | null): Promise<CustomCommandView[]>;
+  listSessionTodos(sessionId: string): Promise<SessionTodo[]>;
+  getWorkbench(sessionId: string): Promise<import("./workbench").WorkbenchState>;
+  getSubagentOutput(
+    parentId: string,
+    sessionId: string,
+  ): Promise<import("./workbench").SubagentOutputPreview>;
+  updatePlan(
+    input: import("./workbench").PlanUpdateInput,
+  ): Promise<import("./workbench").SessionPlan>;
+  resumeTask(sessionId: string): Promise<{ runId: string }>;
+  listProjectPlans(workspacePath: string | null): Promise<import("./workbench").SavedProjectPlan[]>;
+  saveProjectPlan(
+    sessionId: string,
+    name: string,
+    id?: string,
+  ): Promise<import("./workbench").SavedProjectPlan>;
+  applyProjectPlan(
+    sessionId: string,
+    planId: string,
+    revision: number,
+    resetCompleted?: boolean,
+  ): Promise<import("./workbench").SessionPlan>;
+  removeProjectPlan(id: string): Promise<void>;
+  getToolingStatus(workspacePath: string): Promise<ToolingServerStatus[]>;
+  listCustomTools(workspacePath: string | null): Promise<CustomToolView[]>;
+  getAgentRuntimeSettings(): Promise<AgentRuntimeSettings>;
+  setAgentRuntimeSettings(settings: AgentRuntimeSettings): Promise<AgentRuntimeSettings>;
+  getDockerSettings(): Promise<DockerRuntimeSettings>;
+  setDockerSettings(settings: DockerRuntimeSettings): Promise<void>;
+  getHeadlessServerStatus(): Promise<HeadlessServerStatus>;
+  startHeadlessServer(host?: string, port?: number): Promise<HeadlessServerStatus>;
+  stopHeadlessServer(): Promise<void>;
+  createSessionShare(sessionId: string): Promise<ShareLinkResult>;
+  exportSession(sessionId: string, format: "json" | "markdown"): Promise<string | null>;
+  getPluginShellHooksEnabled(): Promise<boolean>;
+  setPluginShellHooksEnabled(enabled: boolean): Promise<void>;
+  openBrowser(sessionId: string, provider: BrowserProvider, url?: string): Promise<BrowserStatus>;
+  registerBrowserWebContents(
+    sessionId: string,
+    provider: BrowserProvider,
+    webContentsId: number,
+  ): Promise<BrowserStatus>;
+  getBrowserStatus(sessionId: string): Promise<BrowserStatus>;
+  closeBrowser(sessionId: string): Promise<void>;
+  openExternalUrl(url: string): Promise<void>;
+  openLocalPath(path: string, workspacePath?: string | null): Promise<void>;
+  getGitHubStatus(): Promise<GitHubConnectionStatus>;
+  startGitHubAuthorization(
+    clientId: string,
+  ): Promise<{ userCode: string; verificationUrl: string; expiresAt: number }>;
+  getGitHubAuthorization(): Promise<{
+    userCode: string;
+    verificationUrl: string;
+    expiresAt: number;
+  } | null>;
+  pollGitHubAuthorization(): Promise<{
+    status: "pending" | "connected";
+    connection?: GitHubConnectionStatus;
+  }>;
+  cancelGitHubAuthorization(): Promise<void>;
+  setGitHubToken(token: string): Promise<GitHubConnectionStatus>;
+  disconnectGitHub(): Promise<void>;
+}
