@@ -218,6 +218,163 @@ describe("Subagent concurrency", () => {
     );
   });
 
+  it("runs SubagentStop through the parent session with child metadata", async () => {
+    const child = { id: "child", status: "idle" };
+    const runPluginHooks = vi.fn(async (..._args: unknown[]) => undefined);
+    const chat = new ChatService({
+      repository: {
+        getAgentProfile: (id: string) =>
+          id === "parent-profile"
+            ? { id, permissions: {}, readOnly: false }
+            : {
+                id: "worker",
+                name: "Worker",
+                role: "subagent",
+                modelId: null,
+                enabled: true,
+                readOnly: false,
+                permissions: {},
+                toolAllowlist: [],
+              },
+        listAgentProfiles: () => [
+          {
+            id: "worker",
+            name: "Worker",
+            role: "subagent",
+            modelId: null,
+            enabled: true,
+            readOnly: false,
+            permissions: {},
+            toolAllowlist: [],
+          },
+        ],
+        getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+        getProvider: () => ({ id: "provider" }),
+        insertSession: () => child,
+        listSessionExtensionIds: () => [],
+        getSession: () => child,
+        getMessages: () => [
+          { role: "assistant", parts: [{ type: "text", text: "Child finished" }] },
+        ],
+      },
+      pluginHookService: {},
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    Object.defineProperty(chat, "send", {
+      value: vi.fn().mockResolvedValue({ runId: "child-run" }),
+    });
+    Object.defineProperty(chat, "waitForRun", { value: vi.fn().mockResolvedValue(undefined) });
+    const internal = chat as unknown as {
+      runPluginHooks: (...args: unknown[]) => Promise<void>;
+      runSubagent: (
+        session: SessionView,
+        signal: AbortSignal,
+        args: object,
+        parentRunId?: string,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    internal.runPluginHooks = runPluginHooks;
+    const signal = new AbortController().signal;
+    const parent = {
+      id: "parent",
+      agentProfileId: "parent-profile",
+      agentMode: "code",
+      providerId: "provider",
+      modelId: "model",
+      workspacePath: process.cwd(),
+      permissionMode: "full_access",
+      executionMode: "host",
+      parentSessionId: null,
+      status: "running",
+    } as SessionView;
+
+    await expect(
+      internal.runSubagent(parent, signal, { task: "inspect", agent: "worker" }, "parent-run"),
+    ).resolves.toEqual({ output: "Child finished", isError: false });
+    expect(runPluginHooks).toHaveBeenCalledExactlyOnceWith(
+      "SubagentStop",
+      parent,
+      "parent-run",
+      signal,
+      expect.objectContaining({
+        agentId: "child",
+        metadata: expect.objectContaining({
+          childSessionId: "child",
+          status: "idle",
+          output: "Child finished",
+        }),
+      }),
+    );
+  });
+
+  it("keeps a subagent active under the parent cancellation signal without a wall-clock deadline", async () => {
+    const child = { id: "child", status: "running" };
+    const parentController = new AbortController();
+    let childSignal: AbortSignal | undefined;
+    const chat = new ChatService({
+      repository: {
+        getAgentProfile: () => ({ id: "parent-profile", readOnly: false, permissions: {} }),
+        listAgentProfiles: () => [
+          {
+            id: "worker",
+            name: "Worker",
+            role: "subagent",
+            modelId: null,
+            enabled: true,
+            readOnly: false,
+            permissions: {},
+            toolAllowlist: [],
+          },
+        ],
+        getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+        getProvider: () => ({ id: "provider" }),
+        insertSession: () => child,
+        listSessionExtensionIds: () => [],
+        getSession: () => child,
+        getMessages: () => [],
+      },
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    Object.defineProperty(chat, "send", {
+      value: vi.fn(async (_input: object, signal: AbortSignal) => {
+        childSignal = signal;
+        return { runId: "child-run" };
+      }),
+    });
+    Object.defineProperty(chat, "waitForRun", {
+      value: vi.fn(
+        (_runId: string, signal: AbortSignal) =>
+          new Promise<void>((_resolve, reject) => {
+            const abort = () => reject(signal.reason);
+            if (signal.aborted) abort();
+            else signal.addEventListener("abort", abort, { once: true });
+          }),
+      ),
+    });
+    const internal = chat as unknown as {
+      runSubagent: (
+        session: SessionView,
+        signal: AbortSignal,
+        args: object,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    const running = internal.runSubagent(
+      {
+        id: "parent",
+        agentProfileId: "parent-profile",
+        providerId: "provider",
+        modelId: "model",
+        workspacePath: null,
+      } as SessionView,
+      parentController.signal,
+      { task: "long investigation", agent: "worker" },
+    );
+    await vi.waitFor(() => expect(childSignal).toBe(parentController.signal));
+    expect(childSignal?.aborted).toBe(false);
+    parentController.abort(new Error("parent stopped"));
+    await expect(running).resolves.toMatchObject({ isError: true });
+  });
+
   it("rejects recursive delegation and writable children from read-only parents", async () => {
     const chat = new ChatService({
       repository: {
@@ -321,7 +478,7 @@ describe("Subagent concurrency", () => {
     } as unknown as ConstructorParameters<typeof ChatService>[0]);
     const internal = chat as unknown as {
       runPluginHooks: (
-        event: "Stop" | "SubagentStop" | "Interrupt",
+        event: "PreToolUse" | "PostToolUse" | "Stop" | "SubagentStop" | "Interrupt",
         session: SessionView,
         runId: string,
         signal: AbortSignal,
@@ -351,6 +508,7 @@ describe("Subagent concurrency", () => {
       "root-run",
       signal,
       expect.any(Function),
+      {},
     );
     expect(emit).not.toHaveBeenCalled();
   });

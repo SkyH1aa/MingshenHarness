@@ -5,15 +5,23 @@ import { createServer } from 'node:http';
 import { createServer as createPortServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
+import { experimentalExecutable } from './experimental-executable.mjs';
 
 // All runtime records below are produced by a local fixture in its own profile.
 const { version } = JSON.parse(await readFile('package.json', 'utf8'));
 const temporary = await mkdtemp(resolve(tmpdir(), 'mingshen-orbit-rebuild-'));
 const profile = resolve(temporary, 'profile');
 const project = resolve(temporary, 'orbit-workbench');
-const screenshots = resolve('.impeccable/review');
+const startedAt = Date.now();
+const screenshots = resolve('.impeccable/review', `v133-orbit-layout-${startedAt}`);
 const passed = [], requests = [], exceptions = [], serverErrors = [], captures = [];
 const sleep = ms => new Promise(done => setTimeout(done, ms));
+const boundaries = [
+  'Only isolated profile/project and an owned local Responses SSE fixture; no paid model, private profile or system clipboard.',
+  'Files, command output, plan, child records and queue entries come from actual application actions.',
+  'Layout checks cover 1440x900, 1280x800, 800x600 and a 720x450 CSS viewport equivalent to 200% scaling at 1440x900; they do not certify the full Windows system-DPI or assistive-technology matrix.',
+  'No installer generation, installation, update or cloud write.',
+];
 const sourceBefore = [
   'export interface WorkbenchLayout {',
   '  inspector: boolean;',
@@ -48,7 +56,7 @@ const longModel = {
   displayName: 'Orbit precision reasoning model with a deliberately long display name',
   modelId: 'orbit-label-long-fixture',
 };
-let child, main, renderer, fixture, releaseParent = false, parentHolding = false;
+let child, main, renderer, rendererPort, fixture, releaseParent = false, parentHolding = false;
 
 function finish(response, text, output) {
   if (response.destroyed) return;
@@ -182,7 +190,9 @@ async function connect(port, surface) {
   for (let index = 0; index < 160; index++) {
     try {
       target = (await fetch(`http://127.0.0.1:${port}/json`).then(value => value.json()))
-        .find(item => item.webSocketDebuggerUrl && (surface !== 'renderer' || item.type === 'page'));
+        .find(item => item.webSocketDebuggerUrl &&
+          (surface === 'quick' ? item.type === 'page' && item.url.includes('surface=quick-chat') :
+            surface !== 'renderer' || item.type === 'page' && !item.url.includes('surface=quick-chat')));
       if (target) break;
     } catch {}
     await sleep(100);
@@ -197,7 +207,7 @@ async function connect(port, surface) {
   });
   socket.addEventListener('message', event => {
     const value = JSON.parse(String(event.data));
-    if (surface === 'renderer' && value.method === 'Runtime.exceptionThrown') {
+    if ((surface === 'renderer' || surface === 'quick') && value.method === 'Runtime.exceptionThrown') {
       exceptions.push(value.params.exceptionDetails.exception?.description || value.params.exceptionDetails.text);
     }
     const waiter = pending.get(value.id);
@@ -250,6 +260,20 @@ async function click(selector, text) {
   await renderer.evaluate(`${target}.click();true`);
 }
 
+async function clickByPointer(selector) {
+  const target = JSON.stringify(selector);
+  await until(`(()=>{const el=document.querySelector(${target}),r=el?.getBoundingClientRect();return Boolean(el&&!el.matches(':disabled')&&r&&r.width>0&&r.height>0)})()`);
+  const point = await renderer.evaluate(`(()=>{
+    const el=document.querySelector(${target}),r=el.getBoundingClientRect();
+    const x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y);
+    return {x,y,foreground:Boolean(hit&&el.contains(hit))};
+  })()`);
+  assert.equal(point.foreground, true, `Control is not pointer-reachable: ${selector}`);
+  await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0 });
+  await renderer.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 });
+  await renderer.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', buttons: 0, clickCount: 1 });
+}
+
 async function fill(selector, text) {
   await until(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
   await renderer.evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();el.select();return true})()`);
@@ -268,6 +292,32 @@ async function viewport(width, height, scale = 1) {
   await sleep(180);
 }
 
+async function closeWorkbenchDrawers() {
+  for (let index = 0; index < 3; index++) {
+    const visible = await renderer.evaluate(`(()=>{
+      const scrim=document.querySelector('.workbench-drawer-scrim');
+      return Boolean(scrim&&scrim.getBoundingClientRect().width>0);
+    })()`);
+    if (!visible) break;
+    await renderer.evaluate(`(()=>{
+      document.querySelector('.workbench-drawer-scrim')?.click();
+      return true;
+    })()`);
+    await sleep(120);
+  }
+  await until(`![...document.querySelectorAll('.workbench-drawer-scrim')]
+    .some(el=>el.getBoundingClientRect().width>0)`);
+}
+
+async function restoreWidePanels() {
+  await viewport(1440, 900);
+  if (await renderer.evaluate('document.querySelector(".sidebar-host")?.hidden')) {
+    await click('.orbit-workspace-header > button:first-child');
+  }
+  await rail('review');
+  await until('document.querySelector(".inspector-host")?.getBoundingClientRect().width>0&&document.querySelector(".task-host--docked")?.getBoundingClientRect().width>0');
+}
+
 async function shot(name) {
   await renderer.send('Page.bringToFront');
   await until('document.visibilityState==="visible"');
@@ -277,6 +327,334 @@ async function shot(name) {
   const path = resolve(screenshots, `orbit-rebuild-${name}.png`);
   await writeFile(path, Buffer.from(image.data, 'base64'));
   captures.push(path);
+}
+
+async function captionGeometry(label) {
+  const state = await renderer.evaluate(`(()=>{
+    const box=selector=>{
+      const el=document.querySelector(selector),r=el?.getBoundingClientRect();
+      return r&&r.width>1&&r.height>1
+        ?{selector,left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}
+        :null;
+    };
+    const brand=box('.app-topbar--orbit .brand');
+    const modes=box('[data-testid="agent-mode-switcher"]');
+    const actions=box('.app-topbar--orbit .topbar-actions');
+    const windows=box('.desktop-caption__actions');
+    const mark=box('.orbit-style-mark');
+    const visibleButtons=[...document.querySelectorAll('.desktop-caption button')].filter(el=>{
+      const r=el.getBoundingClientRect();
+      return r.width>1&&r.height>1;
+    }).map(el=>{
+      const r=el.getBoundingClientRect();
+      return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};
+    });
+    const intersects=(left,right)=>Boolean(left&&right&&
+      Math.min(left.right,right.right)-Math.max(left.left,right.left)>1&&
+      Math.min(left.bottom,right.bottom)-Math.max(left.top,right.top)>1);
+    return {
+      width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth+1,
+      brand,modes,actions,windows,mark,visibleButtons,
+      overlaps:{
+        brandModes:intersects(brand,modes),
+        brandActions:intersects(brand,actions),
+        modesActions:intersects(modes,actions),
+        brandWindows:intersects(brand,windows),
+        modesWindows:intersects(modes,windows),
+        actionsWindows:intersects(actions,windows),
+        markModes:intersects(mark,modes),
+        markActions:intersects(mark,actions),
+      },
+    };
+  })()`);
+  assert.equal(state.overflow, false, `Caption overflow at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.brand && state.modes && state.actions && state.windows,
+    `Caption controls must remain rendered at ${label}: ${JSON.stringify(state)}`);
+  assert.deepEqual(state.overlaps, {
+    brandModes: false,
+    brandActions: false,
+    modesActions: false,
+    brandWindows: false,
+    modesWindows: false,
+    actionsWindows: false,
+    markModes: false,
+    markActions: false,
+  }, `Caption content overlaps at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.visibleButtons.length >= 3 && state.visibleButtons.every(button =>
+    button.left >= -1 && button.right <= state.width + 1 && button.top >= -1),
+  `Caption buttons must remain reachable at ${label}: ${JSON.stringify(state)}`);
+  return state;
+}
+
+async function assertFloatingSurface(selector, label, options = {}) {
+  const state = await renderer.evaluate(`(()=>{
+    const el=document.querySelector(${JSON.stringify(selector)});
+    if(!el)return null;
+    const r=el.getBoundingClientRect();
+    const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+    const composer=el.closest('.composer')?.getBoundingClientRect();
+    return {
+      viewport:{width:innerWidth,height:innerHeight},
+      overflow:document.documentElement.scrollWidth>innerWidth+1,
+      rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height},
+      client:{width:el.clientWidth,height:el.clientHeight},
+      scroll:{width:el.scrollWidth,height:el.scrollHeight},
+      foreground:Boolean(hit&&el.contains(hit)),
+      composer:composer?{left:composer.left,right:composer.right,top:composer.top,bottom:composer.bottom}:null,
+    };
+  })()`);
+  assert.ok(state && state.rect.width > 40 && state.rect.height > 30,
+    `${label} must remain visibly rendered: ${JSON.stringify(state)}`);
+  assert.equal(state.overflow, false, `${label} caused document overflow: ${JSON.stringify(state)}`);
+  assert.equal(state.foreground, true, `${label} is occluded: ${JSON.stringify(state)}`);
+  assert.ok(state.rect.left >= -1 && state.rect.right <= state.viewport.width + 1 &&
+    state.rect.top >= -1 && state.rect.bottom <= state.viewport.height + 1,
+  `${label} escaped the viewport: ${JSON.stringify(state)}`);
+  assert.ok(state.scroll.width <= state.client.width + 2,
+    `${label} has internal horizontal overflow: ${JSON.stringify(state)}`);
+  if (options.withinComposer) {
+    assert.ok(state.composer && state.rect.top >= state.composer.top - 2 &&
+      state.rect.bottom <= state.composer.bottom + 2,
+    `${label} escaped the composer: ${JSON.stringify(state)}`);
+  }
+  return state;
+}
+
+async function composerGeometry(label) {
+  const state = await renderer.evaluate(`(()=>{
+    const box=selector=>{
+      const el=document.querySelector(selector),r=el?.getBoundingClientRect();
+      return r&&r.width>1&&r.height>1
+        ?{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
+          clientWidth:el.clientWidth,scrollWidth:el.scrollWidth}
+        :null;
+    };
+    const composer=document.querySelector('.composer');
+    const textarea=document.querySelector('[data-testid="chat-composer-input"]');
+    const visibleChildren=[...(composer?.children??[])].filter(el=>{
+      const r=el.getBoundingClientRect(),style=getComputedStyle(el);
+      return r.width>1&&r.height>1&&style.visibility!=='hidden';
+    }).map(el=>{
+      const r=el.getBoundingClientRect();
+      return {className:el.className,left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+        width:r.width,height:r.height,clientWidth:el.clientWidth,scrollWidth:el.scrollWidth};
+    });
+    const overlapCount=items=>{
+      let count=0;
+      for(let left=0;left<items.length;left++){
+        for(let right=left+1;right<items.length;right++){
+          const a=items[left],b=items[right];
+          if(Math.min(a.right,b.right)-Math.max(a.left,b.left)>1&&
+            Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>1)count++;
+        }
+      }
+      return count;
+    };
+    return {
+      viewport:{width:innerWidth,height:innerHeight},
+      overflow:document.documentElement.scrollWidth>innerWidth+1,
+      composer:box('.composer'),
+      context:box('.composer__context'),
+      textarea:box('[data-testid="chat-composer-input"]'),
+      footer:box('.composer__footer'),
+      textareaHidden:Boolean(textarea?.hidden),
+      textareaDisabled:Boolean(textarea?.disabled),
+      directChildOverlap:overlapCount(visibleChildren),
+      directChildOverflow:visibleChildren.some(child=>child.scrollWidth>child.clientWidth+2),
+      visibleChildren,
+    };
+  })()`);
+  assert.equal(state.overflow, false, `Composer caused document overflow at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.composer && state.context && state.textarea && state.footer,
+    `Composer regions must remain rendered at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.textareaHidden, false, `Composer textarea must stay editable at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.textarea.height >= 40 && state.textarea.width >= 120,
+    `Composer textarea needs usable space at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.context.top >= state.composer.top - 1 &&
+    state.context.bottom <= state.textarea.top + 1 &&
+    state.textarea.bottom <= state.footer.top + 1 &&
+    state.footer.bottom <= state.composer.bottom + 1,
+  `Composer regions overlap or escape their container at ${label}: ${JSON.stringify(state)}`);
+  assert.ok([state.context, state.textarea, state.footer].every(region =>
+    region.left >= state.composer.left - 1 && region.right <= state.composer.right + 1),
+  `Composer region escaped horizontally at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.composer.left >= -1 && state.composer.right <= state.viewport.width + 1 &&
+    state.composer.top >= -1 && state.composer.bottom <= state.viewport.height + 1,
+  `Composer escaped the viewport at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.directChildOverlap, 0,
+    `Visible composer children overlap at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.directChildOverflow, false,
+    `Visible composer children overflow horizontally at ${label}: ${JSON.stringify(state)}`);
+  return state;
+}
+
+async function workspaceGeometry(label) {
+  const state = await renderer.evaluate(`(()=>{
+    const box=selector=>{
+      const r=document.querySelector(selector)?.getBoundingClientRect();
+      return r&&r.width>1&&r.height>1
+        ?{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}
+        :null;
+    };
+    return {
+      viewport:{width:innerWidth,height:innerHeight},
+      overflow:document.documentElement.scrollWidth>innerWidth+1,
+      workspace:box('.inspector-host'),
+      editor:box('.editor-textarea'),
+      task:box('.task-host--docked'),
+      taskBody:box('.task-workbench__body'),
+    };
+  })()`);
+  assert.equal(state.overflow, false, `Workspace caused document overflow at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.workspace && state.editor && state.task && state.taskBody,
+    `Editor and task dock must remain rendered at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.editor.height >= 160,
+    `Editor lost usable height at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.task.height >= 150 && state.taskBody.height >= 80,
+    `Task dock lost usable height at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.task.top >= state.workspace.bottom - 2,
+    `Inspector and task dock overlap at ${label}: ${JSON.stringify(state)}`);
+  assert.ok(state.task.bottom <= state.viewport.height + 1,
+    `Task dock escaped the viewport at ${label}: ${JSON.stringify(state)}`);
+  return state;
+}
+
+async function capabilityPickerEvidence() {
+  const requestsBefore = requests.length;
+  await click('[data-testid="capability-picker-trigger"]');
+  await until('Boolean(document.querySelector("[data-testid=capability-picker-panel]"))');
+  await until('Boolean(document.querySelector("[data-testid=capability-picker-search]"))');
+  await assertFloatingSurface('[data-testid="capability-picker-panel"]', 'Capability picker at 1440');
+  const selectedId = await renderer.evaluate(`(()=>{
+    const item=[...document.querySelectorAll('[data-testid="builtin-capability-item"]')]
+      .find(el=>!el.disabled&&el.getAttribute('aria-pressed')!=='true'&&
+        el.dataset.capabilityType==='skill');
+    if(!item)throw new Error('No selectable built-in Skill in the real picker');
+    item.click();
+    return item.dataset.capabilityId;
+  })()`);
+  await until(`Boolean(document.querySelector('[data-testid="capability-chip"][data-capability-id="${selectedId}"]'))`);
+  await shot('capability-picker-zh-night-1440');
+
+  await viewport(800, 600);
+  await closeWorkbenchDrawers();
+  await assertFloatingSurface('[data-testid="capability-picker-panel"]', 'Capability picker at 800');
+  await shot('capability-picker-zh-night-800');
+  await renderer.send('Input.dispatchKeyEvent', {
+    type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27,
+  });
+  await renderer.send('Input.dispatchKeyEvent', {
+    type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27,
+  });
+  await until('!document.querySelector("[data-testid=capability-picker-panel]")');
+  const selectedChip = `[...document.querySelectorAll('[data-testid="capability-chip"]')]
+    .find(el=>el.dataset.capabilityId===${JSON.stringify(selectedId)})`;
+  await until(`Boolean(${selectedChip})`);
+  await renderer.evaluate(`${selectedChip}.click();true`);
+  await until(`!${selectedChip}`);
+  await restoreWidePanels();
+  assert.equal(requests.length, requestsBefore, 'Opening and selecting a capability must not make a model request');
+  record('The manual capability picker is searchable, selectable, foreground and within the composer at 1440 and 800 without horizontal overflow');
+}
+
+async function queuedPromptEvidence() {
+  const requestsBefore = requests.length;
+  await fill('[data-testid="chat-composer-input"]', 'ORBIT_LAYOUT_NEXT_TURN_VERIFY');
+  await until('!document.querySelector("[data-testid=chat-queue-add]")?.disabled');
+  await click('[data-testid="chat-queue-add"]');
+  await until('document.querySelector("[data-testid=queued-prompt-count]")?.textContent?.replace(/\\s/g,"")==="1/10"');
+  await until('document.querySelector("[data-testid=queued-prompt-item]")?.textContent.includes("ORBIT_LAYOUT_NEXT_TURN_VERIFY")');
+  await assertFloatingSurface('[data-testid="queued-prompt-tray"]', 'Queued prompt at 1440', {
+    withinComposer: true,
+  });
+  await shot('queued-prompt-running-zh-night-1440');
+
+  await viewport(800, 600);
+  await closeWorkbenchDrawers();
+  await assertFloatingSurface('[data-testid="queued-prompt-tray"]', 'Queued prompt at 800', {
+    withinComposer: true,
+  });
+  await shot('queued-prompt-running-zh-night-800');
+  await click('[data-testid="queued-prompt-delete"]');
+  await until('!document.querySelector("[data-testid=queued-prompt-tray]")');
+  await restoreWidePanels();
+  assert.equal(requests.length, requestsBefore, 'Queuing and deleting a next-turn prompt must not make a model request');
+  record('A real busy-session next-turn queue remains usable and foreground in the composer at 1440 and 800 without horizontal overflow');
+}
+
+async function agentLayoutEvidence() {
+  const requestsBefore = requests.length;
+  await localeTheme('zh-CN', 'night');
+  await restoreWidePanels();
+  await click('[data-testid="agent-mode-work"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="work"');
+  await until(`window.mingshen.getSession(${JSON.stringify(fixture.sessionId)}).then(session=>session.agentMode==='work')`);
+  await captionGeometry('WorkAgent zh-CN night 1440x900');
+  await composerGeometry('WorkAgent zh-CN night 1440x900');
+  await shot('work-zh-night-1440');
+  await viewport(800, 600);
+  await closeWorkbenchDrawers();
+  await captionGeometry('WorkAgent zh-CN night 800x600');
+  await composerGeometry('WorkAgent zh-CN night 800x600');
+  await shot('work-zh-night-800');
+
+  await viewport(1440, 900);
+  await click('[data-testid="agent-mode-chat"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"');
+  await click('[data-testid="new-chat"]');
+  await until('Boolean(document.querySelector("[data-testid=new-chat-dialog]"))');
+  await click('[data-testid="new-chat-dialog"] button[type="submit"]');
+  await until('!document.querySelector("[data-testid=new-chat-dialog]")&&Boolean(document.querySelector(".chat-session-row--selected"))');
+  const chatId = await renderer.evaluate('document.querySelector(".chat-session-row--selected").dataset.sessionId');
+  const chat = await renderer.evaluate(`window.mingshen.getSession(${JSON.stringify(chatId)})`);
+  assert.equal(chat.agentMode, 'chat');
+  assert.equal(chat.workspacePath, null);
+
+  for (const theme of ['night', 'day']) {
+    await renderer.evaluate(`localStorage.setItem('mingshen.theme',${JSON.stringify(theme)});true`);
+    await renderer.send('Page.reload');
+    await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"&&Boolean(document.querySelector(".composer textarea"))');
+    await viewport(1440, 900);
+    await captionGeometry(`ChatAgent zh-CN ${theme} 1440x900`);
+    await composerGeometry(`ChatAgent zh-CN ${theme} 1440x900`);
+    await shot(`chat-zh-${theme}-1440`);
+    await viewport(800, 600);
+    if (await renderer.evaluate('Boolean(document.querySelector(".chat-sidebar-scrim"))')) {
+      await click('.chat-sidebar-scrim');
+    }
+    await captionGeometry(`ChatAgent zh-CN ${theme} 800x600`);
+    await composerGeometry(`ChatAgent zh-CN ${theme} 800x600`);
+    await shot(`chat-zh-${theme}-800`);
+  }
+
+  await click('[data-testid="agent-mode-code"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="code"');
+  await restoreWidePanels();
+  await quickLayoutEvidence();
+  assert.equal(requests.length, requestsBefore, 'Checking real Work/Chat layouts must not make a model request');
+  record('WorkAgent retains the shared workspace and ChatAgent opens its independent page; real mode controls and composers remain bounded at 1440/800 in day/night without a model request');
+}
+
+async function quickLayoutEvidence() {
+  const primary = renderer;
+  let quick;
+  await primary.evaluate('window.mingshen.quickChatAction("show")');
+  try {
+    quick = await connect(rendererPort, 'quick');
+    renderer = quick;
+    await renderer.send('Runtime.enable');
+    await until('Boolean(document.querySelector(".quick-chat .composer textarea"))');
+    for (const [width, height] of [[540, 720], [400, 560]]) {
+      await viewport(width, height);
+      await composerGeometry(`QuickChat ${width}x${height}`);
+      await shot(`quick-chat-day-${width}x${height}`);
+    }
+    record('The actual QuickChat window retains an editable, bounded composer at 540x720 and 400x560');
+  } finally {
+    renderer = primary;
+    await primary.evaluate('window.mingshen.quickChatAction("hide")').catch(() => {});
+    await quick?.close();
+  }
 }
 
 async function mode(value) {
@@ -369,6 +747,286 @@ async function frameEvidence() {
   })()`);
   assert.deepEqual(visible, { metadata: true, execution: true, time: true, diff: true, steps: 3 },
     `Reference screenshot must show real message metadata, execution heading, saved diff and plan: ${JSON.stringify(visible)}`);
+}
+
+async function reviewPathEvidence(locale) {
+  const selector = '.orbit-review-file[data-review-file$="workbench-layout.ts"]';
+  await rail('review');
+  await click(selector);
+  await until('document.querySelector(".orbit-review-preview header code")?.textContent==="workbench-layout.ts"');
+  const review = await renderer.evaluate(`(()=>{
+    const row=document.querySelector(${JSON.stringify(selector)});
+    const button=document.querySelector('.orbit-review-preview header > button');
+    return {directory:row.querySelector('.orbit-review-file__path')?.textContent,
+      name:row.querySelector('.orbit-review-file__name')?.textContent,
+      previewName:button.querySelector('code')?.textContent,
+      previewDirectory:button.querySelector('.orbit-review-file__path')?.textContent,
+      previewPath:button.getAttribute('aria-label'),
+      additions:Number(row.querySelector('.run-summary__added')?.textContent.slice(1)),
+      deletions:Number(row.querySelector('.run-summary__deleted')?.textContent.slice(1)),
+      files:document.querySelectorAll('.orbit-review-file[data-review-file]').length};
+  })()`);
+  assert.equal(review.directory, 'src');
+  assert.equal(review.name, 'workbench-layout.ts');
+  assert.equal(review.previewName, 'workbench-layout.ts');
+  assert.equal(review.previewDirectory, 'src');
+  assert.equal(review.previewPath?.replaceAll('\\', '/'), 'src/workbench-layout.ts');
+  assert.equal(review.files, 2);
+  assert.ok(Number.isInteger(review.additions) && review.additions >= 0 && Number.isInteger(review.deletions) && review.deletions >= 0);
+  const expected = locale === 'en'
+    ? `${review.previewPath}, ${review.additions} additions, ${review.deletions} deletions`
+    : `${review.previewPath}\uff0c\u65b0\u589e ${review.additions} \u884c\uff0c\u5220\u9664 ${review.deletions} \u884c`;
+  const { root } = await renderer.send('DOM.getDocument', { depth: 0 });
+  const { nodeId } = await renderer.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+  const { nodes } = await renderer.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+  assert.equal(nodes.find(node => node.role?.value === 'button')?.name?.value, expected,
+    'The review row accessibility name must retain its full path and localized additions/deletions');
+}
+
+async function taskDockEvidence(baseline) {
+  const requestsBefore = requests.length;
+  const key = `@orbit:${project.replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase()}`;
+  const splitter = '.panel-resize--bottom';
+  const savedHeight = value => `window.mingshen.getUiPreferences().then(p=>p.projects[${JSON.stringify(key)}]?.taskPanelHeight===${value === undefined ? 'undefined' : value})`;
+  const savedCollapsed = value => `window.mingshen.getUiPreferences().then(p=>p.projects[${JSON.stringify(key)}]?.taskPanelCollapsed===${value})`;
+  const valueIs = value => `(()=>{const h=document.querySelector(${JSON.stringify(splitter)}),p=document.querySelector('.task-host--docked');return Boolean(h&&p&&Math.abs(p.getBoundingClientRect().height-${value})<2&&Number(h.getAttribute('aria-valuenow'))===${value})})()`;
+  const handlePoint = () => renderer.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(splitter)}).getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+  const mouse = (type, point, buttons, count = 1) => renderer.send('Input.dispatchMouseEvent', {
+    type, x: point.x, y: point.y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, clickCount: count,
+  });
+  const pressKey = async (name, code) => {
+    await renderer.evaluate(`document.querySelector(${JSON.stringify(splitter)}).focus();true`);
+    await renderer.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code });
+    await renderer.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code: name, windowsVirtualKeyCode: code });
+  };
+  const reset = async () => {
+    const point = await handlePoint();
+    await mouse('mouseMoved', point, 0);
+    await mouse('mousePressed', point, 1);
+    await mouse('mouseReleased', point, 0);
+    await mouse('mousePressed', point, 1, 2);
+    await mouse('mouseReleased', point, 0, 2);
+    await until(savedHeight(undefined));
+    await until(`!document.querySelector('.app-body').style.getPropertyValue('--orbit-task-height-override')`);
+  };
+
+  await restoreWidePanels();
+  await click('[data-task-tab="plan"]');
+  await until('document.querySelectorAll(".plan-step").length===3');
+  await reviewPathEvidence('zh-CN');
+  record('The real two-file review separates directory and filename, retains the complete relative path and exposes localized diff counts to accessibility');
+
+  await click('.task-workbench__toolbar button[title="\u7f16\u8f91\u8ba1\u5212"]');
+  await fill('.plan-edit-row:first-child > input[required]', 'Unsaved owned plan edit');
+  await renderer.evaluate(`window.__orbitPlanInput=document.querySelector('.plan-edit-row:first-child > input[required]');window.__orbitTaskNode=document.querySelector('.task-workbench');true`);
+  await click('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  assert.equal(await renderer.evaluate(`document.querySelector('.task-workbench')===window.__orbitTaskNode&&document.querySelector('.plan-edit-row:first-child > input[required]')===window.__orbitPlanInput&&window.__orbitPlanInput.value==='Unsaved owned plan edit'`), true);
+  assert.equal(await renderer.evaluate('document.querySelector("[data-task-action=collapse]").getAttribute("aria-expanded")'), 'false');
+  assert.ok((await renderer.evaluate('document.querySelector(".task-host--docked").getBoundingClientRect().height')) <= 42);
+  await shot('task-collapsed-unsaved-zh-night');
+  await click('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="false"');
+  assert.equal(await renderer.evaluate(`document.querySelector('.plan-edit-row:first-child > input[required]')===window.__orbitPlanInput&&window.__orbitPlanInput.value==='Unsaved owned plan edit'`), true);
+  await click('.plan-edit-actions button[type="button"]:nth-of-type(2)');
+  await until('!document.querySelector(".task-workbench[data-unsaved=true]")');
+  assert.deepEqual(await snapshot(), baseline, 'Cancelling the temporary plan edit must not change the saved plan');
+  record('Collapsing and expanding keeps the actual task and unsaved plan input mounted, while cancelling leaves the saved plan unchanged');
+
+  const initial = Math.round(await renderer.evaluate('document.querySelector(".task-host--docked").getBoundingClientRect().height'));
+  assert.equal(await renderer.evaluate('document.querySelector(".panel-resize--bottom").getAttribute("aria-orientation")'), 'horizontal');
+  const point = await handlePoint();
+  assert.equal(await renderer.evaluate(`(()=>{const p=${JSON.stringify(point)};
+    return document.elementFromPoint(p.x,p.y)===document.querySelector(${JSON.stringify(splitter)})})()`), true);
+  await mouse('mouseMoved', point, 0);
+  await mouse('mousePressed', point, 1);
+  await sleep(80);
+  await mouse('mouseMoved', { x: point.x, y: point.y - 80 }, 1);
+  await sleep(80);
+  await mouse('mouseReleased', { x: point.x, y: point.y - 80 }, 0);
+  const dragged = initial + 80;
+  await until(valueIs(dragged));
+  await until(savedHeight(dragged));
+  const handleColors = await renderer.evaluate(`(()=>{const h=document.querySelector(${JSON.stringify(splitter)});
+    return {surface:getComputedStyle(h).backgroundColor,grip:getComputedStyle(h,'::after').backgroundColor}})()`);
+  assert.notEqual(handleColors.surface, handleColors.grip, 'Hover highlights the grip without filling the full drag target with the accent color');
+  await shot('task-resized-zh-night');
+  await pressKey('ArrowUp', 38);
+  await until(valueIs(dragged + 16));
+  await pressKey('ArrowDown', 40);
+  await until(valueIs(dragged));
+  await pressKey('Home', 36);
+  await until(valueIs(160));
+  await pressKey('End', 35);
+  const maximum = Math.min(640, 900 - 300);
+  await until(valueIs(maximum));
+  await until(savedHeight(maximum));
+
+  const cancelPoint = await handlePoint();
+  await renderer.evaluate(`document.querySelector(${JSON.stringify(splitter)}).focus();true`);
+  await mouse('mouseMoved', cancelPoint, 0);
+  await mouse('mousePressed', cancelPoint, 1);
+  await mouse('mouseMoved', { x: cancelPoint.x, y: cancelPoint.y + 48 }, 1);
+  await until(valueIs(maximum - 48));
+  await renderer.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await renderer.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await mouse('mouseReleased', { x: cancelPoint.x, y: cancelPoint.y + 48 }, 0);
+  await until(valueIs(maximum));
+  for (let index = 0; index < 5; index++) {
+    await sleep(200);
+    assert.equal(await renderer.evaluate(savedHeight(maximum)), true, 'Cancelled dragging must not persist its intermediate height');
+  }
+  await renderer.evaluate('window.__orbitCancelledDragReload=true;true');
+  await renderer.send('Page.reload');
+  await until('window.__orbitCancelledDragReload===undefined&&Boolean(document.querySelector(".orbit-tool-rail"))');
+  await selectSession(fixture.sessionId);
+  await rail('review');
+  await until(valueIs(maximum));
+  await until(savedHeight(maximum));
+  await reset();
+  const defaultHeight = Math.round(await renderer.evaluate('document.querySelector(".task-host--docked").getBoundingClientRect().height'));
+  await pressKey('ArrowUp', 38);
+  await until(valueIs(defaultHeight + 16));
+  await until(savedHeight(defaultHeight + 16));
+  await pressKey('Enter', 13);
+  await until(savedHeight(undefined));
+  await until(valueIs(defaultHeight));
+  await pressKey('ArrowUp', 38);
+  const persistedHeight = defaultHeight + 16;
+  await until(valueIs(persistedHeight));
+  await until(savedHeight(persistedHeight));
+  await click('[data-task-action="collapse"]');
+  await until(savedCollapsed(true));
+  await until(`window.mingshen.getComposerDraft(${JSON.stringify(fixture.sessionId)}).then(d=>!d||!d.text)`);
+  await renderer.evaluate('window.__orbitBeforeTaskReload=true;true');
+  await renderer.send('Page.reload');
+  await until('window.__orbitBeforeTaskReload===undefined&&Boolean(document.querySelector(".orbit-tool-rail"))&&Boolean(window.mingshen)');
+  await selectSession(fixture.sessionId);
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  await until(savedHeight(persistedHeight));
+  await click('[data-task-action="collapse"]');
+  await until(valueIs(persistedHeight));
+  await click('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  await rail('agents');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="false"&&document.querySelector(".task-workbench")?.dataset.taskView==="agents"');
+  await rail('review');
+  await click('[data-task-tab="plan"]');
+  await reset();
+  await until(savedCollapsed(false));
+  await geometry();
+  assert.deepEqual(await snapshot(), baseline);
+  assert.equal(requests.length, requestsBefore);
+  record('The horizontal splitter supports real pointer drag, keyboard bounds, Escape rollback, Enter and double-click reset; project height and collapse survive reload and the Agent rail reveals tasks');
+}
+
+async function workStarterEvidence(sessionId, locale) {
+  const requestsBefore = requests.length;
+  await selectSession(sessionId);
+  await click('[data-testid="agent-mode-work"]');
+  await until(`document.querySelector('.app-shell')?.dataset.agentMode==='work'&&window.mingshen.getSession(${JSON.stringify(sessionId)}).then(s=>s.agentMode==='work')`);
+  const heading = locale === 'en' ? 'Start with a work goal' : '\u4ece\u5de5\u4f5c\u76ee\u6807\u5f00\u59cb';
+  const labels = locale === 'en'
+    ? ['Draft a Word document', 'Analyze an Excel spreadsheet', 'Create a PowerPoint presentation']
+    : ['\u8d77\u8349 Word \u6587\u6863', '\u5206\u6790 Excel \u8868\u683c', '\u5236\u4f5c PPT \u6f14\u793a'];
+  await until(`document.querySelector('.conversation-empty h1')?.textContent===${JSON.stringify(heading)}&&document.querySelectorAll('[data-starter-kind]').length===3&&!document.querySelector('[data-starter-kind="document"]').matches(':disabled')&&!document.querySelector('.composer textarea')?.disabled`);
+  assert.deepEqual(await renderer.evaluate('[...document.querySelectorAll("[data-starter-kind]")].map(el=>el.textContent.trim())'), labels);
+  await shot(`work-empty-${locale}-1440`);
+  await fill('.composer textarea', 'Owned work draft');
+  for (const [kind, expected] of [['document', 'Word'], ['spreadsheet', 'Excel'], ['presentation', locale === 'en' ? 'PowerPoint' : 'PPT']]) {
+    const previous = await renderer.evaluate('document.querySelector(".composer textarea").value');
+    await clickByPointer(`[data-starter-kind="${kind}"]`);
+    await until(`document.activeElement===document.querySelector('.composer textarea')&&document.querySelector('.composer textarea').value.startsWith(${JSON.stringify(`${previous}\n\n`)})&&document.querySelector('.composer textarea').value.slice(${previous.length}).includes(${JSON.stringify(expected)})`);
+  }
+  const finalWord = locale === 'en' ? 'PowerPoint' : 'PPT';
+  await until(`window.mingshen.getComposerDraft(${JSON.stringify(sessionId)}).then(d=>d?.text.includes(${JSON.stringify(finalWord)}))`);
+  await fill('.composer textarea', '');
+  await until(`window.mingshen.getComposerDraft(${JSON.stringify(sessionId)}).then(d=>!d||!d.text)`);
+  assert.equal((await renderer.evaluate(`window.mingshen.getSessionMessages(${JSON.stringify(sessionId)})`)).length, 0);
+  assert.equal(requests.length, requestsBefore, 'Work starter prompts must only edit the draft, not send a request');
+  await click('[data-testid="agent-mode-code"]');
+  await until(`document.querySelector('.app-shell')?.dataset.agentMode==='code'&&window.mingshen.getSession(${JSON.stringify(sessionId)}).then(s=>s.agentMode==='code')`);
+  await until('document.querySelectorAll("[data-starter-kind]").length===0');
+  await selectSession(fixture.sessionId);
+  record(`Work starter actions in ${locale} append the three office prompts, focus the composer and make no model request; Code mode is restored`);
+}
+
+async function planNavigationEvidence(otherSessionId, baseline) {
+  const requestsBefore = requests.length;
+  const message = '\u8bf7\u5148\u4fdd\u5b58\u6216\u53d6\u6d88\u8ba1\u5212\u7f16\u8f91\uff0c\u518d\u5207\u6362\u4f1a\u8bdd\u6216 ChatAgent\u3002';
+  await restoreWidePanels();
+  await click('[data-task-tab="plan"]');
+  await click('.task-workbench__toolbar button[title="\u7f16\u8f91\u8ba1\u5212"]');
+  await fill('.plan-edit-row:first-child > input[required]', 'Owned navigation plan draft');
+  await fill('.plan-edit-row:nth-child(2) .plan-edit-row__dependencies input', '1, 3');
+  await renderer.evaluate(`window.__orbitGuardPlan=document.querySelector('.plan-edit-row:first-child > input[required]');window.__orbitGuardDependencies=document.querySelector('.plan-edit-row:nth-child(2) .plan-edit-row__dependencies input');true`);
+  const preserved = `(()=>{const task=document.querySelector('.task-workbench');return task?.dataset.taskSession===${JSON.stringify(fixture.sessionId)}&&task.dataset.taskView==='plan'&&task.dataset.unsaved==='true'&&document.querySelector('.plan-edit-row:first-child > input[required]')===window.__orbitGuardPlan&&window.__orbitGuardPlan.value==='Owned navigation plan draft'&&document.querySelector('.plan-edit-row:nth-child(2) .plan-edit-row__dependencies input')===window.__orbitGuardDependencies&&window.__orbitGuardDependencies.value==='1, 3'})()`;
+  const blocked = `document.querySelector('.app-shell')?.dataset.agentMode==='code'&&document.querySelector('.app-body')?.dataset.taskCollapsed==='false'&&document.querySelector('.task-workbench [role="alert"]')?.textContent.includes(${JSON.stringify(message)})&&${preserved}`;
+
+  await clickByPointer('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  await clickByPointer('[data-testid="agent-mode-chat"]');
+  await until(blocked);
+  assert.equal(await renderer.evaluate(`document.querySelector('.session-row--selected')?.closest('[data-session-id]')?.dataset.sessionId===${JSON.stringify(fixture.sessionId)}`), true);
+  await shot('task-unsaved-navigation-guard-zh-night');
+
+  await clickByPointer('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  await clickByPointer(`[data-session-id="${otherSessionId}"] .session-row`);
+  await until(blocked);
+  assert.equal(await renderer.evaluate(`document.querySelector('.session-row--selected')?.closest('[data-session-id]')?.dataset.sessionId===${JSON.stringify(fixture.sessionId)}`), true);
+
+  const ownRow = `[data-session-id="${fixture.sessionId}"]`;
+  await until(`(()=>{const s=document.querySelector(${JSON.stringify(`${ownRow} .session-row__state`)});return Boolean(s&&!s.className.includes('--running')&&!s.className.includes('--waiting_approval'))})()`);
+  const hover = await renderer.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(`${ownRow} .session-row`)}).getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+  await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hover.x, y: hover.y, button: 'none', buttons: 0 });
+  await clickByPointer(`${ownRow} .session-row__menu`);
+  await until('Boolean(document.querySelector(".session-menu [role=menuitem]:nth-of-type(5)"))');
+  const archive = await renderer.evaluate(`(()=>{const el=document.querySelector('.session-menu [role=menuitem]:nth-of-type(5)');return{text:el.textContent.trim(),disabled:el.disabled}})()`);
+  assert.deepEqual(archive, { text: '\u5f52\u6863', disabled: false });
+  await clickByPointer('.session-menu [role="menuitem"]:nth-of-type(5)');
+  await until(`document.querySelector('.session-sidebar__error[role="alert"]')?.textContent.includes(${JSON.stringify(message)})`);
+  assert.equal(await renderer.evaluate(`window.mingshen.getSession(${JSON.stringify(fixture.sessionId)}).then(s=>s.archived)`), false);
+  assert.equal(await renderer.evaluate(preserved), true);
+  assert.equal(await renderer.evaluate(`document.querySelector('.session-row--selected')?.closest('[data-session-id]')?.dataset.sessionId===${JSON.stringify(fixture.sessionId)}`), true);
+  await click('.plan-edit-actions button[type="button"]:nth-of-type(2)');
+  await until('!document.querySelector(".task-workbench[data-unsaved=true]")&&!document.querySelector(".task-workbench [role=alert]")');
+  await clickByPointer('[data-testid="agent-mode-chat"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"');
+  await clickByPointer('[data-testid="agent-mode-code"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="code"');
+  await selectSession(fixture.sessionId);
+  assert.deepEqual(await snapshot(), baseline);
+  assert.equal(requests.length, requestsBefore);
+  record('Unsaved plan and dependency edits block Chat, other-session navigation and archiving the current session, reveal an alert, and allow Chat after cancellation');
+}
+
+async function compactTaskEvidence() {
+  await viewport(800, 600);
+  await rail('review');
+  await until('document.querySelector(".app-body")?.dataset.inspectorDrawer==="true"&&Boolean(document.querySelector("[data-task-action=collapse]"))');
+  const header = await renderer.evaluate(`(()=>{
+    const parent=document.querySelector('.task-workbench__header').getBoundingClientRect();
+    const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom}};
+    return {parent:{left:parent.left,right:parent.right,top:parent.top,bottom:parent.bottom},
+      heading:rect('.task-workbench__heading'),agents:rect('.task-workbench__agents'),collapse:rect('[data-task-action=collapse]'),
+      label:document.querySelector('[data-task-action=collapse]').getAttribute('aria-label'),overflow:document.documentElement.scrollWidth>innerWidth+1};
+  })()`);
+  assert.equal(header.label, 'Collapse tasks');
+  assert.equal(header.overflow, false);
+  assert.ok(header.heading.left >= header.parent.left - 1 && header.heading.right <= header.agents.left + 1 &&
+    header.agents.right <= header.collapse.left + 1 && header.collapse.right <= header.parent.right + 1 &&
+    header.collapse.top >= header.parent.top - 1 && header.collapse.bottom <= header.parent.bottom + 1, JSON.stringify(header));
+  await shot('task-compact-en-day');
+  await clickByPointer('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  assert.equal(await renderer.evaluate('document.querySelector("[data-task-action=collapse]").getAttribute("aria-label")'), 'Expand tasks');
+  await shot('task-compact-collapsed-en-day');
+  await rail('agents');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="false"&&document.querySelector(".task-workbench")?.dataset.taskView==="agents"');
+  await restoreWidePanels();
+  await click('[data-task-tab="plan"]');
+  record('The English 800x600 task drawer keeps its heading and collapse controls separate and allows the Agent rail to reveal it again');
 }
 
 async function geometry({ dual = true } = {}) {
@@ -497,9 +1155,10 @@ async function localeTheme(locale, theme, style = 'orbit') {
   await renderer.evaluate(`window.mingshen.desktopAction('locale',${JSON.stringify(locale)}).then(()=>{
     localStorage.setItem('mingshen.locale',${JSON.stringify(locale)});
     localStorage.setItem('mingshen.theme',${JSON.stringify(theme)});
+    window.__orbitLocaleReload=true;
   })`);
   await renderer.send('Page.reload');
-  await until(`Boolean(document.querySelector(".composer textarea"))&&document.documentElement.dataset.interfaceStyle===${JSON.stringify(style)}`);
+  await until(`window.__orbitLocaleReload===undefined&&Boolean(document.querySelector(".composer textarea"))&&document.documentElement.dataset.interfaceStyle===${JSON.stringify(style)}`);
   await selectSession(fixture.sessionId);
 }
 
@@ -514,7 +1173,7 @@ async function snapshot() {
 
 async function launch() {
   const mainPort = await availablePort();
-  let rendererPort = await availablePort();
+  rendererPort = await availablePort();
   while (rendererPort === mainPort) rendererPort = await availablePort();
   const env = {
     ...process.env,
@@ -524,7 +1183,7 @@ async function launch() {
     MSH_NOTIFICATION_FIXTURE: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  child = spawn(resolve('apps/desktop/node_modules/electron/dist/MingshenHarnessExperimental.exe'), [
+  child = spawn(experimentalExecutable(), [
     `--inspect=${mainPort}`, '.', `--remote-debugging-port=${rendererPort}`,
   ], { cwd: resolve('apps/desktop'), env, windowsHide: true, stdio: 'ignore' });
   main = await connect(mainPort, 'main');
@@ -538,6 +1197,37 @@ async function launch() {
 function record(value) {
   passed.push(value);
   console.log(`PASS ${passed.length}: ${value}`);
+}
+
+async function writeResult(ok, cause) {
+  const completedAt = Date.now();
+  await mkdir(screenshots, { recursive: true });
+  const path = resolve(screenshots, 'result.json');
+  await writeFile(path, JSON.stringify({
+    ok,
+    version,
+    startedAt: new Date(startedAt).toISOString(),
+    completedAt: new Date(completedAt).toISOString(),
+    durationMs: completedAt - startedAt,
+    passed,
+    localRequests: requests.length,
+    workerRequests: requests.filter(request => request.worker).length,
+    requestCalls: requests.map(({ worker, body }) => ({
+      worker,
+      calls: (body.input || []).filter(item => item.type === 'function_call').map(item => item.name),
+    })),
+    rendererExceptions: exceptions,
+    serverErrors,
+    captures,
+    boundaries,
+    ...(cause ? {
+      error: {
+        message: cause instanceof Error ? cause.message : String(cause),
+        stack: cause instanceof Error ? cause.stack ?? null : null,
+      },
+    } : {}),
+  }, null, 2));
+  return path;
 }
 
 try {
@@ -577,10 +1267,14 @@ try {
   await renderer.send('Page.reload');
   await until('document.documentElement.dataset.interfaceStyle==="orbit"&&Boolean(document.querySelector(".orbit-tool-rail"))&&Boolean(document.querySelector(".composer textarea"))');
   await viewport(1440, 900);
+  await closeWorkbenchDrawers();
   await geometry();
+  await captionGeometry('zh-CN 1440x900');
+  await composerGeometry('zh-CN 1440x900');
   await modelLabel(primaryModel, 'zh-CN');
+  await capabilityPickerEvidence();
   await shot('empty-zh-night-1440');
-  record('Orbit has its own rail, sidebar, breadcrumb header, conversation, simultaneous review/tasks and bottom status strip');
+  record('Orbit has its own rail, sidebar, breadcrumb header, conversation, simultaneous review/tasks and bottom status strip with non-overlapping caption and usable composer at 1440');
 
   await renderer.evaluate(`window.mingshen.sendChat({sessionId:${JSON.stringify(fixture.sessionId)},text:'\u6838\u5bf9\u5de5\u4f5c\u53f0\u5e03\u5c40\uff0c\u4fdd\u6301\u5ba1\u67e5\u4e0e\u4efb\u52a1\u8fdb\u5ea6\u540c\u65f6\u53ef\u89c1\uff0c\u8fd0\u884c\u672c\u5730\u56de\u5f52\u5e76\u6d3e\u53d1\u53ea\u8bfb\u5ba1\u67e5\u3002'})`);
   const end = Date.now() + 90000;
@@ -609,7 +1303,10 @@ try {
   assert.equal(await renderer.evaluate('document.querySelector(".chat-model-picker .model-picker__trigger").disabled'), true);
   await modelLabel(primaryModel, 'zh-CN');
   await geometry();
+  await captionGeometry('zh-CN running 1440x900');
+  await composerGeometry('zh-CN running 1440x900');
   await shot('running-zh-night-1440');
+  await queuedPromptEvidence();
   await viewport(1920, 1080);
   await geometry();
   await shot('running-zh-night-1920');
@@ -638,6 +1335,7 @@ try {
   await click('.tree-row[title="src"]');
   await click('.tree-row[title="src/workbench-layout.ts"], .tree-row[title="src\\\\workbench-layout.ts"]');
   await until('Boolean(document.querySelector(".editor-textarea"))');
+  await workspaceGeometry('zh-CN 1440x900');
   const savedEditor = await renderer.evaluate('document.querySelector(".editor-textarea").value');
   await renderer.evaluate('window.__orbitEditor=document.querySelector(".editor-textarea");window.__orbitEditor.focus();window.__orbitEditor.setSelectionRange(0,0);true');
   await renderer.send('Input.insertText', { text: '// Unsaved owned interface draft.\n' });
@@ -653,14 +1351,22 @@ try {
   await rail('chat');
   await until('document.activeElement===document.querySelector(".composer textarea")');
   await rail('files');
+  await until('document.querySelector(".workspace-panel")?.dataset.workspaceTab==="files"&&document.querySelector(".editor-textarea")?.value.startsWith("// Unsaved owned interface draft.")');
   assert.equal(await renderer.evaluate('document.querySelector(".editor-textarea")?.value.startsWith("// Unsaved owned interface draft.")'), true);
   assert.equal(await renderer.evaluate('document.querySelector(".composer textarea")===window.__orbitComposer&&window.__orbitComposer.value==="\\u4e2d\\u6587\\u8349\\u7a3f Orbit structure verification"'), true);
+  await renderer.evaluate('window.__orbitEditorAfterFiles=document.querySelector(".editor-textarea");true');
+  await click('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="true"');
+  assert.equal(await renderer.evaluate('document.querySelector(".editor-textarea")===window.__orbitEditorAfterFiles&&window.__orbitEditorAfterFiles.value.startsWith("// Unsaved owned interface draft.")&&document.querySelector(".composer textarea")===window.__orbitComposer&&window.__orbitComposer.value==="\\u4e2d\\u6587\\u8349\\u7a3f Orbit structure verification"'), true);
+  await click('[data-task-action="collapse"]');
+  await until('document.querySelector(".app-body")?.dataset.taskCollapsed==="false"');
+  assert.equal(await renderer.evaluate('document.querySelector(".editor-textarea")===window.__orbitEditorAfterFiles&&window.__orbitEditorAfterFiles.value.startsWith("// Unsaved owned interface draft.")'), true);
   await fill('.editor-textarea', savedEditor);
   await fill('.composer textarea', '');
   await rail('review');
   await mode('chat');
   await click('[data-task-tab="plan"]');
-  record('Layout changes preserve identical composer/editor nodes; rail file/terminal/agent/chat navigation operates real panes and retains both drafts');
+  record('Layout mode switches preserve composer/editor nodes, rail navigation retains both drafts, and task collapse preserves the currently mounted editor');
 
   releaseParent = true;
   await until(`window.mingshen.getSession(${JSON.stringify(fixture.sessionId)}).then(session=>session.status==='idle')`);
@@ -680,6 +1386,7 @@ try {
   await frameEvidence();
   await shot('evidence-zh-night-1440');
   record('Reference-size 2559x1440 and 1440 screenshots expose real message author/time, execution heading, saved diff and task progress together');
+  await taskDockEvidence(baseline);
 
   await selectSession(fixture.sessionId);
   const requestsBeforeNavigation = requests.length;
@@ -706,6 +1413,8 @@ try {
   assert.equal((await renderer.evaluate(`window.mingshen.getSessionMessages(${JSON.stringify(secondary.id)})`)).length, 0,
     'The cross-session navigation check must not manufacture messages or call the model');
   assert.equal(requests.length, requestsBeforeNavigation, 'Session-scoped rail navigation must not make another model request');
+  await workStarterEvidence(secondary.id, 'zh-CN');
+  await planNavigationEvidence(secondary.id, baseline);
   await selectSession(fixture.sessionId);
   await click('[data-task-tab="plan"]');
   assert.deepEqual(await snapshot(), baseline);
@@ -716,16 +1425,26 @@ try {
     await viewport(1440, 900);
     await rail('review');
     await geometry();
+    await captionGeometry(`${locale} ${theme} 1440x900`);
+    await composerGeometry(`${locale} ${theme} 1440x900`);
     await modelLabel(primaryModel, locale);
     assert.deepEqual(await snapshot(), baseline);
     await shot(`complete-${locale}-${theme}-1440`);
   }
   record('Chinese/English and day/night show the rebuilt composition with identical saved messages, plan and model/permission settings');
+  await reviewPathEvidence('en');
+  record('English review accessibility exposes the selected file path and exact addition and deletion counts');
+  await workStarterEvidence(secondary.id, 'en');
+  await compactTaskEvidence();
+  assert.deepEqual(await snapshot(), baseline);
 
-  for (const [width, height] of [[800, 600], [1040, 680], [1920, 1080], [2559, 1440]]) {
+  for (const [width, height] of [[800, 600], [1040, 680], [1280, 800], [1920, 1080], [2559, 1440]]) {
     await viewport(width, height);
     await rail('chat');
+    await closeWorkbenchDrawers();
     await geometry({ dual: width >= 1440 });
+    await composerGeometry(`en ${width}x${height}`);
+    if (width === 800 || width === 1280) await captionGeometry(`en ${width}x${height}`);
     await modelLabel(primaryModel, 'en');
     await shot(`bounds-${width}x${height}`);
     await rail('terminal');
@@ -738,6 +1457,18 @@ try {
   await rail('review');
   await geometry();
   record('Compact 800/1040 drawers and 1920/2559 desktops keep real command navigation, conversation and composer within the window');
+
+  await viewport(720, 450);
+  await rail('chat');
+  await closeWorkbenchDrawers();
+  await geometry({ dual: false });
+  await captionGeometry('en day 720x450, 200% CSS equivalent for 1440x900');
+  await composerGeometry('en day 720x450, 200% CSS equivalent for 1440x900');
+  await shot('zoom-200pct-css-equivalent-en-day');
+  record('The 720x450 CSS layout viewport equivalent to 200% scaling keeps caption controls separate and the composer editable without overlap');
+  await viewport(1440, 900);
+  await rail('review');
+  await geometry();
 
   await rail('settings');
   await until('Boolean(document.querySelector(".settings-workspace"))');
@@ -839,23 +1570,24 @@ try {
   assert.deepEqual(exceptions, []);
   assert.deepEqual(serverErrors, []);
   record('Removing only temporary selected models shows the localized empty selection without stray parentheses; restoring the original model keeps messages and plan unchanged and sends no model request');
+  await agentLayoutEvidence();
+  assert.deepEqual(await snapshot(), baseline);
+  assert.deepEqual(exceptions, []);
+  const resultPath = await writeResult(true);
   console.log(JSON.stringify({
     version, passed, localRequests: requests.length,
     workerRequests: requests.filter(request => request.worker).length,
     rendererExceptions: exceptions, captures,
-    boundaries: [
-      'Only isolated profile/project and an owned local Responses SSE fixture; no paid model, private profile or system clipboard.',
-      'Files, command output, plan and child records come from actual application tool execution.',
-      'CDP viewport sizes are not the full Windows system-DPI or accessibility matrix.',
-      'No installer generation, installation, update or cloud write.',
-    ],
+    boundaries, resultPath,
   }, null, 2));
 } catch (cause) {
   if (renderer) await shot('failure').catch(() => {});
+  const resultPath = await writeResult(false, cause).catch(() => null);
   console.error(JSON.stringify({
     passed, exceptions, serverErrors,
     requests: requests.map(({ worker, body }) => ({ worker, calls: (body.input || []).filter(item => item.type === 'function_call').map(item => item.name) })),
     body: await renderer?.evaluate('document.body.innerText').catch(() => null),
+    resultPath,
   }, null, 2));
   throw cause;
 } finally {

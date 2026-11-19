@@ -1,44 +1,62 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { openDatabase } from "../storage/database";
+import { DATABASE_MIGRATIONS, openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 
 describe("persistent session paging and change feed", () => {
   it("migrates existing schema 6 data without changing history, configuration or secrets", async () => {
     const root = await mkdtemp(join(tmpdir(), "mingshen-catalog-migration-"));
     const path = join(root, "test.db");
-    let db = openDatabase(path);
-    let id = "";
+    let db = new DatabaseSync(path);
+    const id = "legacy-session";
     try {
-      const repo = new Repository(db);
-      id = repo.insertSession({
-        title: "迁移前的历史",
-        providerId: null,
-        modelId: null,
-        agentProfileId: "primary",
-        workspacePath: "C:\\Project",
-        systemPrompt: "Keep",
-        reasoningLevel: null,
-        permissionMode: "request_approval",
-        executionMode: "host",
-        patchOnly: false,
-      }).id;
-      repo.appendMessage({
-        sessionId: id,
-        role: "user",
-        parts: [{ type: "text", text: "Keep this history" }],
-      });
-      repo.setSetting("fixture.keep", { enabled: true });
+      for (const migration of DATABASE_MIGRATIONS.slice(0, 6)) db.exec(migration);
+      const now = new Date().toISOString();
+      db.prepare(`insert into sessions(
+        id,title,provider_id,model_id,workspace_path,system_prompt,reasoning_level,
+        permission_mode,status,archived,pinned,created_at,updated_at,last_opened_at,
+        agent_profile_id,execution_mode,patch_only
+      ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id,
+        "迁移前的历史",
+        null,
+        null,
+        "C:\\Project",
+        "Keep",
+        null,
+        "request_approval",
+        "idle",
+        0,
+        0,
+        now,
+        now,
+        now,
+        "primary",
+        "host",
+        0,
+      );
+      db.prepare("insert into messages values(?,?,?,?,?,?)").run(
+        "legacy-message",
+        id,
+        1,
+        "user",
+        '[{"type":"text","text":"Keep this history"}]',
+        now,
+      );
+      db.prepare("insert into app_settings values(?,?,?)").run(
+        "fixture.keep",
+        JSON.stringify({ enabled: true }),
+        now,
+      );
       db.prepare("insert into secrets(id,ciphertext,created_at) values(?,?,?)").run(
         "fixture",
         Buffer.from("encrypted-fixture"),
-        new Date().toISOString(),
+        now,
       );
-      db.exec(
-        `drop trigger sessions_catalog_insert;drop trigger sessions_catalog_update;drop trigger sessions_catalog_delete;drop table session_title_search;drop table session_changes;drop index sessions_catalog_idx;drop index sessions_workspace_catalog_idx;pragma user_version=6;`,
-      );
+      db.exec("pragma user_version=6;");
       db.close();
       db = openDatabase(path);
       const migrated = new Repository(db);
@@ -54,7 +72,7 @@ describe("persistent session paging and change feed", () => {
             ?.ciphertext as Uint8Array,
         ).toString(),
       ).toBe("encrypted-fixture");
-      expect(db.prepare("pragma user_version").get()?.user_version).toBe(8);
+      expect(db.prepare("pragma user_version").get()?.user_version).toBe(9);
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });
@@ -109,12 +127,64 @@ describe("persistent session paging and change feed", () => {
       expect(
         repo.sessionPage({ cursor: oldPage.nextCursor ?? "", limit: 1 }).sessions[0]?.id,
       ).not.toBe(oldPage.sessions[0]?.id);
-      expect(db.prepare("pragma user_version").get()?.user_version).toBe(8);
+      expect(db.prepare("pragma user_version").get()?.user_version).toBe(9);
       expect(() => repo.sessionPage({ cursor: "x".repeat(9000) })).toThrow("Invalid session page");
       expect(() => repo.sessionPage({ limit: Number.NaN })).toThrow("Invalid session page");
       expect(() => repo.sessionDelta(0, [42] as unknown as string[])).toThrow(
         "Invalid session synchronization",
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("keeps ChatAgent out of the workspace catalog and persists manual chat groups", () => {
+    const db = openDatabase(":memory:"),
+      repo = new Repository(db);
+    try {
+      const base = {
+        providerId: null,
+        modelId: null,
+        agentProfileId: "primary",
+        workspacePath: null,
+        systemPrompt: "",
+        reasoningLevel: null,
+        permissionMode: "request_approval" as const,
+        executionMode: "host" as const,
+        patchOnly: false,
+      };
+      const group = repo.createChatGroup("Research");
+      const code = repo.insertSession({
+        ...base,
+        title: "Code",
+        agentMode: "code",
+        workspacePath: "C:\\Project",
+      });
+      const work = repo.insertSession({
+        ...base,
+        title: "Work",
+        agentMode: "work",
+        workspacePath: "C:\\Project",
+      });
+      const chat = repo.insertSession({
+        ...base,
+        title: "Chat",
+        agentMode: "chat",
+        chatGroupId: group.id,
+      });
+
+      expect(repo.sessionPage().total).toBe(2);
+      expect(repo.sessionPage({ agentMode: "workspace" }).total).toBe(2);
+      expect(repo.sessionPage({ agentMode: "code" }).sessions[0]?.id).toBe(code.id);
+      expect(repo.sessionPage({ agentMode: "work" }).sessions[0]?.id).toBe(work.id);
+      expect(repo.sessionPage({ agentMode: "chat" }).sessions[0]?.id).toBe(chat.id);
+      expect(repo.sessionPage({ agentMode: "chat", chatGroupId: group.id }).total).toBe(1);
+      expect(repo.sessionGroups()[0]).toMatchObject({ total: 2 });
+
+      expect(repo.renameChatGroup(group.id, "Deep research").name).toBe("Deep research");
+      repo.removeChatGroup(group.id);
+      expect(repo.listChatGroups()).toEqual([]);
+      expect(repo.getSession(chat.id)?.chatGroupId).toBeNull();
     } finally {
       db.close();
     }

@@ -20,9 +20,163 @@ Explicit confirmation authorizes downloading and launching a newer version. Meta
 
 Local database migrations are permanent and transaction-based, with every historical step included. Future schemas fail closed, without downgrade or history wipe. Back up complete data before important upgrades. Migration tests are not formal NSIS installation/rollback certification.
 
-Mingshen Harness 1.3.2 is a local desktop agent, not a certified
+Mingshen Harness 1.3.3 is a local desktop agent, not a certified
 enterprise security product. An approval prompt is authorization, not proof that a
 command or extension is harmless.
+
+## Agent Modes (1.3.3)
+
+- CodeAgent and WorkAgent share conversation history, drafts, attachments and a
+  workspace. Switching is rejected while the conversation or its child tasks are
+  busy, and applies to the next run. WorkAgent uses the same execution and approval
+  engine as CodeAgent. A mode name does not grant additional filesystem rights.
+  Custom profiles can apply to Code, Work or both; existing profiles default to both.
+- ChatAgent has a separate conversation catalog and no workspace or custom agent
+  profile. Its discovered tools and actual dispatch paths allow only `web_search`
+  and `web_fetch`. It skips repository instructions, workspace memory, Skills,
+  extensions, MCP discovery, hooks, commands, browser operations and subagents.
+  A forged tool call is rejected even if a provider emits a tool absent from its
+  advertised catalog. Shared providers and context compaction remain available.
+- Chat uploads accept PNG/JPEG/WebP/GIF/BMP/TIFF/AVIF images, PDF, DOC/DOCX,
+  XLS/XLSX and PPTX as bounded bytes, with exact encoded-size validation, a
+  25 MiB per-file limit and raster signature checks that reject SVG or mismatched
+  image payloads. Caller-supplied paths and pre-extracted content are discarded
+  again at send and draft persistence boundaries. The trusted parser extracts only
+  uploaded bytes; it does not expose arbitrary local-path read or modification
+  tools. Legacy binary PPT is unsupported. Attachment content is untrusted and may
+  be sent to the selected model or summary provider under the shared settings.
+- CodeAgent and WorkAgent index installed, enabled Skills/plugins as metadata.
+  Session-selected extensions are expanded first; other enabled items are
+  searchable through `discover_capabilities`, and a relevant Skill can then be
+  loaded by exact ID. Disabled extensions are excluded, and ChatAgent rejects
+  discovery and loading at its dedicated policy boundary. Reading a Skill does
+  not execute its scripts or authorize its instructions. MCP tools exposed by an
+  enabled plugin still require their own server, approval and isolation checks.
+  Retained large tool outputs are scoped to their conversation, with up to 40
+  entries / 16 million UTF-16 characters per conversation. Individual captures
+  retain a bounded head and tail with an explicit gap after 4 million characters;
+  the omitted middle cannot be recovered. Conversation deletion removes its archive.
+- Work Office creation and controlled editing use the normal profile, asset-read,
+  approval, isolation, writer-lock, source-hash and conflict checks. Supported
+  outputs are committed atomically per file, not as a multi-file transaction.
+  Unsupported macros, signatures, external connections and executable/complex
+  Office parts are rejected where the controlled editor cannot preserve them.
+  Package validation is not proof of lossless compatibility with arbitrary Office
+  files, accurate formulas or correct visual layout.
+- Optional Microsoft Office COM verification operates on isolated temporary copies
+  only for a full-access host Work main session. It does not install Office, does
+  not fall back to the host from protected or Docker sessions, and skips a file
+  type when its Office application is already running. Macro automation is disabled.
+  Timeout/cancellation cleanup targets a recorded exact Automation process identity,
+  not every process with an Office executable name. COM and document parsers remain
+  trusted host components. Unavailable, failed or incomplete recalculation/rendering
+  must be reported; exporting a PDF does not establish visual approval.
+- The existing run-start snapshot is supplemented by scoped file checkpoints for
+  main-session full-access host file writes. Restore touches only recorded paths
+  and first creates a safety checkpoint of that scope. Per-file, per-run byte and
+  checkpoint-count budgets apply; reaching them is visible. Shell commands,
+  external MCP side effects and other execution modes do not receive a universal
+  per-file rollback guarantee. Snapshots can contain project data and are local
+  application storage, not a substitute for independent backups.
+
+## Local Plugin Interface (1.3.3)
+
+- Native local plugins use `.mingshen-plugin/plugin.json`; imports also recognize
+  `.codex-plugin/plugin.json`, `.zcode-plugin/plugin.json` and a legacy root
+  `plugin.json`. Compatibility parsing does not emulate another host's private
+  viewer, canvas, authentication or host APIs. New distributable plugins should use
+  the native manifest and a focused Harness adapter Skill.
+- Validation is bounded static inspection of manifest fields, declared and bundled
+  Skills, Markdown command declarations, MCP declarations, hooks, relative paths,
+  sizes and a content hash. It does not execute plugin scripts, start a declared MCP
+  server or run a hook. SDK preflight is a separate file-and-path check and explicitly
+  reports `authoritative:false`; the in-app validator is authoritative for host
+  compatibility.
+- A local market catalog and every plugin source must resolve inside the selected
+  market root. Absolute sources, `..` escapes, linked roots and linked sources that
+  escape the root are rejected. Catalogs are bounded to 1 MiB and 200 entries;
+  plugins are bounded to 20,000 files and 64 MiB, with additional limits for
+  manifests, Skill files and loaded text.
+- Installing a validated market plugin copies its current source into application
+  storage. It does not enable a remote synchronization path, continuously follow
+  source edits or hot-reload a changed plugin. Updates keep the stable extension ID,
+  conversation references and the user's enabled/disabled choice. A failed update
+  preserves the previous installation; active tasks block installation and updates.
+- The model-facing `local_plugin` tool is read-only and limited to `inspect`,
+  `validate` and `list_markets`. It is available only to a main CodeAgent/WorkAgent
+  conversation with a workspace, host Windows execution and no parent SubAgent, in
+  either Request Approval or Full Access mode. ChatAgent, SubAgents, Docker and
+  worktree sessions must use the UI. `inspect` and `validate` inherit `read_file`
+  Profile rules, require an absolute real directory inside the workspace and reject
+  link, traversal, protected Git and unsafe Windows path escapes. Request Approval
+  additionally uses a path-scoped read decision after those checks; Full Access does
+  not override a Profile deny or ask rule. `list_markets` only returns registered
+  market metadata and does not scan a market directory. Inspecting or validating a
+  plugin never installs it.
+- `skill-creator`, `plugin-creator` and `harness-plugin-api` can generate and check
+  source, marketplace entries and manual handoff instructions. Generated files are
+  not evidence of installation, enablement or a successful trial. Lifecycle changes
+  remain explicit user actions in Settings.
+- Host plugin validation calls the Electron main-process validator directly. It does
+  not require system Node.js, read the system PATH or launch the bundled SDK CLI as a
+  subprocess. `resources/sdk/plugin-dev/` remains an optional developer preflight for
+  users who choose to run it, reports `authoritative:false`, and cannot install,
+  update or enable a plugin.
+- Plugin content is untrusted input and cannot expand permissions. Installed commands,
+  MCP servers and hooks still obey the active profile, approval, isolation, writer
+  lease and network rules. A declared component that is disabled, unavailable or
+  rejected must be reported as unavailable rather than simulated.
+- Installing or enabling a plugin exposes capabilities for discovery; it does not
+  activate hooks globally. Hook-capable plugins must also be explicitly referenced by
+  the current CodeAgent/WorkAgent conversation. Action hooks then run only in a
+  primary, non-read-only CodeAgent/WorkAgent session using host execution, Full Access
+  and a trusted project. Request Approval, Docker, ChatAgent, actual SubAgents, child
+  sessions and untrusted projects never execute those actions. MCP hooks additionally
+  require an enabled/configured server and per-action approval; Shell hooks remain
+  disabled by default and require project trust, the Shell setting and per-action
+  approval when enabled.
+- Declarative `UserPromptSubmit` prompts are injected only from currently referenced,
+  enabled plugins as bounded, low-priority context, not system instructions; command
+  and MCP actions in that event are not executed. `Interrupt` is a separate
+  explicit-stop cleanup notification using an independent fire-and-forget signal
+  capped at about 1.5 seconds. It permits only `prompt` activity text; Command/MCP
+  actions are skipped without approval, process launch or tool recovery. It is not
+  dispatched for ChatAgent, actual SubAgents, Request Approval, Docker, application
+  shutdown or sessions without a selected enabled plugin. Static validation cannot
+  prove that an enabled hook, command or MCP service is safe or correct.
+
+## Quick Chat and Global Shortcuts (1.3.3)
+
+- By default, `Ctrl+M` toggles Quick Chat: it opens the window when hidden and
+  hides it when already visible. `Ctrl+Alt+L` toggles the main interface/tray.
+  A titlebar pin persists the native always-on-top preference and can be toggled
+  independently. Windows secure desktops, system dialogs and other topmost windows
+  may still take precedence; the pin is not a security boundary.
+  While Mingshen is running, `Ctrl+M` opens a dedicated ChatAgent window from
+  another application. It uses a separate renderer surface and only receives
+  runtime events and IPC operations for its current Chat conversation. A quick
+  session is created with an empty workspace, the built-in primary profile,
+  Request Approval, host execution and no patch-only mode. The normal Chat policy
+  still limits it to `web_search`, `web_fetch` and read-only parsing of files the
+  user deliberately uploads. The quick window cannot promote itself into Code or
+  Work, read a local path, or use MCP, Skills, hooks, commands or subagents.
+- Every activation inside the ten-minute lease reuses the same quick conversation
+  and resets the lease to ten minutes. Once the lease expires, the next activation
+  creates a new Chat conversation; the previous conversation remains in the local
+  Chat catalog and is not silently deleted. Hiding or closing the window is not a
+  destructive action and does not discard a draft. Both windows participate in
+  normal draft flushing, interface reload and shutdown checks, but late events or
+  IPC from the quick window are accepted only for its current Chat session.
+- Both global shortcuts can be recorded and customized in Settings. Each
+  combination must include at least one Ctrl, Shift or Alt modifier and one
+  primary key, and the two shortcuts cannot conflict. Three- and four-part chords
+  using combinations of Ctrl, Shift and Alt are supported; the default two-part
+  `Ctrl+M` and `Ctrl+Alt+L` bindings remain valid. Saving registers the new bindings
+  immediately. If a combination is occupied or registration fails, the application
+  keeps the previous valid bindings, shows an error and allows the defaults to be
+  restored. The shortcut handlers only delegate to the existing window controller
+  and do not execute a model request, tool or permission change. Global shortcuts
+  work only while the process remains running.
 
 ## Trust Boundaries
 

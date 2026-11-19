@@ -6,14 +6,19 @@ import { DialogProvider } from "./components/DialogProvider";
 import { ModelCatalogProvider } from "./components/ModelCatalogPreferences";
 import { UiPreferencesProvider } from "./components/UiPreferences";
 import { registerComposerDraftLifecycle } from "./lib/use-composer-draft";
+import { QuickChatApp } from "./QuickChatApp";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 import "./workbench.css";
 import "./orbit.css";
 import "./orbit-workbench.css";
 import "./model-catalog.css";
+import "./agent-modes.css";
+import "./quick-chat.css";
 
 const root = document.getElementById("root");
+const quickChatSurface =
+  new URLSearchParams(window.location.search).get("surface") === "quick-chat";
 registerComposerDraftLifecycle();
 
 function report(source: "window" | "promise", cause: unknown): void {
@@ -38,16 +43,31 @@ if (!root) {
   throw new Error("Missing renderer root");
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <DialogProvider>
-      <DesktopShell>
+if (quickChatSurface) {
+  document.body.dataset.surface = "quick-chat";
+  createRoot(root).render(
+    <StrictMode>
+      <DialogProvider>
         <UiPreferencesProvider>
           <ModelCatalogProvider>
-            <App />
+            <QuickChatApp />
           </ModelCatalogProvider>
         </UiPreferencesProvider>
-      </DesktopShell>
-    </DialogProvider>
-  </StrictMode>,
-);
+      </DialogProvider>
+    </StrictMode>,
+  );
+} else {
+  createRoot(root).render(
+    <StrictMode>
+      <DialogProvider>
+        <DesktopShell>
+          <UiPreferencesProvider>
+            <ModelCatalogProvider>
+              <App />
+            </ModelCatalogProvider>
+          </UiPreferencesProvider>
+        </DesktopShell>
+      </DialogProvider>
+    </StrictMode>,
+  );
+}

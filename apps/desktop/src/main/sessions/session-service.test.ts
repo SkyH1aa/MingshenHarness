@@ -133,6 +133,36 @@ describe("Workspace conversation creation", () => {
     expect(service.list()).toHaveLength(2);
   });
 
+  it("selects a compatible Agent profile when creating a shortcut in another workspace mode", () => {
+    const primary = repository.getAgentProfile("primary");
+    if (!primary) throw new Error("Expected the built-in primary Agent profile.");
+    const codeOnly = repository.saveAgentProfile({
+      ...primary,
+      id: "code-only",
+      name: "Code only",
+      applicableModes: ["code"],
+    });
+    const source = service.create({
+      providerId,
+      modelId,
+      workspacePath: "C:\\Project",
+      permissionMode: "request_approval",
+      reasoningLevel: null,
+      agentMode: "code",
+      agentProfileId: codeOnly.id,
+    });
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2099-01-01T00:00:00Z", source.id);
+
+    const created = service.createInWorkspace("C:\\Project", "work");
+    expect(created).toMatchObject({
+      agentMode: "work",
+      agentProfileId: "primary",
+      workspacePath: "C:\\Project",
+    });
+  });
+
   it.each([
     { descendant: "child", status: "running" },
     { descendant: "child", status: "waiting_approval" },
@@ -228,5 +258,227 @@ describe("Workspace conversation creation", () => {
     } finally {
       saving.mockRestore();
     }
+  });
+
+  it("creates an isolated ChatAgent without project or custom Agent configuration", () => {
+    const group = service.createChatGroup("Ideas");
+    const chat = service.create({
+      title: "Pure chat",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      agentProfileId: "primary",
+      chatGroupId: group.id,
+      workspacePath: null,
+      reasoningLevel: "high",
+      permissionMode: "full_access",
+      approvalMode: "automatic",
+    });
+    expect(chat).toMatchObject({
+      agentMode: "chat",
+      chatGroupId: group.id,
+      workspacePath: null,
+      agentProfileId: "primary",
+      permissionMode: "request_approval",
+      approvalMode: "manual",
+      executionMode: "host",
+      patchOnly: false,
+    });
+    expect(service.listChatGroups().map((item) => item.id)).toContain(group.id);
+
+    expect(() =>
+      service.create({
+        providerId,
+        modelId,
+        agentMode: "chat",
+        workspacePath: "C:\\Forbidden",
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+      }),
+    ).toThrow("工作目录");
+    expect(() =>
+      service.create({
+        providerId,
+        modelId,
+        agentMode: "chat",
+        agentProfileId: "plan",
+        workspacePath: null,
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+      }),
+    ).toThrow("自定义 Agent");
+    expect(() =>
+      service.create({
+        providerId,
+        modelId,
+        agentMode: "chat",
+        workspacePath: null,
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+        executionMode: "docker",
+      }),
+    ).toThrow("宿主聊天");
+    expect(() => service.update({ sessionId: chat.id, agentMode: "code" })).toThrow("不能直接互换");
+
+    const primary = repository.getAgentProfile("primary");
+    if (!primary) throw new Error("Primary Agent profile is missing.");
+    repository.saveAgentProfile({ ...primary, enabled: false });
+    expect(
+      service.create({
+        providerId,
+        modelId,
+        agentMode: "chat",
+        workspacePath: null,
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+      }),
+    ).toMatchObject({ agentMode: "chat", agentProfileId: "primary" });
+    expect(service.update({ sessionId: chat.id, title: "Renamed pure chat" })).toMatchObject({
+      agentMode: "chat",
+      title: "Renamed pure chat",
+    });
+  });
+
+  it("switches CodeAgent to WorkAgent only while stopped and honors profile applicability", () => {
+    const workspacePath = "C:\\Shared project";
+    const session = service.create({
+      providerId,
+      modelId,
+      agentMode: "code",
+      workspacePath,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    expect(service.update({ sessionId: session.id, agentMode: "work" })).toMatchObject({
+      agentMode: "work",
+      workspacePath,
+    });
+    database.prepare("update sessions set status='running' where id=?").run(session.id);
+    expect(() => service.update({ sessionId: session.id, agentMode: "code" })).toThrow(
+      "请先停止会话及其子任务",
+    );
+    database.prepare("update sessions set status='idle' where id=?").run(session.id);
+
+    const workOnly = repository.saveAgentProfile({
+      name: "Work only",
+      description: "",
+      role: "primary",
+      instructions: "",
+      modelId: null,
+      readOnly: false,
+      enabled: true,
+      applicableModes: ["work"],
+    });
+    expect(() =>
+      service.update({ sessionId: session.id, agentMode: "code", agentProfileId: workOnly.id }),
+    ).toThrow("不适用于当前模式");
+    expect(
+      service.update({ sessionId: session.id, agentMode: "work", agentProfileId: workOnly.id }),
+    ).toMatchObject({ agentMode: "work", agentProfileId: workOnly.id });
+  });
+
+  it("preserves shared history, directory, draft, attachments and tool output when switching modes", () => {
+    const workspacePath = "C:\\Shared project";
+    const session = service.create({
+      providerId,
+      modelId,
+      agentMode: "code",
+      workspacePath,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    repository.appendMessage({
+      sessionId: session.id,
+      role: "user",
+      parts: [{ type: "text", text: "Keep this history" }],
+    });
+    const attachment = {
+      id: "attachment-1",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      size: 1,
+      kind: "file" as const,
+      dataUrl: "data:text/plain;base64,YQ==",
+    };
+    repository.saveComposerDraft({
+      sessionId: session.id,
+      revision: "draft-1",
+      text: "Pending work",
+      formatted: false,
+      attachmentIds: [attachment.id],
+      addedAttachments: [attachment],
+      notificationDraftIds: [],
+    });
+    repository.setSetting(`tool.output.${session.id}.call-1`, { output: "recoverable" });
+
+    expect(service.update({ sessionId: session.id, agentMode: "work" })).toMatchObject({
+      agentMode: "work",
+      workspacePath,
+    });
+    expect(repository.getMessages(session.id)).toMatchObject([
+      { role: "user", parts: [{ type: "text", text: "Keep this history" }] },
+    ]);
+    expect(repository.getComposerDraft(session.id)).toMatchObject({
+      revision: "draft-1",
+      text: "Pending work",
+      attachments: [attachment],
+    });
+    expect(repository.getSetting(`tool.output.${session.id}.call-1`)).toEqual({
+      output: "recoverable",
+    });
+  });
+
+  it("inherits the parent workbench mode for subagents and rejects cross-mode or chat children", () => {
+    const workParent = service.create({
+      providerId,
+      modelId,
+      agentMode: "work",
+      workspacePath: "C:\\Shared project",
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    const childInput = {
+      providerId,
+      modelId,
+      agentProfileId: "primary",
+      workspacePath: workParent.workspacePath,
+      systemPrompt: "",
+      reasoningLevel: null,
+      permissionMode: "request_approval" as const,
+      executionMode: "host" as const,
+      patchOnly: false,
+    };
+    expect(
+      repository.insertSession({
+        ...childInput,
+        title: "Inherited work subagent",
+        parentSessionId: workParent.id,
+      }),
+    ).toMatchObject({ agentMode: "work", parentSessionId: workParent.id });
+    expect(() =>
+      repository.insertSession({
+        ...childInput,
+        title: "Cross-mode subagent",
+        parentSessionId: workParent.id,
+        agentMode: "code",
+      }),
+    ).toThrow("必须继承");
+
+    const chat = service.create({
+      providerId,
+      modelId,
+      agentMode: "chat",
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    expect(() =>
+      repository.insertSession({
+        ...childInput,
+        title: "Forbidden chat child",
+        parentSessionId: chat.id,
+        workspacePath: null,
+      }),
+    ).toThrow("ChatAgent 不支持子 Agent");
   });
 });

@@ -12,6 +12,7 @@ interface MarkdownLiteProps {
   onOpenError?: (message: string) => void;
   onOpenFile?: (path: string) => void;
   documentNavigation?: boolean;
+  allowLocalFiles?: boolean;
 }
 
 function escapeHtml(value: string): string {
@@ -98,6 +99,7 @@ export function MarkdownLite({
   onOpenError,
   onOpenFile,
   documentNavigation = false,
+  allowLocalFiles = true,
 }: MarkdownLiteProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [codeTargets, setCodeTargets] = useState<{ element: HTMLElement; text: string }[]>([]);
@@ -180,6 +182,10 @@ export function MarkdownLite({
       const filePath = target.dataset.mingshenFile || filePathFromHref(href);
       if (filePath) {
         event.preventDefault();
+        if (!allowLocalFiles) {
+          onOpenError?.(tr("当前模式不支持打开本地文件。"));
+          return;
+        }
         if (onOpenFile) {
           onOpenFile(filePath);
           return;
@@ -198,7 +204,7 @@ export function MarkdownLite({
     };
     container.addEventListener("click", openTarget);
     return () => container.removeEventListener("click", openTarget);
-  }, [onOpenError, onOpenFile, workspacePath, documentNavigation]);
+  }, [allowLocalFiles, onOpenError, onOpenFile, workspacePath, documentNavigation]);
 
   return (
     <>

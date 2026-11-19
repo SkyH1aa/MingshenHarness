@@ -7,7 +7,7 @@ import { DATABASE_MIGRATIONS, openDatabase } from "./database";
 import { Repository } from "./repository";
 
 describe("permanent local database upgrade chain", () => {
-  it.each([1, 2, 3, 4, 5, 6, 7])(
+  it.each([1, 2, 3, 4, 5, 6, 7, 8])(
     "upgrades schema %i and preserves user data across repeated launches",
     async (version) => {
       const root = await mkdtemp(join(tmpdir(), "mingshen-old-db-"));
@@ -85,7 +85,7 @@ describe("permanent local database upgrade chain", () => {
           db.close();
           db = openDatabase(path);
           const repo = new Repository(db);
-          expect(db.prepare("pragma user_version").get()?.user_version).toBe(8);
+          expect(db.prepare("pragma user_version").get()?.user_version).toBe(9);
           for (const [index, table] of ["providers", "provider_keys", "models"].entries())
             expect(db.prepare(`select * from ${table}`).all()).toEqual(preservedTables[index]);
           expect(db.prepare("pragma foreign_keys").get()?.foreign_keys).toBe(1);
@@ -101,8 +101,13 @@ describe("permanent local database upgrade chain", () => {
             title: "历史记录 Keep",
             archived: true,
             pinned: true,
+            agentMode: "code",
             permissionMode: "request_approval",
           });
+          expect(repo.getAgentProfile("primary")?.applicableModes).toEqual(["code", "work"]);
+          expect(
+            db.prepare("select name from sqlite_master where name='chat_groups'").get()?.name,
+          ).toBe("chat_groups");
           expect(repo.getMessages("old")[0]?.parts).toEqual([
             { type: "text", text: "Keep full history" },
           ]);

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assembleSystemPrompt } from "./loader";
+import { assembleSystemPrompt, readPromptFile } from "./loader";
 import type { RuntimeContext } from "./runtime-context";
 
 const promptDirectory = join(process.cwd(), "resources", "prompts");
@@ -49,6 +49,10 @@ describe("assembleSystemPrompt", () => {
     expect(bundle.system.indexOf("safety.md")).toBe(-1);
     expect(bundle.system).toContain("# 身份");
     expect(bundle.system).toContain("## 权限模式");
+    expect(bundle.system).toContain("# 决策与自主");
+    expect(bundle.system).toContain("# 证据与验证");
+    expect(bundle.system).toContain("不要空等或反复轮询");
+    expect(bundle.system).toContain("没有固定的墙钟运行上限");
   });
 
   it("serializes runtime context without allowing raw angle-bracket injection", async () => {
@@ -146,6 +150,17 @@ describe("assembleSystemPrompt", () => {
     expect(bundle.system).toContain("wait_subagents");
     expect(bundle.runtime).toContain('"max_concurrent": 2');
     expect(bundle.runtime).toContain('"id": "explore"');
+  });
+
+  it("keeps code and work specialization focused on evidence, review and delivery", async () => {
+    const bundle = await assembleSystemPrompt({ promptDirectory, runtime, agentDepth: 0 });
+    const work = await readPromptFile(promptDirectory, "work");
+
+    expect(bundle.system).toContain("建立可复现证据");
+    expect(bundle.system).toContain("交付前审阅");
+    expect(work).toContain("Start by building a source inventory");
+    expect(work).toContain("Treat validation as several gates");
+    expect(work).toContain("inspect every final page or slide");
   });
   it("teaches proactive structured clarification without turning answers into approval", async () => {
     const bundle = await assembleSystemPrompt({

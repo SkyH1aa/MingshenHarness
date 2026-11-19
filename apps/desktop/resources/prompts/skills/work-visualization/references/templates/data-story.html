@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Data story</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f8f7f3;
+      --ink: #1b2422;
+      --muted: #66706d;
+      --rule: #d8d8d0;
+      --accent: #0f766e;
+      --focus: #0b5fff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+    main { width: min(980px, 100%); margin: 0 auto; padding: 40px 22px 72px; }
+    header { max-width: 760px; margin-bottom: 36px; }
+    h1 { margin: 0 0 10px; font-size: clamp(2rem, 6vw, 4.5rem); line-height: 1; letter-spacing: 0; }
+    h2 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; }
+    p { margin: 0; }
+    .dek, .note { color: var(--muted); }
+    section { display: grid; grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.8fr); gap: 36px; padding: 32px 0; border-top: 1px solid var(--rule); }
+    figure { margin: 0; min-width: 0; }
+    svg { display: block; width: 100%; height: auto; }
+    text { fill: var(--muted); font-size: 12px; }
+    .series { fill: none; stroke: var(--accent); stroke-width: 3; }
+    .area { fill: color-mix(in srgb, var(--accent) 18%, transparent); }
+    .dot { fill: var(--accent); }
+    .unavailable { color: var(--muted); }
+    @media (max-width: 680px) {
+      main { padding: 28px 16px 48px; }
+      section { grid-template-columns: 1fr; gap: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="note">Replace with source, date, and evidence status</p>
+      <h1>Replace with the one conclusion the story supports</h1>
+      <p class="dek">Add one sentence of context. Do not restate the headline.</p>
+    </header>
+    <section>
+      <div>
+        <h2>What changed</h2>
+        <p>Explain the first chart without adding an unsupported cause.</p>
+      </div>
+      <figure>
+        <svg viewBox="0 0 720 300" role="img" aria-labelledby="chart-title chart-desc">
+          <title id="chart-title">Sample time series</title>
+          <desc id="chart-desc">Replace with the real sequence, period, unit, and annotations.</desc>
+          <path class="area" d="M50 230 L180 195 L310 205 L440 125 L570 105 L670 58 L670 260 L50 260 Z"></path>
+          <path class="series" d="M50 230 L180 195 L310 205 L440 125 L570 105 L670 58"></path>
+          <line x1="50" y1="260" x2="670" y2="260" stroke="currentColor" opacity=".25"></line>
+          <text x="50" y="282">Start</text>
+          <text x="670" y="282" text-anchor="end">End</text>
+          <text x="670" y="42" text-anchor="end">Replace with value and unit</text>
+        </svg>
+      </figure>
+    </section>
+    <section>
+      <div>
+        <h2>Why it matters</h2>
+        <p>Distinguish evidence from interpretation. State uncertainty here.</p>
+      </div>
+      <p>Replace this block with the supporting evidence, not another decorative chart.</p>
+    </section>
+    <section>
+      <div>
+        <h2>What to do next</h2>
+        <p>Give the recommendation and its boundary.</p>
+      </div>
+      <p>Replace with owner, date, and decision if those facts are supplied.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -28,6 +28,11 @@ function fixture(t, { missingPackage, missingEntry, missingExport } = {}) {
       main: 'dist/index.cjs',
       dependencies: { jszip: '3.10.2' },
     },
+    exceljs: {
+      version: '4.4.0',
+      main: 'excel.js',
+      dependencies: { jszip: '3.10.2' },
+    },
     fflate: { version: '0.8.3', main: 'lib/index.cjs' },
     jszip: { version: '3.10.2', main: 'lib/index.js' },
     '@xmldom/xmldom': { version: '0.8.15', main: 'lib/index.js' },
@@ -48,7 +53,12 @@ function fixture(t, { missingPackage, missingEntry, missingExport } = {}) {
     }
     entries.set(name, path.join(directory, metadata.main));
   }
-  return { root, source, packages, entries };
+  const resolveModule = name => {
+    const entry = entries.get(name);
+    if (!entry) throw Object.assign(new Error(`Missing ${name}`), { code: 'MODULE_NOT_FOUND' });
+    return entry;
+  };
+  return { root, source, packages, entries, resolveModule };
 }
 
 async function packagedFixture(f, options = {}) {
@@ -63,14 +73,10 @@ async function packagedFixture(f, options = {}) {
 
 test('checks source authoring packages and their runtime dependency closure', t => {
   const f = fixture(t);
-  const resolver = name => {
-    const entry = f.entries.get(name);
-    if (!entry) throw Object.assign(new Error(`Missing ${name}`), { code: 'MODULE_NOT_FOUND' });
-    return entry;
-  };
-  const checked = checkAuthoringRuntime(resolver);
+  const checked = checkAuthoringRuntime(f.resolveModule);
   assert.ok(checked.has('docx'));
   assert.ok(checked.has('pptxgenjs'));
+  assert.ok(checked.has('exceljs'));
   assert.ok(checked.has('fflate'));
   assert.ok(checked.has('jszip'));
 });
@@ -82,6 +88,7 @@ test('checks real ASAR authoring files without unpacked or host dependencies', a
   const checked = checkPackagedAuthoringRuntime(p.archive, p.unpacked, p.files, asar);
   assert.ok(checked.has('docx'));
   assert.ok(checked.has('pptxgenjs'));
+  assert.ok(checked.has('exceljs'));
   assert.ok(checked.has('fflate'));
   assert.ok(checked.has('jszip'));
 });
@@ -113,22 +120,26 @@ test('rejects an ASAR package with a missing authoring runtime entry', async t =
   );
 });
 
+test('rejects an ASAR package missing the spreadsheet authoring runtime', async t => {
+  const f = fixture(t, { missingPackage: 'exceljs' });
+  const p = await packagedFixture(f);
+  assert.throws(
+    () => checkPackagedAuthoringRuntime(p.archive, p.unpacked, p.files, asar),
+    /Missing packaged document dependency: exceljs/,
+  );
+});
+
 for (const subpath of ['math', 'html', 'charts']) test(`rejects missing ${subpath} runtime exports in real ASAR`, async t => {
   const f = fixture(t, { missingExport: `./dist/${subpath}.cjs` });
   const p = await packagedFixture(f);
   assert.throws(() => checkPackagedAuthoringRuntime(p.archive, p.unpacked, p.files, asar), /Missing packaged docx runtime export/);
-  assert.throws(() => checkAuthoringRuntime(name => f.entries.get(name)), /Missing docx runtime export/);
+  assert.throws(() => checkAuthoringRuntime(f.resolveModule), /Missing docx runtime export/);
 });
 
 test('rejects a package closure with a missing runtime entry', t => {
   const f = fixture(t, { missingEntry: 'jszip' });
   assert.throws(
-    () =>
-      checkAuthoringRuntime(name => {
-        const entry = f.entries.get(name);
-        if (!entry) throw Object.assign(new Error(`Missing ${name}`), { code: 'MODULE_NOT_FOUND' });
-        return entry;
-      }),
+    () => checkAuthoringRuntime(f.resolveModule),
     /Missing jszip runtime entry/,
   );
 });

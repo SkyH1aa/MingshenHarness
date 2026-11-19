@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ExtensionImportResult, ExtensionView } from "../../../shared/domain";
 import { tr } from "../i18n/index";
 import { useDialog } from "./DialogProvider";
+import { LocalPluginMarketplace } from "./LocalPluginMarketplace";
 import { SkillMarketplace } from "./SkillMarketplace";
 import { TokenSaverSettings } from "./TokenSaverSettings";
 
@@ -100,7 +101,7 @@ export function ExtensionSettings({ extensions, onChanged, sessionId }: Extensio
             <h3>{tr("\u672C\u5730 Skills \u4E0E Plugins")}</h3>
             <p>
               {tr(
-                "\u4ECE\u672C\u5730\u76EE\u5F55\u5BFC\u5165 Codex \u517C\u5BB9\u6269\u5C55\u3002\u5BFC\u5165\u540E\u4FDD\u5B58\u72EC\u7ACB\u526F\u672C\uFF0C\u4E0D\u8DDF\u968F\u6E90\u76EE\u5F55\u540C\u6B65\uFF1B\u4F1A\u8BDD\u4E2D\u6309\u9700\u5F15\u7528\u3002",
+                "从本地目录导入 Mingshen、Codex 或 ZCode 兼容扩展。导入后保存独立副本；开发插件可通过下方本地市场校验、安装和更新。",
               )}
             </p>
           </div>
@@ -138,11 +139,7 @@ export function ExtensionSettings({ extensions, onChanged, sessionId }: Extensio
             <div className="extension-empty">
               <Box aria-hidden="true" size={22} />
               <strong>{tr("\u8FD8\u6CA1\u6709\u672C\u5730\u6269\u5C55")}</strong>
-              <p>
-                {tr(
-                  "\u9009\u62E9\u5305\u542B SKILL.md \u6216 .codex-plugin/plugin.json \u7684\u76EE\u5F55\u3002",
-                )}
-              </p>
+              <p>{tr("选择包含 SKILL.md、.mingshen-plugin/plugin.json 或兼容插件清单的目录。")}</p>
             </div>
           ) : (
             <div className="extension-table">
@@ -214,13 +211,15 @@ export function ExtensionSettings({ extensions, onChanged, sessionId }: Extensio
         </div>
       </section>
 
+      <LocalPluginMarketplace onChanged={onChanged} />
+
       <section className="settings-block">
         <div className="settings-block__heading">
           <div>
             <h3>{tr("Plugin Hook \u6267\u884C")}</h3>
             <p>
               {tr(
-                "MCP \u7C7B\u578B Hook \u53EF\u76F4\u63A5\u8FD0\u884C\u3002Shell Hook \u9ED8\u8BA4\u5173\u95ED\uFF0C\u5F00\u542F\u540E\u4ECD\u8981\u6C42\u9879\u76EE\u5DF2\u4FE1\u4EFB\uFF0C\u5E76\u5728\u6BCF\u6B21\u6267\u884C\u524D\u5355\u72EC\u5BA1\u6279\u3002",
+                "UserPromptSubmit \u53EA\u6CE8\u5165\u58F0\u660E\u5F0F\u4E0A\u4E0B\u6587\uFF0CInterrupt \u53EA\u4EA7\u751F\u58F0\u660E\u5F0F\u6D3B\u52A8\u901A\u77E5\uFF1BMCP \u4E0E Shell \u52A8\u4F5C\u4EC5\u5728\u5F53\u524D CodeAgent/WorkAgent \u5DF2\u5F15\u7528\u8BE5\u63D2\u4EF6\u3001\u5BBF\u4E3B\u6267\u884C\u3001\u5B8C\u5168\u8BBF\u95EE\u4E14\u9879\u76EE\u5DF2\u4FE1\u4EFB\u7684\u4E3B\u4F1A\u8BDD\u4E2D\u5C1D\u8BD5\uFF0C\u5E76\u5728\u6BCF\u6B21\u6267\u884C\u524D\u5355\u72EC\u5BA1\u6279\u3002\u8BF7\u6C42\u6279\u51C6\u3001Docker\u3001ChatAgent \u4E0E\u5B9E\u9645 SubAgent \u4E0D\u4F1A\u6267\u884C\u3002",
               )}
             </p>
           </div>
@@ -255,7 +254,7 @@ export function ExtensionSettings({ extensions, onChanged, sessionId }: Extensio
             <h3>{tr("\u517C\u5BB9\u8303\u56F4")}</h3>
             <p>
               {tr(
-                "\u652F\u6301\u591A\u7EA7 SKILL.md\u3001YAML frontmatter \u591A\u884C description\u3001\u76EE\u5F55\u5185\u811A\u672C\u4E0E\u8D44\u6E90\uFF0C\u4EE5\u53CA Codex Plugin manifest\u3002MCP \u5DE5\u5177\u53EF\u76F4\u63A5\u6267\u884C\uFF1BShell Hook \u9ED8\u8BA4\u5173\u95ED\uFF0C\u542F\u7528\u540E\u4ECD\u9700\u9010\u6B21\u5BA1\u6279\u3002",
+                "支持多级 SKILL.md、YAML frontmatter、Skill 资源、命令、MCP 与生命周期 Hook。开发清单使用 .mingshen-plugin/plugin.json，并兼容 Codex、ZCode 和根目录 plugin.json；执行仍受现有权限、信任与审批约束。",
               )}
             </p>
           </div>
@@ -263,7 +262,9 @@ export function ExtensionSettings({ extensions, onChanged, sessionId }: Extensio
         <div className="support-matrix">
           <span>SKILL.md</span>
           <strong>{tr("\u5DF2\u652F\u6301")}</strong>
-          <span>Plugin manifest</span>
+          <span>.mingshen-plugin</span>
+          <strong>{tr("已支持")}</strong>
+          <span>Codex / ZCode manifest</span>
           <strong>{tr("\u5DF2\u652F\u6301")}</strong>
           <span>{tr("\u5185\u5BB9\u54C8\u5E0C\u53BB\u91CD")}</span>
           <strong>{tr("\u5DF2\u652F\u6301")}</strong>

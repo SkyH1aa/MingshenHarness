@@ -1,6 +1,6 @@
 # Mingshen Harness User Guide
 
-Version 1.3.2 · Windows 10/11 x64 · 新哲文院算法社
+Version 1.3.3 · Windows 10/11 x64 · 新哲文院算法社
 
 ## Workspace layouts
 
@@ -8,13 +8,17 @@ Choose **Settings → Appearance & language → Interface style** to select **Si
 
 Your style choice saves automatically. After it saves successfully, choose **Reload and apply** or quit normally and restart for it to take effect. Reload and apply waits for appearance preferences, draft writes and attachment reads to finish. Save failures cancel reload with a retryable error; saved unsent content returns after reload. Unsaved file, message and plan edits still block this action, so save those edits first. Active main/child tasks, send preparation, manual compaction and pending approvals/answers also block this action. Finish or explicitly stop the relevant work first; the button does not stop tasks for you. Shutdown cleanup and update installation handoff also block this reload action.
 
-Both styles support day and night themes, which switch immediately without reloading. Light Trails uses white and mineral cyan by day and a dark base with cyan-green edges by night. Motion respects the system reduced-motion setting or the application's Off option; decorative highlights pause while the window is hidden. Running, approval, error and completion states continue to reflect actual events.
+Both styles support day and night themes, which switch immediately without reloading. Light Trails uses a white conversation pane on a pale gray-green shell by day and low-saturation ink-teal surfaces with cyan-green edges by night. Motion respects the system reduced-motion setting or the application's Off option; animation pauses while the window is hidden. Running, approval, error and completion states continue to reflect actual events.
+
+Version 1.3.3 refines Light Trails into an enterprise workbench. The sidebar, conversations, execution timeline, review, terminal and task panes share one surface hierarchy and heading rhythm. Decorative gradients and glows are removed; continuous workplanes, hairlines, flat selection and real running-state lines now establish hierarchy while retaining the atom mark. Composer focus produces one short light trail, running nodes and status-strip signals breathe only during a real run, streaming text keeps full opacity from its first frame while settling with a small offset, and disclosure transitions move only to explain state. Reduced motion removes travel and loops while preserving content, focus and status color.
 
 Simple's titlebar offers Focused chat, Code workbench and Agent collaboration, with names available on hover. Focused chat opens the inspector on demand. Code workbench opens files/review/Git/commands/browser on the right. Collaboration places plans, task trees and child output on the right.
 
-Light Trails has a separate 56px tool rail and Workspace conversation sidebar, a breadcrumb header for the folder and conversation, and a central chat/composer. The rail opens chat, files, Agents, terminal, review and settings; the breadcrumb header also switches the three layouts. The upper-right pane shows review, files or terminal, retaining Git and browser controls. The lower-right pane simultaneously shows plans, the Agent tree or saved plans, with real child-task summaries on the Plan tab. Closing the right panels hides both panes. A bottom status strip shows the project, local-run indicator and actual task state.
+Light Trails starts with a 56px unframed titlebar. A separate 48px tool rail and Workspace conversation sidebar sit below it, followed by a breadcrumb for the folder and conversation and a central chat/composer. The rail opens chat, files, Agents, terminal, review and settings; the breadcrumb header also switches the three layouts. The upper-right pane shows review, files or terminal, retaining Git and browser controls. The lower-right pane simultaneously shows plans, the Agent tree or saved plans, with real child-task summaries on the Plan tab. Closing the right panels hides both panes. A bottom status strip shows the project, local-run indicator and actual task state. Regions share 12px insets and 8px gaps; the square-edged breadcrumb and status rows are 44px and 24px.
 
 All three layouts share the running session; switching does not resend work and retains the current draft, reading position and unsaved editor content. Drag the splitters or focus one and use arrow keys; Home/End select the width limits. Simple's sidebar/inspector default to 260/460px; Light Trails defaults to 228/360px. Their adjustable ranges remain 220–320px and 360–720px. When space is limited, panels become drawers; click the backdrop to close. Settings → Appearance & language configures the default for new projects and system/off motion behavior.
+
+In a narrow Light Trails window, layout labels yield first and the lower task pane defaults to 160px. When the chat pane itself is 600px or narrower, the model selector takes the first composer row and Agent/workspace controls share the second. Below 700px height, tool buttons and the input area tighten as well. If a file editor is open in a short window, the task pane also defaults to 160px; a saved custom height still applies within the available window bounds. Right-side content remains accessible through a drawer, which covers the background conversation while open; close it to resume typing. Drawer calculations include the complete rail, insets and splitters to preserve the space needed by the conversation.
 
 Model and Agent controls live above the composer input. The selected model shows “Model (Provider)”; long names shorten independently, with the complete provider, display name and model ID available on hover. Enabled custom and built-in Agents include brief role labels. Workspace names have full-path tooltips. Light Trails places permission mode and the isolation/patch-only disclosure in the composer footer; Simple retains its original position. Approval surfaces show Allow once and Deny directly; More authorization options exposes session, similar-operation, automatic and project-wide choices. Review the scope before expanding access.
 
@@ -22,7 +26,9 @@ Settings use six groups: General, Models & Agents, Connections, Project & securi
 
 MCP supports connection search and a detail region for configuration, tools and test results. Schedules filter enabled/paused tasks and reveal prompts by selecting a name. History filters records and mounts trajectory details on demand, 100 steps per batch. Step summaries are a separate disclosure and follow the same batch limit; long review command lists also use batches of 100. Embedded guides and changelogs include chapter navigation.
 
-Simple's task summaries default to collapsed and empty task bands are hidden. Light Trails keeps its task pane at the lower right so plans and child status remain visible alongside review above. Both support plan editing and the project plan library. Review shows current-turn saved diffs, including deleted files; Light Trails selects a file before showing its diff. Git workspace has the wider uncommitted-work scope. Commands can dock at the inspector bottom. The command panel is an execution view, not a full interactive PTY.
+Simple's task summaries default to collapsed and empty task bands are hidden. Light Trails places its task pane at the lower right so plans and child status can remain visible alongside review above. Drag the horizontal splitter to resize it, or focus the splitter and use Up/Down in 16px steps and Home/End for the current bounds. Escape cancels an active drag; Enter or double-click restores the responsive default height. Use the task header's collapse button to reduce the pane to one row and expand it again; opening the child Agent task tree also reveals the pane. Height and collapse state are saved per workspace separately from Simple's layout preferences. Both styles support plan editing and the project plan library.
+
+Review shows current-turn saved diffs, including deleted files; Light Trails selects a file before showing its diff. The list shows the file name and containing directory, and the preview header shows the workspace-relative path when available. Git workspace has the wider uncommitted-work scope. Commands can dock at the inspector bottom. The command panel is an execution view, not a full interactive PTY.
 
 ### Expand complete details
 
@@ -34,6 +40,71 @@ streaming. Details appear on demand, retaining complete stored content and copy
 controls.
 
 Long lines wrap and long details scroll independently. Select text or use the copy icon to copy complete content, regardless of which lines are visible. Opening chat details pauses automatic following so later output preserves your reading position; the down-arrow returns to the latest content and resumes following. Historical commands remain expandable during new runs. When several composer errors are open in a small window, scroll the composer region to reach each diagnostic and the input. Child previews retain recent content only; when a truncation notice appears, use its open-conversation icon to read the full child conversation. Existing tool-output, HTTP-response and preview capacity limits still apply; expansion cannot restore content already omitted at its source.
+
+## Agent modes
+
+Use the CodeAgent, WorkAgent and ChatAgent controls in the main titlebar to choose how the next turn works. A mode is not a separate provider: all three share configured providers, models, reasoning levels, context compaction and other base runtime settings.
+
+| Mode | Page and workspace | Capability boundary |
+| --- | --- | --- |
+| CodeAgent | Uses the existing Code/Work conversation catalog and workspace | Code, files, commands, code index, diagnostics, tests, review and engineering verification |
+| WorkAgent | Shares that catalog and workspace with CodeAgent | The same controlled engine plus office skills and `office_document`, focused on documents, workbooks, presentations, research and polished deliverables |
+| ChatAgent | Separate conversation page with no workspace, organized by groups, pins and archives | Only web search/fetch and read-only parsing of files the user deliberately uploads; no local-file modification |
+
+CodeAgent and WorkAgent can change type within the same conversation. The switch does not create a folder, copy history or reset context; messages, plans, drafts, attachments, built-in/installed capability references and project memory remain. Mode controls are disabled while that task is running, preparing a send, waiting for approval or an answer, or compacting, and the main process also rejects a forged mode update. Finish the task or press Stop before switching. The new mode applies to the next model request; it does not rewrite history or resend the previous message. If no enabled Agent profile supports the target mode, the switch is rejected with an error.
+
+ChatAgent cannot be converted directly into CodeAgent or WorkAgent. Its existing chats stay in their own grouped catalog with independent titles, messages, drafts and attachments. In Light Trails, its dedicated page uses a 264px grouped conversation sidebar, solid chrome and a 1px selection line, with 13px titles, 12px supporting text and a fixed 24px empty title; below 900px the sidebar becomes a drawer instead of compressing the chat. It has no workspace picker, task tree, review, terminal, Skills/MCP references, local slash commands or `@` subagents. A Windows path or `file://` string in a message is text, not permission to read the local file.
+
+### Quick Chat and global shortcuts
+
+By default, `Ctrl+M` toggles Quick Chat. While Mingshen is running, press it from this application or another Windows application to open a compact ChatAgent window; pressing the same shortcut while the compact window is visible hides it. The first activation creates a separate Chat conversation. Hiding and activating it again within the **ten-minute** lease reopens that quick conversation and renews the lease for another ten minutes. After it expires, the next activation creates a new Chat conversation; the previous conversation remains in the Chat catalog and is not deleted. Sending a message or waiting for a reply does not extend the lease; only another Quick Chat activation does.
+
+The compact titlebar can create a conversation, open the main window at the current Quick Chat conversation, toggle **Always on top**, or hide the window. The pin choice persists across normal restarts and uses the native window's always-on-top state; Windows security surfaces and system-level dialogs can still appear above it. `Esc` also hides the window when focus is not inside an open menu or dialog and IME composition is inactive. Hiding does not discard the current draft; the next activation within the lease resumes it. The titlebar's New conversation control immediately starts another Chat conversation. An unexpired lease can resume after a normal application restart; once expired, the next activation starts a new conversation. If no enabled text model is available, the window opens provider settings through the main interface instead of pretending that a chat is ready.
+
+Quick Chat retains the ChatAgent boundary. It can use `web_search`, `web_fetch`, read-only parsing of files you deliberately upload, and the shared provider/model/compaction settings. It cannot read local paths, modify files, run commands, use MCP, Skills, hooks or subagents, and cannot turn into CodeAgent or WorkAgent. The quick window's IPC and runtime events are limited to its current Chat conversation.
+
+By default, `Ctrl+Alt+L` toggles the main interface/tray: a visible, focused window is hidden; otherwise the main window is restored, shown and focused. You can record and customize both global shortcuts in Settings. The recorder accepts three- or four-key chords, while the existing two-key defaults remain valid. Each combination must include at least one Ctrl, Shift or Alt modifier and one primary key, and the two shortcuts cannot conflict. Saving registers the bindings immediately. If a combination is occupied or registration fails, Mingshen keeps the previous valid bindings, shows an error and allows the defaults to be restored. Both shortcuts are system-wide registrations and work only while Mingshen remains running. Shortcuts only control windows and never send messages, approve operations or change permissions.
+
+If the agreements or built-in guide step are not yet complete, `Ctrl+M` opens the main window so onboarding can finish; it does not bypass consent by creating a quick conversation.
+
+### CodeAgent specialization
+
+CodeAgent keeps the full engineering workbench and strengthens the working loop:
+
+- Built-in engineering, frontend, backend/data, debugging and verification skills are discovered through metadata. Each entry can load a deeper reference only when the task needs it. `use_skill` loads bounded instruction pages on demand instead of copying the entire Skill catalog into every request.
+- The composer **+** reference panel offers built-in Skills/Plugins plus installed and enabled extensions. Manually selected built-in capabilities and extensions take priority, while other matching capabilities remain available to automatic discovery. When a task involves a relevant domain such as databases, design, documents or review, CodeAgent searches that capability index and loads matching Skill instructions by exact ID. Disabled items never appear. Discovery, loading and MCP tool declarations do not execute scripts or grant permissions. Selecting built-in GitHub or browser plugin metadata records only a tool preference; it does not connect an account, sign in or start an external service.
+- Code index, LSP/diagnostics, file reads and diffs establish the real caller and constraints before a narrow change. Cross-module work also checks types, IPC, persistence, UI and failure paths.
+- The same failing tool with unchanged arguments is recognized instead of blindly replayed. The Agent must inspect arguments, state, permissions or environment, then change its hypothesis, input or strategy. Denied approval, missing dependencies, timeouts and product assertion failures remain distinct classes.
+- Each tool result retains at most 4,000,000 UTF-16 characters, rendered with head and tail excerpts and an explicit marker for the omitted middle. Each conversation retains at most 40 results and 16,000,000 cumulative UTF-16 characters. `read_tool_output` can page through that bounded retention area by `call_id` and character offset, but cannot recover omitted, evicted or never-captured content.
+- Only managed file-tool writes in a primary conversation with Full Access and host execution create per-file local checkpoints before writing. Each file is limited to 25 MiB; a checkpoint and the per-turn total are subject to the `128 MiB / 128 checkpoints` budget. Commands and external MCP side effects are not covered by the per-file snapshot guarantee; the project snapshots and traces kept after a run also do not imply those side effects can be fully rolled back. Interrupted work must inspect actual state instead of assuming an uncertain side effect completed.
+- Delivery uses tests, type checking, lint, build or real UI checks according to risk. Configured project verification supports up to three failure/fix/rerun attempts; a shell exit or a model's claim is not the final acceptance.
+
+### WorkAgent specialization
+
+WorkAgent shares CodeAgent's permissions, isolation, approvals, writer locks, cancellation and atomic-write rules. Its office focus comes from task methods, bundled skills and controlled Office tools, not broader access:
+
+An empty WorkAgent conversation in Light Trails offers Word, Excel and PowerPoint starters. Selecting one appends the suggested text to the current draft; you can edit and send it yourself. It does not start a task or create a file automatically.
+
+- It establishes audience, decision, tone, facts, sources, deliverables, structure and visual constraints before drafting. Titles state a claim, and tables, charts or callouts appear only when they help comparison, decision or risk. Empty slogans, repeated conclusions and unsupported adjectives are removed. Long documents use an outline, decks use a storyboard, and workbooks use an input/calculation/output model. Claims require sources, and an unread page or file is never presented as inspected.
+- Word, PDF and PPTX artifacts can use the controlled `executive`, `consulting`, `editorial` and `minimal` design presets with `airy`, `balanced` or `compact` density and one accent color. DOCX/PDF can add a cover. Layouts share a heading hierarchy, safe areas, typography and spacing rather than changing colors arbitrarily or stacking cards on every page.
+- PPTX can organize a story with cover, section, content, statement, cards, timeline, data and closing `slide.kind` layouts. `metric_grid` is for two to six genuinely comparable measures, and `callout` is for a decision, risk or next action rather than filling every slide.
+- `office_document` creates or edits native XLSX with typed cells, ranges, formulas, formatting, tables, filters, frozen panes, widths, merges and structural inspection. A sheet presentation can define title/header/body ranges, grid lines, print area, repeated heading rows, orientation and fit-to-page; an existing workbook can apply those surfaces with `format_sheet`. Writing a formula, a stored cached value and an actual Excel recalculation are reported separately.
+- Controlled PPTX draft edits cover supported shape/placeholder text, table cells and notes. The Agent reads structure and SHA-256 first and submits operations against that source snapshot. Untouched package parts retain source bytes; macros, signatures, OLE, SmartArt, animation and complex-master compatibility are not promised lossless.
+- DOCX draft structure reads, placeholder-free text/body-section edits, paragraph layout, templates, native equations, charts, headers/footers and footnotes remain available. Outputs default to a new file and fail on a changed source hash, ambiguity, protected structure or capacity overrun.
+- Bundled research, data-analysis, Word, Excel, PowerPoint, operations and artifact-quality skills load deeper editorial-quality, report-surface, story/layout and format-acceptance references for complex work. They emphasize editable native objects, hierarchy, grids, typography, spacing, readable charts/tables, story, sources and accessibility rather than a screenshot that merely looks finished.
+- The built-in domain catalog now has 21 foundation capability entries: five Code, twelve Work, three Creator and one shared artifact-quality entry. Nineteen are original workflows; the new Work-only `builtin:work-ppt-master` and `builtin:work-asd-ste100` entries adapt the open-source PPT Master 6.9.0 and ASD-STE100 0.4.0 skill resources. Mode filtering exposes nine foundation entries in CodeAgent and sixteen in WorkAgent. WorkAgent additionally indexes 124 physical source entries from `WorkAgentSkill/`, discovers them by task context and loads them on demand through `use_skill`; full bodies are not injected into the default prompt. That inventory contains 104 unique body SHA values and 93 unique names. The original bodies of 82 design resources are preserved byte for byte and remapped through catalog wrappers, while 22 unique bodies are original adaptations for the primary design source and non-design material. These are not 124 independently authored workflows. PPT Master scripts, Python dependencies and paid services are never installed or executed automatically, and binary references such as WAV cannot be loaded directly through `use_skill`; the ASD-STE100 adaptation has no official dictionary and is not an official certification. PDF-related material has ten physical sources and five unique source-body SHA values across four workflow roles: production, viewer, reading and loose general-purpose handling; the historical Viewer 0.2.1 body is also retained. Editable native objects, hierarchy, grids, typography, readable charts and tables, narrative, sources, rights and accessibility remain more important than a screenshot that merely looks finished. Private JWT/authentication, viewer, canvas, scripts and host APIs do not become runnable merely because a skill exists.
+- Like CodeAgent, WorkAgent supports automatic discovery, manual built-in selection and other installed/enabled extensions. Manual selections take priority while other matches remain discoverable and loadable on demand. Work-only entries such as `builtin:work-ppt-master` and `builtin:work-asd-ste100` are hidden after switching to Code and restored when Work returns; forks and child conversations copy the selection. ChatAgent has no such access, and disabled extensions are neither discovered nor called.
+- Built-in selections are conversation-scoped and limited to 32 entries; they are not installed extensions. Changes are disabled while running, preparing a send, waiting for approval or an answer, or while any child is busy. When the active Agent Profile permits `use_skill` and no interactive approval is required, including the default read policy, selected Skill bodies may be preloaded into the first-turn system prompt with a 64,000-character total budget. `ask`, `deny`, unavailable or over-budget entries retain exact IDs and follow the real `use_skill` approval path. Plugin IDs are never passed to `use_skill`, and selection grants no connection, login, service-start or tool permission.
+
+`office_document verify` first checks package structure and content. If Microsoft Office is installed and policy permits it, WorkAgent may request Excel COM recalculation or Word/Excel/PowerPoint PDF export for a rendering check. This is possible only in a WorkAgent conversation with Full Access, host execution and no parent session; Office must already be installed and idle and must not be blocked by isolation or organizational policy. The application never installs Office automatically or takes over a document the user is editing.
+
+When Office verification is unavailable, fails or is denied, structural evidence remains and the result explicitly marks formula recalculation, PDF rendering or page-by-page visual review as unverified. Successful package creation, formula writing, actual Excel calculation and Word/PowerPoint page layout are different evidence. COM also does not certify every Office version, font, DPI, printer driver or third-party extension.
+
+### ChatAgent boundary
+
+ChatAgent provides conversation, read-only parsing of user-selected uploads, and only `web_search` and `web_fetch`. It does not use custom Agent profiles and has no local path read, create/modify/delete, command, terminal, browser click/login, GitHub operation, MCP, Skill, hook, custom tool or subagent capability. Forged or model-generated calls to forbidden tools are rejected by the main process before execution; a null workspace alone is not treated as the security boundary.
+
+Attachments use only the bytes the user deliberately supplies. Images follow model vision capability; PDF, Word, Excel and PowerPoint use the application's local read-only parsing and, when supported, the selected provider's native modality. Attachments may contain sensitive data, so confirm the selected provider's policy before sending. ChatAgent may provide text, code or formulas in its reply but cannot claim that it saved a local artifact or completed an external action.
 
 ## Token Saver
 
@@ -111,7 +182,7 @@ Settings, usage totals, latest optimization metadata, summary estimates and cach
 
 Choose Start using or close the guide to finish onboarding. Subsequent normal launches do not automatically show policies or the guide. If the application closes or reloads after consent but before this step, it restores the guide without repeating the checkboxes. First use is based on complete consent records in the current Windows user data directory. Reinstalling while retaining data keeps that consent; a different installation folder is not a new profile. Do not delete existing data to test onboarding.
 
-The titlebar book button switches between User guide and [Changelog](CHANGELOG.en.md). Both documents are embedded and available offline. The changelog covers versions 1.2.1 through 1.3.2.
+The titlebar book button switches between User guide and [Changelog](CHANGELOG.en.md). Both documents are embedded and available offline. The changelog covers versions 1.2.1 through 1.3.3.
 
 ## Automatic retries
 
@@ -161,7 +232,9 @@ Resume from checkpoint explicitly continues the existing unfinished plan and pre
 
 The sidebar counts only parent conversations toward each folder's recent three. The arrow beside a parent's ellipsis expands/collapses its workers, including workers with separate worktrees. Right-click opens the same menu; child search results include their parents. A local incremental database index supports paged startup/search, and Load more fetches further records. Long lists use virtual scrolling. Search covers all unarchived conversations without expanding every folder.
 
-Task plan shows the Agent's real `update_todos` steps and progress: above the chat or in Simple's collaboration inspector, and in Light Trails' lower-right Plan tab. Edit descriptions, dependencies and status, add steps, pause/resume or set a breakpoint before a step. Simple's compact task band also expands/collapses. Revision checks reject concurrent overwrites. Dependencies must be acyclic and complete before a dependent step starts. Plans survive restarts and full conversation forks. Breakpoints depend on the Agent marking the step in progress before its next tool.
+Task plan shows the Agent's real `update_todos` steps and progress: above the chat or in Simple's collaboration inspector, and in Light Trails' lower-right Plan tab. Edit descriptions, dependencies and status, add steps, pause/resume or set a breakpoint before a step. Simple's compact task band also expands/collapses. Revision checks reject concurrent overwrites. Dependencies must be acyclic and complete before a dependent step starts. Saved plans survive restarts and full conversation forks. Breakpoints depend on the Agent marking the step in progress before its next tool.
+
+While a plan edit is unsaved, switching to another conversation or ChatAgent, creating a new conversation, or archiving the current conversation or one of its ancestors is blocked. The task workbench opens the Plan tab and prompts you to save or cancel; switching CodeAgent/WorkAgent within the same conversation remains available. The guard neither saves nor discards edits automatically, and unsaved plan edits are not guaranteed to return after a restart.
 
 An in-progress step spins only while its conversation is running and the plan is not paused. Stopped tasks show Interrupted, paused plans show Paused, approvals/questions show Waiting for user, failures show Failed, and unfinished steps in an idle conversation show Awaiting continuation. These labels do not erase progress or mark incomplete steps complete.
 
@@ -390,6 +463,8 @@ The selected provider receives historical messages, tool content and text attach
 
 ## Permissions and isolation
 
+ChatAgent always uses a restricted chat policy: only search, web fetch and uploaded-attachment parsing are available, with no local path read, file modification, commands, MCP, Skills, hooks, browser automation or subagents. It has no local-tool path to escalate to Full Access. CodeAgent and WorkAgent retain the existing Request Approval / Full Access and isolation settings; WorkAgent's office tools never broaden them. Optional Office COM is attempted only for WorkAgent with Full Access, host execution and no parent session when Office is already installed and policy allows it. Failure downgrades to structural verification with an explicit unverified state and never installs Office.
+
 Request Approval reviews protected agent file access, commands and MCP operations. Examine the complete arguments and scope before allowing once, for a period, or for the session. You can reject with an explanation.
 
 Allow for session remembers only the displayed path or command scope. A different operation can still require approval. Completing an older approval does not clear a newer one. Switching conversations or reloading restores pending operations from the main process; other conversations keep their own pending approvals.
@@ -458,6 +533,12 @@ Snapshots support up to 1 GiB and 100,000 files, excluding `.git`, dependencies 
 
 Use the composer plus menu or drag files into the window. The limit is 25 MiB per file. PDF, DOC/DOCX, XLSX/XLS, PPTX, ODT and common text/code attachments are parsed locally from uploaded bytes without another file path, Office or external parsers. Word 97-2003 binary DOC and modern DOCX support text extraction without running macros; images and original layouts are not preserved. Other media follow configured capabilities; there is no live-recording promise.
 
+### ChatAgent read-only attachments
+
+ChatAgent accepts user-selected PNG/JPEG/WebP/GIF/BMP/TIFF/AVIF raster images, PDF, Word (`.doc`/`.docx`), Excel (`.xls`/`.xlsx`) and PowerPoint (`.pptx`) files for read-only questions. It processes only the uploaded bytes placed in the composer. A local path, network-share path or `file://` string in the message does not trigger a read. The main process checks declared image MIME types against file signatures; SVG, disguised content and legacy binary `.ppt` files are not accepted as supported attachments. Save legacy `.ppt` as `.pptx` first. The same 25 MiB limit, partial-extraction notices, model-modality errors and local parsing boundaries apply.
+
+Uploading a file does not grant file-editing capability. The model can answer from the uploaded, read-only content, but cannot create, overwrite or delete a local file and cannot invoke Office, commands, MCP or Skills. Switch to CodeAgent or WorkAgent with an actual workspace when the task requires local Office generation or project edits.
+
 After copying a screenshot or image, focus the composer and press `Ctrl+V`, or right-click it and choose Paste, to add an attachment. Paste several images in succession and remove any before sending. Plain text still pastes at the cursor; image URLs are not automatically downloaded. Pasting does not send a message. Each image retains the 25 MiB limit and requires an image-capable model before sending. The context menu also offers Cut, Copy and Select all. The application handles clipboard content only when you initiate Paste; it does not monitor the clipboard in the background.
 
 An image-capable model can also use `view_image` to inspect actual pixels in workspace screenshots, generated images or rendered document pages. PNG, JPEG, WebP and GIF are supported up to 20 MiB per image; URLs and SVG are rejected. Existing path, read-approval and native MXC/Docker gateways apply. The image is saved with local tool history and sent to the selected vision model in subsequent requests. Text-only models do not receive this tool. Successful delivery does not guarantee the model's visual interpretation.
@@ -470,11 +551,19 @@ Extraction retains at most 120,000 characters, inspects the first 200 PDF pages,
 
 Ask the Agent to create a document, or explicitly use `create_document`, to generate `.docx`, `.pptx` or `.pdf` in the current workspace. The target extension selects the format. Supported content includes headings, paragraphs, lists, tables, page breaks, slides, speaker notes and PNG/JPEG images read from the workspace after a separate approval. DOCX keeps editable Office text and tables, PPTX keeps editable slide content, and PDF text remains selectable.
 
-Authoring is offline and does not require Office, Python, pandoc or network assets. Chromium performs local PDF layout, while mature Office Open XML authoring libraries create DOCX/PPTX. The default font is the system `Microsoft YaHei` (with normal system fallback when unavailable). Legacy `.doc` / `.ppt` are not output formats, and existing Office files are not promised lossless editing.
+Authoring is offline and does not require Office, Python, pandoc or network assets. Chromium performs local PDF layout, while mature Office Open XML authoring libraries create DOCX/PPTX. The default font is the system `Microsoft YaHei` (with normal system fallback when unavailable). Legacy `.doc` / `.ppt` are not output formats. Existing DOCX files support the localized edits below, without a general lossless Office round-trip guarantee.
 
 Version 1.3.1 converts common LaTeX fractions, roots, scripts, integrals, sums, matrices, cases and aligned expressions into native editable DOCX equations, either standalone or inline. Markdown becomes headings, lists, tables, code, quotes, links and math. DOCX also supports footnotes, TOC fields, headers/footers, page numbers and margins; DOCX/PPTX charts include embedded data workbooks. Accurate TOC page numbers require a field update in Word.
 
 Version 1.3.2 supports multiple paragraphs, mixed formatting, Markdown, lists, code, quotes and native editable equations inside DOCX table cells, with corresponding PDF layout. Ask the Agent to use `{"blocks":[...]}` cells in `table.rows`. Existing string cells remain literal text without guessing Markdown or equation syntax. PPTX tables still accept only plain-text cells. Each structured cell allows at most 50 blocks and 20,000 combined text characters, counted toward the document limits. Complete examples are in `docs/DOCUMENT_TOOLS.md`.
+
+Version 1.3.3 edits DOCX drafts without placeholders. The Agent first reads `read_document` with `structure:true` for original indices and SHA-256, then uses `create_document.edit` to replace a unique inline text match, table-cell text, complete body paragraphs/tables, or paragraph formatting. Inline edits retain surrounding run formatting; block replacements can insert native equations, rich tables, approved images and charts. Output defaults to a new file. Changed sources, ambiguous text, overlapping edits, or ranges containing bookmarks, comments, revisions, cross-paragraph fields, section breaks and other protected structures fail explicitly. Unselected content and unrelated package parts are retained; XML/ZIP are serialized again and changed text can affect pagination.
+
+DOCX/PDF layout controls include paragraph spacing, line-spacing multipliers, first-line and side indentation, justified alignment, keep-with-next, keep-together and page-break-before. Tables accept relative `column_widths`, such as `[1,3]`. Existing DOCX paragraphs can use `format_paragraph` without rebuilding their text, runs or equations. PPTX does not accept these layout controls. Units and examples are in `docs/DOCUMENT_TOOLS.md`.
+
+WorkAgent's `office_document` extends this into structured office workflows. `create_spreadsheet` and `edit_spreadsheet` create or update native XLSX; `edit_presentation` performs source-SHA-bound edits to supported PPTX text shapes, tables and notes; `inspect` checks DOCX/XLSX/PPTX structure and formula state; `verify` performs structural validation and can optionally use an installed Microsoft Office. WorkAgent structures audience, decision, outline, input/calculation/output and visual grid before validating editability, formula state and rendering.
+
+Office COM is an optional enhancement; Office is neither packaged nor installed automatically. Excel recalculation and Word/Excel/PowerPoint PDF export are attempted only for **WorkAgent + Full Access + host execution + a primary, non-child conversation**, with Office already installed and idle and no isolation or organizational policy blocking it. The application uses temporary copies rather than taking control of a document the user is editing. Office version, fonts, DPI, printer driver and macro/third-party differences can still affect output. Request Approval, Docker, a child session, missing Office or COM failure leaves structural validation in place and marks recalculation or rendering **unverified**. A successful package write, cached formula value or text extraction is not proof of recalculation or native layout.
 
 Existing DOCX templates can be filled at unique standalone paragraph markers such as `{{body}}`, normally into a new output file. Template reads require separate authorization; protected structures and missing or duplicate markers are rejected. PDF supports math layout but not editable Office equations; PPTX equation blocks are not supported yet. Unsupported math fails explicitly without silently becoming an image. This is not a full TeX package engine or a general lossless editor for arbitrary Office files. Equation read-back is a linear text summary, not a layout inspection. The repository's `docs/DOCUMENT_TOOLS.md` provides parameters, examples and the format matrix.
 
@@ -486,7 +575,23 @@ Choose A4 or Letter paper and portrait or landscape orientation; Letter is the d
 
 Import a local folder containing `SKILL.md` at any level. Nested skills, YAML descriptions, scripts and resources are supported. Codex plugin manifests use `.codex-plugin/plugin.json`. Imported copies do not continuously synchronize with their sources.
 
-Reference extensions from the composer plus menu. The marketplace separates OpenAI Skills and Composio Awesome Claude Skills and displays at most 20 entries per page. Check sources, licenses and scripts before installing. Skills and repository instructions cannot grant permissions or override safety rules.
+Each local extension and each marketplace skill allows up to 20,000 files, including `SKILL.md`, with a 64 MiB total size limit. Local scanning and copying ignore `.git`, `node_modules`, `.cache`, `dist` and `out` directories; marketplace preflight conservatively counts all remote files. Exactly 20,000 files passes the count check; exceeding it fails before copying or downloading.
+
+### Native local plugins
+
+Mingshen also supports native `.mingshen-plugin/plugin.json` plugins and local development markets described by `marketplace.json`. Import compatibility also recognizes `.codex-plugin`, `.zcode-plugin` and a legacy root `plugin.json`, but those manifests do not gain another host's private runtime or viewer APIs. A plugin can contribute Skills, Markdown commands, MCP declarations and supported hooks.
+
+Open **Settings → Skills and plugins → Local plugin development market** to add a local market, inspect validation results, install a plugin, enable it and later update it from its source version. Installation copies the current source; it does not hot-reload edits. A primary CodeAgent or WorkAgent in a host Windows conversation can use the read-only `local_plugin` tool for `inspect`, `validate` and `list_markets` in either Request Approval or Full Access mode. `inspect` and `validate` inherit `read_file` Profile rules, accept only real absolute directories inside the workspace and, in Request Approval, use a path-scoped approval. Docker, worktree, ChatAgent and actual SubAgents cannot call it. Host validation does not require system Node.js or PATH; the bundled SDK is an optional developer preflight. Only the user can install, update, enable or remove a plugin. `skill-creator`, `plugin-creator` and `harness-plugin-api` are available as on-demand built-in development skills. See [Local plugin interface](LOCAL_PLUGINS.md) for the manifest, SDK, marketplace, Creator, Hook and troubleshooting workflow. ChatAgent does not load plugins, Skills, MCP or hooks.
+
+Installing and enabling a plugin makes it discoverable but does not turn its hooks into global listeners. Reference the plugin from the current CodeAgent/WorkAgent composer **+** menu or `/plugins` so the host checks it for events. Action hooks (`PreToolUse`, `PostToolUse`, normal-completion `Stop`, and `SubagentStop`) are attempted only for a **primary CodeAgent/WorkAgent + host execution + Full Access + trusted project + currently referenced enabled plugin**. Request Approval, Docker, ChatAgent, actual SubAgents and read-only profiles do not execute them. MCP hooks still require per-action human approval, and Shell hooks additionally require the Shell setting, project trust and per-action approval. `Interrupt` is an explicit-stop cleanup notification with an independent signal capped at about 1.5 seconds and fire-and-forget dispatch. It accepts only `prompt` activity text; declared Command/MCP actions are skipped without approval, process launch or tool recovery. It is not dispatched for ChatAgent, actual SubAgents, Request Approval, Docker or application shutdown.
+
+Skills are discovered by metadata such as name and description by default; full skill text is not injected at startup. `use_skill` loads instructions on demand, one page at a time, with at most 32,000 characters per page and `char_offset` for continuation. A loadable Skill text resource is limited to 2 MB, and binary resources cannot be loaded as instructions. When a built-in Skill is manually selected for the conversation, its body may be preloaded only if the active Agent Profile permits `use_skill` and no interactive approval is required, including the default read policy, subject to the 64,000-character first-turn preload budget. `ask`, `deny` and other deferred entries retain exact IDs. The former 120,000-character startup injection budget for extension bodies has been removed; import capacity and model-context budgets remain separate limits.
+
+CodeAgent and WorkAgent build a lightweight capability index for built-in Skills/Plugins and every installed and enabled Skill/plugin. The composer **+** panel separates Built-in Skills, Built-in Plugins, Installed Skills and Installed Plugins. Manual selections are conversation-scoped and remain first; enabled items outside that list remain searchable by task context and can be loaded by the exact returned ID. Manual choice does not turn off automatic discovery. Extensions saved as disabled are excluded, and ChatAgent cannot access this index.
+
+Built-in selection stores at most 32 entries and does not modify installed-extension references. Current built-in Plugin metadata covers GitHub API and the embedded-browser entry. Selecting either expresses a tool preference only; it does not connect GitHub, sign in the browser, start a service or bypass approval. Installation, enablement and automatic discovery make Skills, MCP servers and commands discoverable, but do not run plugin hooks in the background. A hook-capable installed plugin must first be referenced in the current CodeAgent/WorkAgent conversation. Built-in Plugin metadata selection does not silently add an installed plugin to the hook list.
+
+Reference built-in capabilities and installed extensions from the composer plus menu. The marketplace separates OpenAI Skills and Composio Awesome Claude Skills and displays at most 20 entries per page. Check sources, licenses and scripts before installing. Skills and repository instructions cannot grant permissions or override safety rules.
 
 ## MCP and GitHub
 
@@ -520,6 +625,8 @@ BrowserDo uses a separate Embiody browser and profile. It may open a separate wi
 
 Mingshen defaults to 750 model tool-call rounds per user task, followed by an optional final text summary. A new user message starts a new counter; it is not a lifetime history limit. Agent profile settings accept 1–10000 rounds, with a blank value using 750. Existing explicit overrides are preserved. Several tool calls in one model response count as one round, while every tool still undergoes permission checks. You can stop at any time.
 
+Agent profiles apply to both CodeAgent and WorkAgent by default. Their editor shows CodeAgent and WorkAgent applicability checkboxes; a profile may target one mode, but at least one must remain. Upgraded profiles inherit both modes. When a conversation switches mode, the application chooses an enabled compatible profile or rejects the switch if none exists; it never silently broadens permissions or applies a prompt outside its declared scope. ChatAgent always uses its built-in chat behavior and does not expose custom Agent profiles.
+
 Configure primary, read-only Plan and subagent instructions, models, tools and step limits. Invoke a named agent with `@name`. Child sessions can be viewed separately and return to their parent. Default parallelism is three, with a maximum of eight; children cannot create grandchildren.
 
 In Settings → Agent profiles, `Subagent` and `primary + Subagent` profiles show a **Subagent model** control. The default is **Use the parent conversation model**. Selecting a model gives that profile its own model whenever it is invoked with `@` or delegated through `spawn_subagent`. The setting is stored per profile and does not follow later changes to the parent conversation model. Primary and read-only Plan profiles do not offer a child override; legacy values on those roles are ignored at runtime and preserved in storage. If the selected model is unavailable, the run reports a configuration error instead of silently switching to the parent model.
@@ -530,7 +637,7 @@ Both New session and the chat header list all enabled profiles, including ten bu
 
 User-created Agents are included too: primary, Plan, Subagent and combined primary/Subagent types can all be selected directly. Saving in Settings immediately updates both selectors and the purpose guide using the user's name and description. Hiding an Agent from the `@` menu affects only mention suggestions, not direct conversation selection. Disabled profiles remain excluded.
 
-The primary agent is instructed to proactively delegate suitable independent research, implementation or review through `spawn_subagent`, continue its own work, then collect real results with `wait_subagents`. Delegation depends on model decisions and tool support; it is not forced for every message. Runtime and Integrations sets an application-wide concurrency limit shared by automatic tasks, manual `@` tasks and resumed child conversations. Excess tasks queue. Plan can delegate only to read-only children. Stopping a parent cancels associated child tasks. Avoid overlapping edits in a shared folder.
+The primary agent is instructed to proactively delegate suitable independent research, implementation or review through `spawn_subagent`, continue its own work, then collect real results with `wait_subagents`. Delegation depends on model decisions and tool support; it is not forced for every message. SubAgents have no fixed ten-minute wall-clock lifetime: they continue until explicit completion, failure, user stop or parent cancellation. Individual model requests, tools, commands, network calls and external services still have their own timeouts. Runtime and Integrations sets an application-wide concurrency limit shared by automatic tasks, manual `@` tasks and resumed child conversations. Excess tasks queue. Plan can delegate only to read-only children. Stopping a parent cancels associated child tasks. Avoid overlapping edits in a shared folder.
 
 Writable managed children may queue up to six project-root check commands using `request_verification`. Queuing does not execute them. After the child ends, `wait_subagents` collects the requests. Once all tool results from that model turn have been saved, the parent runs checks sequentially using its own profile, approval, isolation, plan and writer-lock checks, saving separate verification tool results to preserve call/result pairing. Checks remain pending while parent commands are running; poll or stop those commands first. Read-only children cannot request this relay. Child command workspaces stay read-only; the relay grants neither writable child shells nor extra authorization. Queued, denied or unexecuted checks must not be reported as passes.
 
@@ -544,7 +651,7 @@ Automatic diagnostics apply to eligible existing code and configuration files. P
 
 Choose a conversation, prompt and interval. Tasks run while the application remains alive. Approval-mode tasks wait for confirmation. Closing offers Minimize to Tray or Quit Completely, shows the number of running conversations (including send preparation, pending approvals and running child conversations) and enabled scheduled tasks, and can remember the choice; reset it in Appearance settings.
 
-The tray provides the application, five recent unarchived conversations and Quit Completely. Fully quitting stops agents and tasks. Tasks do not run while the application is closed or the computer is off.
+The tray provides the application, Quick Chat, five recent unarchived conversations and Quit Completely. By default, `Ctrl+M` toggles Quick Chat — pressing it again while the compact window is visible hides it — and `Ctrl+Alt+L` toggles the main interface/tray. You can record and customize both shortcuts in Settings; the recorder accepts three- or four-key chords while retaining the two-key defaults. Each combination needs at least one Ctrl, Shift or Alt modifier and one primary key, the two cannot conflict, and saving registers them immediately. If a combination is occupied or registration fails, the previous valid bindings are kept with a visible error, and the defaults can be restored. Use the tray if either accelerator is unavailable. Fully quitting stops agents and tasks. Tasks do not run while the application is closed or the computer is off.
 
 ## Task completion notifications and quick replies
 
@@ -713,9 +820,32 @@ step summaries and exports. A model's claim of completion does not replace file
 review, tests or running the result yourself.
 
 Stop cancels the running task but does not automatically undo files already
-written. You can steer a running task or queue another message. Editing or retrying
-an old message replaces later conversation history; it does not restore the disk
-to its state at that point.
+written. While a task runs, **Queue next turn** saves the current text and
+attachments for later without inserting Steer into or restarting the active turn.
+After the current task completes successfully and its background cleanup finishes,
+the earliest queued item starts the next turn automatically. Editing or retrying an
+old message replaces later conversation history; it does not restore the disk to
+its state at that point.
+
+Main-interface CodeAgent, WorkAgent and ChatAgent conversations expose the next-turn queue. Each
+such conversation holds at most ten pending prompts and 50 MiB of queued attachments;
+each file still follows the 25 MiB limit. Items dispatch strictly in insertion order.
+You can edit text, replace all attachments or delete an item, but cannot move,
+reorder or insert one ahead of another. Starting an edit holds the whole queue;
+if the active run is stopped or fails during editing, saving or cancelling ends
+only the edit and the queue remains paused. A failed attachment replacement keeps
+the previous attachment snapshot and pauses the queue so unconfirmed content is
+not sent automatically. A normal successful completion starts the first item.
+Manual Stop, a failed run, an automatic send failure or application restart
+preserves the queue in a paused state. It continues from the first item after an
+explicit queue-level Resume or after a later normal run in the same conversation
+succeeds. Approval waits do not advance the queue. A change to Agent mode,
+workspace, Agent profile, provider, model, permission, approval or execution
+environment blocks the whole queue, and an unconfirmed previous dispatch never
+skips its head item; follow the prompt or delete and re-queue it. Forks do not
+copy the queue, and conversation deletion clears it. Quick Chat and SubAgents do
+not expose the queue and cannot bypass that restriction through IPC to add or
+continue an item.
 
 ### 7. Undo and recover
 
@@ -730,7 +860,7 @@ and target workspace before restoring. Keep Git commits and independent backups.
 
 ### 8. Attach files and add skills
 
-The composer plus menu offers attachments and imported extensions. Drag files
+The composer plus menu offers attachments, built-in capabilities and imported extensions. Drag files
 into the application to attach them. Each file is limited to 25 MiB; unsupported
 model modalities are disabled or reported. A path alone does not send file content
 and still requires a file-tool read.
@@ -803,9 +933,9 @@ encrypted credentials may need to be entered again on another computer.
 
 Automatic local database migrations are permanently part of startup. SQLite
 `user_version`, rather than the application's display version, determines the
-sequential upgrade path from schemas 1–7 to schema 8, extending provider protocol
-and authentication constraints for native Gemini. History,
-settings, archived records, consent and encrypted credentials are preserved.
+sequential upgrade path from schemas 1–8 to schema 9, adding Code/Work/Chat
+conversation modes, chat groups and Agent profile applicability while preserving
+history, settings, archived records, consent and encrypted credentials.
 Each failing step rolls back; a future schema is refused instead of overwritten
 or downgraded. Back up the complete data directory with the app closed before
 important upgrades. Existing profiles are not erased to simulate a fresh install.

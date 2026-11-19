@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ComposerDraft } from "../../../shared/composer-draft";
 import type { ComposerDraftFlushPurpose, MingshenDesktopApi } from "../../../shared/ipc";
 import {
   composerDrafts,
@@ -21,12 +22,22 @@ function deferred() {
 function fixture() {
   const surface = new EventTarget();
   let flushListener: Parameters<MingshenDesktopApi["onComposerDraftFlush"]>[0] = () => {};
+  let changeListener: Parameters<MingshenDesktopApi["onComposerDraftChanged"]>[0] = () => {};
+  let draft: ComposerDraft | null = null;
+  const unsubscribeChanges = vi.fn();
   const api = {
     reloadInterface: vi.fn(async () => {}),
+    getComposerDraft: vi.fn(async () => draft),
     onComposerDraftFlush: vi.fn(
       (listener: Parameters<MingshenDesktopApi["onComposerDraftFlush"]>[0]) => {
         flushListener = listener;
         return vi.fn();
+      },
+    ),
+    onComposerDraftChanged: vi.fn(
+      (listener: Parameters<MingshenDesktopApi["onComposerDraftChanged"]>[0]) => {
+        changeListener = listener;
+        return unsubscribeChanges;
       },
     ),
     acknowledgeComposerDraftFlush: vi.fn(),
@@ -44,14 +55,28 @@ function fixture() {
   });
   const flushAll = vi.spyOn(composerDrafts, "flushAll").mockResolvedValue();
   const hasPending = vi.spyOn(composerDrafts, "hasPending").mockReturnValue(false);
-  cleanups.push(registerComposerDraftLifecycle());
+  const lifecycleCleanup = registerComposerDraftLifecycle();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    lifecycleCleanup();
+  };
+  cleanups.push(dispose);
   return {
     api,
     reload,
     state,
     flushAll,
     hasPending,
+    unsubscribeChanges,
     flush: (purpose: ComposerDraftFlushPurpose) => flushListener("request-id", purpose),
+    changeDraft: (sessionId: string, revision: string | null) =>
+      changeListener({ sessionId, revision }),
+    setDraft: (next: ComposerDraft | null) => {
+      draft = next;
+    },
+    dispose,
     unload: () => {
       const event = new Event("beforeunload", { cancelable: true });
       surface.dispatchEvent(event);
@@ -67,6 +92,33 @@ afterEach(() => {
 });
 
 describe("composer lifecycle during interface reload", () => {
+  it("refreshes a loaded clean draft from change notifications and unsubscribes on cleanup", async () => {
+    const f = fixture();
+    const sessionId = "draft-change-session";
+    await composerDrafts.load(sessionId);
+    const remote: ComposerDraft = {
+      sessionId,
+      revision: "remote-revision",
+      text: "updated by another window",
+      formatted: true,
+      attachments: [],
+      notificationDraftIds: [],
+    };
+    f.setDraft(remote);
+    f.changeDraft(sessionId, remote.revision);
+    await vi.waitFor(() =>
+      expect(composerDrafts.state(sessionId).value).toMatchObject({
+        revision: remote.revision,
+        text: remote.text,
+        formatted: true,
+      }),
+    );
+    expect(f.api.getComposerDraft).toHaveBeenCalledTimes(2);
+    f.dispose();
+    expect(f.unsubscribeChanges).toHaveBeenCalledOnce();
+    composerDrafts.forget([sessionId]);
+  });
+
   it("blocks non-composer edits made while the main process waits for draft persistence", async () => {
     const f = fixture();
     const saving = deferred();

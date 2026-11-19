@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { experimentalExecutable } from './experimental-executable.mjs';
 const portableSpawn=createRequire(resolve('apps/desktop/package.json'))('cross-spawn').spawn;
 const workspace=process.cwd();const profile=resolve(`.tmp-v121-smoke-${Date.now()}`);const port=9336;
 const taskRoot=await mkdtemp(resolve(tmpdir(),'mingshen-desktop-e2e-'));
@@ -34,7 +35,7 @@ const appArgument=process.argv.indexOf('--app');
 const packagedExecutable=appArgument>=0?process.argv[appArgument+1]:null;
 if(!packagedExecutable)execFileSync(process.execPath,[resolve('scripts/prepare-experimental-runtime.cjs')],{stdio:'pipe',windowsHide:true});
 const env={...process.env,MSH_EXPERIMENTAL:'1',MSH_USER_DATA_DIR:profile,MSH_DISABLE_AUTO_DEPENDENCIES:'1',MSH_NOTIFICATION_FIXTURE:'1'};delete env.ELECTRON_RUN_AS_NODE;
-const child=spawn(packagedExecutable?resolve(packagedExecutable):resolve('apps/desktop/node_modules/electron/dist/MingshenHarnessExperimental.exe'),[...(packagedExecutable?[]:['.']),`--remote-debugging-port=${port}`],{cwd:resolve('apps/desktop'),env,windowsHide:true,stdio:'ignore'});
+const child=spawn(packagedExecutable?resolve(packagedExecutable):experimentalExecutable(),[...(packagedExecutable?[]:['.']),`--remote-debugging-port=${port}`],{cwd:resolve('apps/desktop'),env,windowsHide:true,stdio:'ignore'});
 const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));let socket;let id=0;const pending=new Map();
 try{
  let target;for(let i=0;i<80;i++){try{target=(await fetch(`http://127.0.0.1:${port}/json`).then(r=>r.json())).find(t=>t.type==='page');if(target)break;}catch{}await sleep(100);}

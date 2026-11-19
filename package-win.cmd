@@ -32,7 +32,7 @@ if errorlevel 1 exit /b 3
 if /I "%~1"=="--check" goto check
 if /I "%~1"=="--dir" goto directory
 if not "%~1"=="" goto usage
-echo Building Mingshen Harness 1.3.2 Windows installer...
+echo Building Mingshen Harness 1.3.3 Windows installer...
 call "%MSH_PACKAGE_PNPM%" package:win
 if errorlevel 1 goto failed
 echo Installer build completed. See the verified output path above.

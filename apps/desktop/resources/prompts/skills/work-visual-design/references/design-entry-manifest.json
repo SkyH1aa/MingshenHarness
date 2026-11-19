@@ -1,0 +1,504 @@
+{
+  "sourceArchive": "WorkAgentSkill.7z",
+  "sourceArchiveSha256": "D7AEAEE62CF99E3E49391A581B16C8F4E1091A6D9DCB46FB20E9F83769FD9A17",
+  "sourcePackage": "@zcode/design-plugin",
+  "sourceVersion": "0.7.2",
+  "activeOnly": true,
+  "entryCount": 82,
+  "skeletonCount": 74,
+  "subskillCount": 8,
+  "entries": [
+    {
+      "kind": "skeleton",
+      "name": "ai-assistant-mobile-dashboard",
+      "sourcePath": "design-resources/design-skeletons/ai-assistant-mobile-dashboard/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/ai-assistant-mobile-dashboard/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "blog-post",
+      "sourcePath": "design-resources/design-skeletons/blog-post/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/blog-post/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "clinical-case-report",
+      "sourcePath": "design-resources/design-skeletons/clinical-case-report/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/clinical-case-report/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "critique",
+      "sourcePath": "design-resources/design-skeletons/critique/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/critique/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "dashboard",
+      "sourcePath": "design-resources/design-skeletons/dashboard/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/dashboard/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "dcf-valuation",
+      "sourcePath": "design-resources/design-skeletons/dcf-valuation/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/dcf-valuation/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "digital-eguide",
+      "sourcePath": "design-resources/design-skeletons/digital-eguide/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/digital-eguide/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "docs-page",
+      "sourcePath": "design-resources/design-skeletons/docs-page/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/docs-page/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "eng-runbook",
+      "sourcePath": "design-resources/design-skeletons/eng-runbook/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/eng-runbook/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "finance-report",
+      "sourcePath": "design-resources/design-skeletons/finance-report/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/finance-report/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "gamified-app",
+      "sourcePath": "design-resources/design-skeletons/gamified-app/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/gamified-app/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "hr-onboarding",
+      "sourcePath": "design-resources/design-skeletons/hr-onboarding/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/hr-onboarding/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-course-module",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-course-module/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-course-module/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-hermes-cyber-terminal",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-hermes-cyber-terminal/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-hermes-cyber-terminal/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-pitch-deck",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-pitch-deck/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-pitch-deck/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-taste-brutalist",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-taste-brutalist/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-taste-brutalist/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-8-bit-orbit",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-8-bit-orbit/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-8-bit-orbit/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-biennale-yellow",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-biennale-yellow/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-biennale-yellow/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-block-frame",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-block-frame/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-block-frame/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-bold-poster",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-bold-poster/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-bold-poster/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-broadside",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-broadside/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-broadside/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-capsule",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-capsule/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-capsule/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-cartesian",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-cartesian/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-cartesian/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-coral",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-coral/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-coral/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-creative-mode",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-creative-mode/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-creative-mode/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-daisy-days",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-daisy-days/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-daisy-days/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-editorial-tri-tone",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-editorial-tri-tone/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-editorial-tri-tone/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-grove",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-grove/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-grove/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-mat",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-mat/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-mat/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-monochrome",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-monochrome/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-monochrome/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-neo-grid-bold",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-neo-grid-bold/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-neo-grid-bold/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-peoples-platform",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-peoples-platform/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-peoples-platform/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-pin-and-paper",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-pin-and-paper/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-pin-and-paper/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-pink-script",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-pink-script/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-pink-script/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-playful",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-playful/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-playful/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-raw-grid",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-raw-grid/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-raw-grid/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-retro-windows",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-retro-windows/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-retro-windows/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-retro-zine",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-retro-zine/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-retro-zine/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-sakura-chroma",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-sakura-chroma/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-sakura-chroma/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-signal",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-signal/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-signal/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-soft-editorial",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-soft-editorial/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-soft-editorial/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-stencil-tablet",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-stencil-tablet/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-stencil-tablet/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-studio",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-studio/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-studio/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "html-ppt-zhangzara-vellum",
+      "sourcePath": "design-resources/design-skeletons/html-ppt-zhangzara-vellum/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/html-ppt-zhangzara-vellum/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "hyperframes",
+      "sourcePath": "design-resources/design-skeletons/hyperframes/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/hyperframes/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "ib-pitch-book",
+      "sourcePath": "design-resources/design-skeletons/ib-pitch-book/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/ib-pitch-book/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "invoice",
+      "sourcePath": "design-resources/design-skeletons/invoice/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/invoice/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "kami-deck",
+      "sourcePath": "design-resources/design-skeletons/kami-deck/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/kami-deck/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "kami-landing",
+      "sourcePath": "design-resources/design-skeletons/kami-landing/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/kami-landing/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "kanban-board",
+      "sourcePath": "design-resources/design-skeletons/kanban-board/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/kanban-board/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "live-artifact",
+      "sourcePath": "design-resources/design-skeletons/live-artifact/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/live-artifact/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "live-dashboard",
+      "sourcePath": "design-resources/design-skeletons/live-dashboard/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/live-dashboard/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "magazine-poster",
+      "sourcePath": "design-resources/design-skeletons/magazine-poster/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/magazine-poster/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "meeting-notes",
+      "sourcePath": "design-resources/design-skeletons/meeting-notes/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/meeting-notes/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "mobile-app",
+      "sourcePath": "design-resources/design-skeletons/mobile-app/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/mobile-app/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "motion-frames",
+      "sourcePath": "design-resources/design-skeletons/motion-frames/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/motion-frames/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "open-design-landing-deck",
+      "sourcePath": "design-resources/design-skeletons/open-design-landing-deck/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/open-design-landing-deck/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "orbit-linear",
+      "sourcePath": "design-resources/design-skeletons/orbit-linear/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/orbit-linear/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "orbit-notion",
+      "sourcePath": "design-resources/design-skeletons/orbit-notion/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/orbit-notion/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "pm-spec",
+      "sourcePath": "design-resources/design-skeletons/pm-spec/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/pm-spec/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "pricing-page",
+      "sourcePath": "design-resources/design-skeletons/pricing-page/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/pricing-page/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "saas-landing",
+      "sourcePath": "design-resources/design-skeletons/saas-landing/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/saas-landing/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "social-carousel",
+      "sourcePath": "design-resources/design-skeletons/social-carousel/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/social-carousel/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "sprite-animation",
+      "sourcePath": "design-resources/design-skeletons/sprite-animation/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/sprite-animation/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "trading-analysis-dashboard-template",
+      "sourcePath": "design-resources/design-skeletons/trading-analysis-dashboard-template/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/trading-analysis-dashboard-template/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "tweaks",
+      "sourcePath": "design-resources/design-skeletons/tweaks/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/tweaks/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "video-shortform",
+      "sourcePath": "design-resources/design-skeletons/video-shortform/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/video-shortform/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "web-prototype-taste-brutalist",
+      "sourcePath": "design-resources/design-skeletons/web-prototype-taste-brutalist/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/web-prototype-taste-brutalist/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "web-prototype-taste-editorial",
+      "sourcePath": "design-resources/design-skeletons/web-prototype-taste-editorial/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/web-prototype-taste-editorial/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "web-prototype-taste-soft",
+      "sourcePath": "design-resources/design-skeletons/web-prototype-taste-soft/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/web-prototype-taste-soft/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "web-prototype",
+      "sourcePath": "design-resources/design-skeletons/web-prototype/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/web-prototype/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "weekly-update",
+      "sourcePath": "design-resources/design-skeletons/weekly-update/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/weekly-update/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "wireframe-sketch",
+      "sourcePath": "design-resources/design-skeletons/wireframe-sketch/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/wireframe-sketch/SKILL.md"
+    },
+    {
+      "kind": "skeleton",
+      "name": "x-research",
+      "sourcePath": "design-resources/design-skeletons/x-research/SKILL.md",
+      "targetResource": "references/design-resources/design-skeletons/x-research/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "brand-guidelines",
+      "sourcePath": "design-resources/skills/brand-guidelines/SKILL.md",
+      "targetResource": "references/design-resources/skills/brand-guidelines/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "design-consultation",
+      "sourcePath": "design-resources/skills/design-consultation/SKILL.md",
+      "targetResource": "references/design-resources/skills/design-consultation/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "design-review",
+      "sourcePath": "design-resources/skills/design-review/SKILL.md",
+      "targetResource": "references/design-resources/skills/design-review/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "frontend-design",
+      "sourcePath": "design-resources/skills/frontend-design/SKILL.md",
+      "targetResource": "references/design-resources/skills/frontend-design/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "frontend-slides",
+      "sourcePath": "design-resources/skills/frontend-slides/SKILL.md",
+      "targetResource": "references/design-resources/skills/frontend-slides/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "infinite-canvas-output",
+      "sourcePath": "design-resources/skills/infinite-canvas/SKILL.md",
+      "targetResource": "references/design-resources/skills/infinite-canvas/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "plan-design-review",
+      "sourcePath": "design-resources/skills/plan-design-review/SKILL.md",
+      "targetResource": "references/design-resources/skills/plan-design-review/SKILL.md"
+    },
+    {
+      "kind": "subskill",
+      "name": "taste-skill",
+      "sourcePath": "design-resources/skills/taste-skill/SKILL.md",
+      "targetResource": "references/design-resources/skills/taste-skill/SKILL.md"
+    }
+  ]
+}

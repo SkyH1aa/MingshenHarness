@@ -1,0 +1,426 @@
+body[data-surface="quick-chat"] {
+  overflow: hidden;
+  background: var(--bg);
+}
+
+body[data-surface="quick-chat"] #root {
+  min-width: 0;
+}
+
+.quick-chat {
+  position: relative;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.quick-chat__bar {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 52px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.quick-chat__identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quick-chat__identity > span:not(.brand-mark, .quick-chat__live) {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.quick-chat__identity strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-chat__identity small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.quick-chat__live {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.quick-chat[data-run-state="running"] .quick-chat__live {
+  background: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+  animation: quick-chat-pulse 1.8s var(--ease-ui, cubic-bezier(0.22, 1, 0.36, 1)) infinite;
+}
+
+.quick-chat__model {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-chat__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.quick-chat__actions button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  transition:
+    color 120ms var(--ease-ui, ease-out),
+    border-color 120ms var(--ease-ui, ease-out),
+    background 120ms var(--ease-ui, ease-out);
+}
+
+.quick-chat__actions button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--surface-hover);
+}
+
+.quick-chat__actions button.quick-chat__pin[aria-pressed="true"] {
+  color: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 36%, var(--line));
+  background: var(--brand-soft);
+}
+
+.quick-chat__actions button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.quick-chat__actions button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.quick-chat__surface {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.quick-chat .chat-view {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.quick-chat .chat-view--empty {
+  place-items: center;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-view--quick .conversation {
+  width: calc(100% - 32px);
+  padding: 24px 0 32px;
+}
+
+.chat-view--quick .conversation-empty {
+  padding: 8vh 0 0;
+}
+
+.chat-view--quick .conversation-empty__mark {
+  margin-bottom: 16px;
+}
+
+.chat-view--quick .conversation-empty h1 {
+  margin-bottom: 8px;
+  font-size: 22px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
+.chat-view--quick .conversation-empty p {
+  max-width: 48ch;
+  margin-bottom: 0;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.chat-view--quick .conversation-empty__starters,
+.chat-view--quick .parent-session-link,
+.chat-view--quick .metric-strip,
+.chat-view--quick .effort-control,
+.chat-view--quick .workspace-button,
+.chat-view--quick .composer-run-state {
+  display: none;
+}
+
+.chat-view--quick .message {
+  margin-bottom: 22px;
+}
+
+.chat-view--quick .message--user {
+  padding: 12px 13px;
+}
+
+.chat-view--quick .message__content {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.chat-view--quick .message__meta {
+  margin-bottom: 8px;
+}
+
+.chat-view--quick .composer-wrap {
+  width: 100%;
+  padding: 0 12px 12px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+}
+
+.chat-view--quick .composer {
+  width: 100%;
+  max-width: 100%;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 12%);
+}
+
+.chat-view--quick .composer__context {
+  gap: 6px;
+  min-height: 36px;
+  padding: 5px 8px;
+}
+
+.chat-view--quick .chat-model-picker {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.chat-view--quick .chat-model-picker .model-picker__trigger {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+}
+
+.chat-view--quick .composer textarea {
+  min-height: 74px;
+  padding: 12px 13px 8px;
+}
+
+.chat-view--quick .composer__footer {
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  padding: 6px 8px 8px;
+}
+
+.chat-view--quick .composer__footer-left {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-view--quick .composer__footer-right {
+  width: auto;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.chat-view--quick .draft-attachments {
+  padding-inline: 8px;
+}
+
+.chat-view--quick .question-nav {
+  right: 2px;
+}
+
+.chat-view--quick .run-status {
+  margin: 8px 0 12px;
+}
+
+.quick-chat__loading,
+.quick-chat__unavailable {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-content: center;
+  justify-items: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.quick-chat__loading {
+  grid-auto-flow: column;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quick-chat__unavailable {
+  gap: 10px;
+}
+
+.quick-chat__unavailable h1 {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
+.quick-chat__unavailable p {
+  max-width: 44ch;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.quick-chat__recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.quick-chat__error {
+  position: absolute;
+  z-index: 8;
+  top: 60px;
+  right: 12px;
+  left: 12px;
+  max-height: 100px;
+  overflow: auto;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line));
+  border-radius: 6px;
+  color: var(--danger);
+  background: var(--surface-raised);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+:root[data-interface-style="orbit"] .quick-chat__bar {
+  border-color: var(--orbit-hairline, var(--line));
+  background: var(--orbit-panel-header, var(--surface));
+}
+
+:root[data-interface-style="orbit"] .chat-view--quick .composer {
+  border-color: var(--orbit-hairline, var(--line));
+  background: var(--orbit-surface, var(--surface));
+  box-shadow: none;
+}
+
+:root[data-interface-style="orbit"] .chat-view--quick .composer:focus-within {
+  border-color: var(--orbit-metal, var(--line-strong));
+  box-shadow: inset 0 1px 0 var(--orbit-brand, var(--brand));
+}
+
+@keyframes quick-chat-pulse {
+  50% {
+    opacity: 0.54;
+    transform: scale(0.78);
+  }
+}
+
+@media (max-width: 460px) {
+  .quick-chat__bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px;
+    padding-left: 10px;
+  }
+
+  .quick-chat__model {
+    display: none;
+  }
+
+  .quick-chat__identity strong {
+    font-size: 12px;
+  }
+
+  .quick-chat__actions button {
+    width: 30px;
+    height: 30px;
+  }
+
+  .chat-view--quick .conversation {
+    width: calc(100% - 24px);
+    padding-top: 18px;
+  }
+
+  .chat-view--quick .composer-wrap {
+    padding-inline: 8px;
+  }
+}
+
+@media (max-height: 560px) {
+  .chat-view--quick .conversation-empty {
+    padding-top: 4vh;
+  }
+
+  .chat-view--quick .conversation-empty__mark {
+    display: none;
+  }
+
+  .chat-view--quick .composer textarea {
+    min-height: 58px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-chat[data-run-state="running"] .quick-chat__live {
+    animation: none;
+  }
+
+  .quick-chat__actions button {
+    transition: none;
+  }
+}
+
+:root[data-motion="reduced"] .quick-chat[data-run-state="running"] .quick-chat__live {
+  animation: none;
+}
+
+:root[data-motion="reduced"] .quick-chat__actions button {
+  transition: none;
+}

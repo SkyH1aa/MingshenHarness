@@ -29,6 +29,7 @@ extraResources:
     to: documents
     filter:
       - "*.cjs"
+      - "*.ps1"
   - from: resources/native
     to: native
     filter:

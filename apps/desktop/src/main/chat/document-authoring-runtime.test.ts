@@ -214,6 +214,194 @@ async function fixture() {
 }
 
 describe("document authoring runtime policy", () => {
+  it("exposes only network tools to Chat and refuses forged local, plugin and Skill calls before dispatch", async () => {
+    const f = await fixture();
+    const chat = { ...f.current(), agentMode: "chat" as const, workspacePath: null };
+    expect((await f.internal.availableTools(chat, model)).map((tool) => tool.name).sort()).toEqual([
+      "web_fetch",
+      "web_search",
+    ]);
+    for (const name of [
+      "read_file",
+      "create_document",
+      "office_document",
+      "use_skill",
+      "read_tool_output",
+      "run_command",
+      "browser_click",
+      "spawn_subagent",
+      "mcp__fixture",
+      "execute_tool_chain",
+    ])
+      expect(await f.call(name, { path: "pixel.png" }, { session: chat })).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("CHAT_TOOL_DENIED"),
+      });
+    expect(f.execute).not.toHaveBeenCalled();
+    const direct = await f.registry.execute(
+      "write_file",
+      { path: "blocked.txt", content: "bad" },
+      {
+        session: chat,
+        runId: "direct",
+        toolCallId: "direct",
+        toolName: "write_file",
+        signal: f.controller.signal,
+        permissions: f.permissions,
+        requestApproval: async () => {
+          throw new Error("Chat must never request local approval");
+        },
+      },
+    );
+    expect(direct.isError).toBe(true);
+    await expect(access(join(f.root, "blocked.txt"))).rejects.toThrow();
+  });
+
+  it("archives a large actual tool result and recovers later pages by call ID", async () => {
+    const f = await fixture();
+    f.execute.mockResolvedValueOnce({
+      output: `${"x".repeat(95_000)}RECOVERED_END`,
+      isError: false,
+    });
+    const result = await f.call("read_file", { path: "pixel.png" }, { callId: "large-call" });
+    expect(result.output.length).toBeLessThan(80_000);
+    expect(result.output).toContain("LARGE_OUTPUT_RETAINED");
+    const recovered = await f.call("read_tool_output", {
+      call_id: "large-call",
+      char_offset: 94_900,
+    });
+    expect(recovered.isError).toBe(false);
+    expect(recovered.output).toContain("RECOVERED_END");
+  });
+
+  it("stops executing an unchanged repeatedly failing tool and permits inspection using another call", async () => {
+    const f = await fixture();
+    f.execute.mockResolvedValue({ output: "fixture missing file", isError: true });
+    for (let i = 0; i < 3; i++) await f.call("read_file", { path: "missing.txt" });
+    expect(f.execute).toHaveBeenCalledTimes(3);
+    expect((await f.call("read_file", { path: "missing.txt" })).output).toContain(
+      "STRATEGY_CHANGE_REQUIRED",
+    );
+    expect(f.execute).toHaveBeenCalledTimes(3);
+    await f.call("list_files", { path: "." });
+    expect(f.execute).toHaveBeenCalledTimes(4);
+  });
+
+  it("creates a native Work workbook through the normal file gateway and enforces profile read/write limits", async () => {
+    const f = await fixture();
+    const work = { ...f.current(), agentMode: "work" as const };
+    const args = {
+      operation: "create_spreadsheet",
+      path: "model.xlsx",
+      workbook: {
+        sheets: [
+          {
+            name: "Data",
+            cells: [
+              { row: 1, column: 1, value: 20 },
+              { row: 2, column: 1, value: { formula: "A1*2" } },
+            ],
+          },
+        ],
+      },
+    };
+    expect(
+      (await f.internal.availableTools(work, model)).some(
+        (tool) => tool.name === "office_document",
+      ),
+    ).toBe(true);
+    const created = await f.call("office_document", args, { session: work });
+    expect(created).toMatchObject({
+      isError: false,
+      fileChange: { path: join(f.root, "model.xlsx") },
+    });
+    const inspected = await f.call(
+      "office_document",
+      { operation: "inspect", path: "model.xlsx" },
+      { session: work },
+    );
+    expect(inspected.isError).toBe(false);
+    expect(inspected.output).toContain("A1*2");
+    f.saveProfile({ readOnly: true });
+    expect(
+      (await f.call("office_document", { ...args, path: "blocked.xlsx" }, { session: work }))
+        .isError,
+    ).toBe(true);
+    expect(
+      (
+        await f.call(
+          "office_document",
+          { operation: "inspect", path: "model.xlsx" },
+          { session: work },
+        )
+      ).isError,
+    ).toBe(false);
+    await expect(access(join(f.root, "blocked.xlsx"))).rejects.toThrow();
+  });
+
+  const oldDraft = (bytes: Buffer) => ({
+    path: "revised.docx",
+    edit: {
+      path: "old.docx",
+      expected_sha256: hash(bytes),
+      operations: [
+        { type: "replace_text", paragraph: 1, old_text: "runtime", new_text: "revised" },
+      ],
+    },
+  });
+
+  it.each([
+    { toolAllowlist: ["write_file"], permissions: {} },
+    { toolAllowlist: ["write_file", "read_file"], permissions: { read_file: "deny" } },
+    { toolAllowlist: ["write_file", "read_file"], permissions: { "read:old.docx": "deny" } },
+  ] as const)(
+    "keeps old-draft editing inside the profile's source-read policy %#",
+    async (policy) => {
+      const f = await fixture();
+      const original = await authorOfficeDocument(
+        documentAuthoringSchema.parse(document()),
+        new Map(),
+      );
+      await writeFile(join(f.root, "old.docx"), original);
+      f.saveProfile({ toolAllowlist: [...policy.toolAllowlist], permissions: policy.permissions });
+      expect(await f.call("create_document", oldDraft(original))).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("禁止读取"),
+      });
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(await readFile(join(f.root, "old.docx"))).toEqual(original);
+      await expect(access(join(f.root, "revised.docx"))).rejects.toThrow();
+    },
+  );
+
+  it("requires independent manual old-draft read approval and preserves the source when denied", async () => {
+    const f = await fixture();
+    const original = await authorOfficeDocument(
+      documentAuthoringSchema.parse(document()),
+      new Map(),
+    );
+    await writeFile(join(f.root, "old.docx"), original);
+    f.saveProfile({ permissions: { "read:old.docx": "ask" } });
+    f.repository.setSetting(`permissions.approval.${f.session.id}`, "automatic");
+    const review = vi
+      .spyOn(AutomaticApprovalService.prototype, "review")
+      .mockResolvedValue({ allowed: true, reason: "Fixture" });
+    const pending = f.call("create_document", oldDraft(original));
+    await vi.waitFor(() => expect(f.broker.state().requests).toHaveLength(1));
+    const request = f.broker.state().requests[0];
+    if (!request) throw new Error("Expected source read approval.");
+    expect(request).toMatchObject({
+      toolName: "read_file",
+      pathScope: join(f.root, "old.docx"),
+      manualOnly: true,
+    });
+    expect(review).not.toHaveBeenCalled();
+    f.chat.decideApproval({ approvalId: request.id, decision: "deny" });
+    expect((await pending).isError).toBe(true);
+    expect(await readFile(join(f.root, "old.docx"))).toEqual(original);
+    await expect(access(join(f.root, "revised.docx"))).rejects.toThrow();
+  });
+
   it("inherits an existing write_file allowlist and writes a real editable document", async () => {
     const f = await fixture();
     expect(await f.tools()).toContain("create_document");

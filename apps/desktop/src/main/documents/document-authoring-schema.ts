@@ -1,5 +1,6 @@
 import { extname } from "node:path";
 import { z } from "zod";
+import { OFFICE_DESIGN_DENSITIES, OFFICE_DESIGN_PRESETS } from "./office-visuals";
 
 const MAX_TEXT_LENGTH = 500_000;
 const MAX_BLOCKS = 500;
@@ -15,6 +16,15 @@ export const PRESENTATION_HEIGHT_INCHES = 7.5;
 export const MAX_AUTHORING_IMAGE_BYTES = 20 * 1024 * 1024;
 
 const colorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "颜色必须是 #RRGGBB。");
+export const documentDesignSchema = z
+  .object({
+    preset: z.enum(OFFICE_DESIGN_PRESETS).optional(),
+    density: z.enum(OFFICE_DESIGN_DENSITIES).optional(),
+    accent: colorSchema.optional(),
+    cover_page: z.boolean().optional(),
+  })
+  .strict()
+  .refine((design) => Object.keys(design).length > 0, "设计参数不能为空。");
 const safeText = (label: string, max = 100_000) =>
   z
     .string()
@@ -44,6 +54,21 @@ const positionSchema = z
   );
 
 const blockBase = z.object({ position: positionSchema.optional() }).strict();
+export const paragraphLayoutSchema = z
+  .object({
+    align: z.enum(["left", "center", "right", "justify"]).optional(),
+    space_before: z.number().finite().min(0).max(144).optional(),
+    space_after: z.number().finite().min(0).max(144).optional(),
+    line_spacing: z.number().finite().min(0.8).max(3).optional(),
+    first_line_indent: z.number().finite().min(0).max(2).optional(),
+    indent_left: z.number().finite().min(0).max(3).optional(),
+    indent_right: z.number().finite().min(0).max(3).optional(),
+    keep_with_next: z.boolean().optional(),
+    keep_together: z.boolean().optional(),
+    page_break_before: z.boolean().optional(),
+  })
+  .strict()
+  .refine((layout) => Object.keys(layout).length > 0, "排版参数不能为空。");
 const linkSchema = z
   .string()
   .max(4000)
@@ -70,6 +95,7 @@ const richParagraphSchema = blockBase
     type: z.literal("rich_paragraph"),
     runs: z.array(inlineSchema).min(1).max(500),
     align: z.enum(["left", "center", "right"]).optional(),
+    layout: paragraphLayoutSchema.optional(),
   })
   .strict();
 const equationSchema = blockBase
@@ -77,6 +103,7 @@ const equationSchema = blockBase
     type: z.literal("equation"),
     latex: safeText("LaTeX", 10000),
     align: z.enum(["left", "center", "right"]).optional(),
+    layout: paragraphLayoutSchema.optional(),
   })
   .strict();
 const markdownSchema = z
@@ -90,6 +117,14 @@ const codeSchema = z
   })
   .strict();
 const quoteSchema = z.object({ type: z.literal("quote"), text: safeText("引用") }).strict();
+const calloutSchema = blockBase
+  .extend({
+    type: z.literal("callout"),
+    title: optionalText("提示标题", 500).optional(),
+    text: safeText("提示内容", 20_000),
+    tone: z.enum(["accent", "positive", "warning", "neutral"]).optional(),
+  })
+  .strict();
 const tocSchema = z
   .object({ type: z.literal("table_of_contents"), title: optionalText("目录标题", 100).optional() })
   .strict();
@@ -125,12 +160,29 @@ const chartSchema = blockBase
       ctx.addIssue({ code: "custom", message: "饼图需要一个非负且非全零的序列。" });
   });
 
+const metricSchema = z
+  .object({
+    value: safeText("指标值", 200),
+    label: safeText("指标名称", 500),
+    detail: optionalText("指标说明", 2_000).optional(),
+  })
+  .strict();
+
+const metricGridSchema = blockBase
+  .extend({
+    type: z.literal("metric_grid"),
+    metrics: z.array(metricSchema).min(2).max(6),
+    columns: z.number().int().min(2).max(3).optional(),
+  })
+  .strict();
+
 const headingBlockSchema = blockBase
   .extend({
     type: z.literal("heading"),
     text: safeText("标题", 20_000),
     level: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     color: colorSchema.optional(),
+    layout: paragraphLayoutSchema.optional(),
   })
   .strict();
 
@@ -143,6 +195,7 @@ const paragraphBlockSchema = blockBase
     font_size: z.number().finite().positive().max(96).optional(),
     color: colorSchema.optional(),
     align: z.enum(["left", "center", "right"]).optional(),
+    layout: paragraphLayoutSchema.optional(),
   })
   .strict();
 
@@ -189,6 +242,7 @@ const tableBlockSchema = blockBase
         "表格各行必须有相同的列数。",
       ),
     header: z.boolean().optional(),
+    column_widths: z.array(z.number().finite().positive().max(100)).min(1).max(200).optional(),
   })
   .strict();
 
@@ -220,16 +274,62 @@ export const documentBlockSchema = z.discriminatedUnion("type", [
   markdownSchema,
   codeSchema,
   quoteSchema,
+  calloutSchema,
   tocSchema,
   chartSchema,
+  metricGridSchema,
+]);
+
+const documentEditOperationSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("replace_text"),
+      paragraph: z.number().int().positive().max(100_000),
+      old_text: safeText("待替换文字"),
+      new_text: optionalText("替换文字"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("replace_blocks"),
+      start_block: z.number().int().positive().max(100_000),
+      end_block: z.number().int().positive().max(100_000),
+      blocks: z.array(documentBlockSchema).max(MAX_BLOCKS),
+    })
+    .strict()
+    .refine(
+      (operation) => operation.end_block >= operation.start_block,
+      "区段结束位置早于开始位置。",
+    ),
+  z
+    .object({
+      type: z.literal("format_paragraph"),
+      paragraph: z.number().int().positive().max(100_000),
+      layout: paragraphLayoutSchema,
+    })
+    .strict(),
 ]);
 
 const slideSchema = z
   .object({
     title: optionalText("幻灯片标题", 20_000).optional(),
+    eyebrow: optionalText("幻灯片眉题", 500).optional(),
+    kind: z
+      .enum([
+        "auto",
+        "cover",
+        "section",
+        "content",
+        "statement",
+        "cards",
+        "timeline",
+        "data",
+        "closing",
+      ])
+      .optional(),
     notes: optionalText("演讲者备注", 50_000).optional(),
     background: colorSchema.optional(),
-    blocks: z.array(documentBlockSchema).min(1).max(MAX_BLOCKS),
+    blocks: z.array(documentBlockSchema).max(MAX_BLOCKS).default([]),
   })
   .strict();
 
@@ -271,9 +371,18 @@ export const documentAuthoringSchema = z
       })
       .strict()
       .optional(),
+    edit: z
+      .object({
+        path: z.string().min(1).max(MAX_IMAGE_PATH).refine(noNullCharacter),
+        expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/),
+        operations: z.array(documentEditOperationSchema).min(1).max(100),
+      })
+      .strict()
+      .optional(),
     overwrite: z.boolean().default(false),
     page_size: z.enum(["A4", "Letter"]).optional(),
     orientation: z.enum(["portrait", "landscape"]).optional(),
+    design: documentDesignSchema.optional(),
     font: z
       .string()
       .min(1)
@@ -287,7 +396,12 @@ export const documentAuthoringSchema = z
   .superRefine((request, ctx) => {
     const extension = extname(request.path).toLowerCase();
     const blocks =
-      request.blocks ?? request.template?.replacements.flatMap((item) => item.blocks) ?? [];
+      request.blocks ??
+      request.template?.replacements.flatMap((item) => item.blocks) ??
+      request.edit?.operations.flatMap((item) =>
+        item.type === "replace_blocks" ? item.blocks : [],
+      ) ??
+      [];
     const slides = request.slides ?? [];
     const topLevelBlocks = [...blocks, ...slides.flatMap((slide) => slide.blocks)];
     const allBlocks = topLevelBlocks.flatMap<DocumentBlock>((block) =>
@@ -308,10 +422,12 @@ export const documentAuthoringSchema = z
         0,
       );
     const textSize = collectText(request).length;
-    if (request.template) {
+    const source = request.template ?? request.edit;
+    if (source) {
       if (
         extension !== ".docx" ||
-        extname(request.template.path).toLowerCase() !== ".docx" ||
+        extname(source.path).toLowerCase() !== ".docx" ||
+        (request.template !== undefined && request.edit !== undefined) ||
         request.blocks !== undefined ||
         request.slides !== undefined ||
         request.title !== undefined ||
@@ -321,30 +437,46 @@ export const documentAuthoringSchema = z
         request.page_numbers !== undefined ||
         request.margins !== undefined ||
         request.page_size !== undefined ||
-        request.orientation !== undefined
+        request.orientation !== undefined ||
+        request.design !== undefined
       )
         ctx.addIssue({
           code: "custom",
           message:
-            "模板仅支持 DOCX，使用 template.replacements，不同时传 blocks/slides 或文档级标题、作者、页眉页脚、页码、边距、纸张或方向。模板保留原有版式。",
+            "模板或旧稿编辑仅支持 DOCX，二者互斥，不同时传 blocks/slides 或文档级标题、作者、页眉页脚、页码、边距、纸张、方向或设计参数。模板保留原有版式，旧稿保留未选区段。",
         });
       if (
+        request.template &&
         new Set(request.template.replacements.map((item) => item.placeholder)).size !==
-        request.template.replacements.length
+          request.template.replacements.length
       )
         ctx.addIssue({ code: "custom", message: "模板占位符名称不能重复。" });
       if (allBlocks.some((block) => block.type === "table_of_contents"))
-        ctx.addIssue({ code: "custom", message: "模板填充不新增目录字段。" });
+        ctx.addIssue({ code: "custom", message: "模板填充或旧稿编辑不新增目录字段。" });
     }
     if (
       extension === ".pptx" &&
       (request.header !== undefined ||
-        request.footer !== undefined ||
         request.page_numbers !== undefined ||
         request.margins !== undefined)
     )
-      ctx.addIssue({ code: "custom", message: "PPTX 不使用文档页眉、页脚、页码和页边距。" });
+      ctx.addIssue({
+        code: "custom",
+        message: "PPTX 不使用文档页眉、页码和页边距；footer 可作为母版页脚文字。",
+      });
     for (const block of allBlocks) {
+      if (
+        block.type === "table" &&
+        block.column_widths &&
+        block.column_widths.length !== block.rows[0]?.length
+      )
+        ctx.addIssue({ code: "custom", message: "column_widths 数量必须与表格列数一致。" });
+      if (
+        extension === ".pptx" &&
+        (("layout" in block && block.layout !== undefined) ||
+          (block.type === "table" && block.column_widths !== undefined))
+      )
+        ctx.addIssue({ code: "custom", message: "layout 和 column_widths 目前仅支持 DOCX/PDF。" });
       if (
         extension === ".pptx" &&
         block.type === "table" &&
@@ -364,6 +496,11 @@ export const documentAuthoringSchema = z
           code: "custom",
           message:
             "此富文本/公式块用于 DOCX/PDF；原生可编辑公式请输出 DOCX，PPTX 不会静默转换为图片。",
+        });
+      if (extension !== ".pptx" && block.type === "metric_grid")
+        ctx.addIssue({
+          code: "custom",
+          message: "metric_grid 是原生 PowerPoint 指标卡布局；DOCX/PDF 请使用表格。",
         });
       if (
         extension === ".pdf" &&
@@ -388,6 +525,13 @@ export const documentAuthoringSchema = z
       if (slides.length === 0) {
         ctx.addIssue({ code: "custom", path: ["slides"], message: "PPTX 至少需要一张幻灯片。" });
       }
+      if (request.design?.cover_page !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["design", "cover_page"],
+          message: "PPTX 请使用 slide.kind=cover，不使用 design.cover_page。",
+        });
+      }
       if (request.blocks !== undefined) {
         ctx.addIssue({
           code: "custom",
@@ -396,11 +540,11 @@ export const documentAuthoringSchema = z
         });
       }
       for (const [index, slide] of slides.entries()) {
-        if (!slide.blocks.some(hasContent)) {
+        if (!slide.title?.trim() && !slide.blocks.some(hasContent)) {
           ctx.addIssue({
             code: "custom",
             path: ["slides", index, "blocks"],
-            message: "幻灯片需要非空文字、表格或图片。",
+            message: "幻灯片需要标题，或非空文字、表格、图片等内容。",
           });
         }
         if (slide.blocks.some((block) => block.type === "page_break")) {
@@ -412,7 +556,7 @@ export const documentAuthoringSchema = z
         }
       }
     } else {
-      if (blocks.length === 0) {
+      if (blocks.length === 0 && !request.edit) {
         ctx.addIssue({
           code: "custom",
           path: ["blocks"],
@@ -422,7 +566,7 @@ export const documentAuthoringSchema = z
       if (request.slides !== undefined) {
         ctx.addIssue({ code: "custom", path: ["slides"], message: "DOCX/PDF 不能使用 slides。" });
       }
-      if (!blocks.some(hasContent)) {
+      if (!blocks.some(hasContent) && !request.edit) {
         ctx.addIssue({
           code: "custom",
           path: ["blocks"],
@@ -456,7 +600,7 @@ export const documentAuthoringSchema = z
     }
   })
   .overwrite((request) =>
-    request.template
+    request.template || request.edit
       ? request
       : {
           ...request,
@@ -469,6 +613,9 @@ export type DocumentAuthoringRequest = z.infer<typeof documentAuthoringSchema>;
 export type DocumentBlock = z.infer<typeof documentBlockSchema>;
 export type DocumentTableCell = z.infer<typeof tableCellSchema>;
 export type DocumentSlide = z.infer<typeof slideSchema>;
+export type DocumentDesign = z.infer<typeof documentDesignSchema>;
+export type ParagraphLayout = z.infer<typeof paragraphLayoutSchema>;
+export type DocumentEditOperation = z.infer<typeof documentEditOperationSchema>;
 
 export const MAX_AUTHORED_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
@@ -477,6 +624,9 @@ export function documentAssetPaths(request: DocumentAuthoringRequest): string[] 
   for (const block of [
     ...(request.blocks ?? []),
     ...(request.template?.replacements.flatMap((item) => item.blocks) ?? []),
+    ...(request.edit?.operations.flatMap((item) =>
+      item.type === "replace_blocks" ? item.blocks : [],
+    ) ?? []),
     ...(request.slides?.flatMap((slide) => slide.blocks) ?? []),
   ]) {
     if (block.type === "image") paths.add(block.path);
@@ -517,8 +667,10 @@ function noNullCharacter(value: string): boolean {
 function hasContent(block: DocumentBlock): boolean {
   if (block.type === "rich_paragraph")
     return block.runs.some((run) => run.type === "equation" || run.text.trim().length > 0);
-  if (["equation", "markdown", "code", "quote", "chart"].includes(block.type)) return true;
+  if (["equation", "markdown", "code", "quote", "callout", "chart"].includes(block.type))
+    return true;
   if (block.type === "image") return true;
+  if (block.type === "metric_grid") return block.metrics.some((metric) => metric.value.trim());
   if (block.type === "heading" || block.type === "paragraph") return block.text.trim().length > 0;
   if (block.type === "list") return block.items.some((item) => item.trim().length > 0);
   if (block.type === "table")
@@ -556,6 +708,13 @@ function collectText(request: unknown): string {
         if (series && typeof series.name === "string") values.push(series.name);
     if (Array.isArray(value.categories))
       values.push(...value.categories.filter((item): item is string => typeof item === "string"));
+    if (Array.isArray(value.metrics)) {
+      for (const metric of value.metrics) {
+        if (!metric || typeof metric !== "object") continue;
+        for (const key of ["value", "label", "detail"])
+          if (typeof metric[key] === "string") values.push(metric[key]);
+      }
+    }
   };
   for (const key of ["title", "author", "header", "footer"])
     if (typeof source[key] === "string") values.push(source[key]);
@@ -567,12 +726,21 @@ function collectText(request: unknown): string {
       item.blocks?.forEach(collectBlock);
     });
   }
+  if (source.edit && typeof source.edit === "object") {
+    const operations = (source.edit as { operations?: Array<Record<string, unknown>> }).operations;
+    for (const operation of operations ?? []) {
+      if (Array.isArray(operation.blocks)) operation.blocks.forEach(collectBlock);
+      for (const key of ["old_text", "new_text"])
+        if (typeof operation[key] === "string") values.push(operation[key]);
+    }
+  }
   if (Array.isArray(source.slides)) {
     for (const slide of source.slides) {
       if (slide && typeof slide === "object") {
         const value = slide as Record<string, unknown>;
         for (const key of ["title", "notes"])
           if (typeof value[key] === "string") values.push(value[key] as string);
+        if (typeof value.eyebrow === "string") values.push(value.eyebrow);
         if (Array.isArray(value.blocks)) value.blocks.forEach(collectBlock);
       }
     }

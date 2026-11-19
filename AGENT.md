@@ -1,6 +1,6 @@
 # Mingshen Harness 开发交接与维护记录
 
-最后核对日期：2026-11-12（Asia/Shanghai）。适用工作区版本：1.3.2。
+最后核对日期：2026-11-19（Asia/Shanghai）。适用工作区版本：1.3.3。
 
 本文供其他智能体、开发者和新对话接续工作，记录开发经过、已确认约束、实际代码位置、验证边界和打包方法。它不是功能全部完成、无漏洞或安装包已验收的证明。任何接续工作先核对当前源码、用户最新指令和 `git status`，不要直接照搬早期计划。
 
@@ -9,14 +9,22 @@
 1. 阅读本文和 [README.md](README.md)，涉及安全时阅读 [SECURITY.md](SECURITY.md)。
 2. 执行 `git status --short`，了解已有修改；本交接时工作区有大量未提交修改和未跟踪文件，包含有效实现，不是可直接清理的废料。
 3. 按任务阅读对应模块及相邻测试。优先小范围修复，沿用现有 Electron、React、TypeScript 和 pnpm 结构。
-4. 先阅读 [1.3.2 验证记录](docs/VALIDATION_1.3.2.md)；历史行为参考 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
+4. 先阅读 [1.3.3 验证记录](docs/VALIDATION_1.3.3.md)；历史行为参考 [1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
 5. 完成后记录改了什么、执行了什么、结果及剩余边界；变更协议、打包、数据结构或安全边界时同步本文和对应文档。
 
-当前 1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
+当前 1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
 
 1.3.0 包含内置 DOCX/PPTX/PDF、按 profile 配置子模型、原生 Responses 状态、图片工具、管道命令、分页读取/受控并发、父会话验证转交与 Token Saver 质量默认值；随后补充模型首次预填、K/M 数值输入、供应商连接编辑和 TencentDB 记忆库。最新工作区记忆设置及模型语义提取见第30节，取代历史离线规则摘录；官方提示词逐字对齐与真实请求核验见第31节。第二套“光轨”界面保留默认“简约”，按已确认预览重构为独立工作台，独立结构见第26节，最新材质打磨及主界面模型/供应商标签见第27节；第24节为首次接入历史。选择自动保存、重载或重启生效，共用全部业务功能。运行信息展开/收起、完整诊断与命令详情见第25节，并在独立结构中回归。各轮实际结果和未验证边界见 [1.3.0 验证记录](docs/VALIDATION_1.3.0.md)。主会话窗口15%的压缩输出预算及触顶恢复、TencentDB 本地记忆核心及项目二选一、工具参数流与 UTF-16 读写修复、缓存前缀优化与诊断、供应商缓存配置、同模型压缩复用、提问/修改冲突通知、Token Saver、执行链、项目记忆、自动重试及剪贴板图片附件见 [1.2.9 验证记录](docs/VALIDATION_1.2.9.md)；下方历史版本结果不能替代本轮验证。
 
 文件名说明：用户指定的主要交接文件是本 `AGENT.md`；根目录 `AGENTS.md` 是自动发现入口，指向本文。不要复制维护两份正文。
+
+最新续接已补充 Code/Work 内置专业工作流、Office 设计预设和受控版式、全部启用扩展的按需发现，以及独立 Chat 快捷窗口；两项全局快捷键已移入设置，可录制 Ctrl/Shift/Alt 组合、实际注册并检测占用。主窗口与快捷窗口共用草稿时新增 revision 冲突保护及明确恢复操作。见第55节，最新实际检查及未验证项继续以[1.3.3验证记录](docs/VALIDATION_1.3.3.md)追加部分为准，不把前轮数字用于证明本轮修改。
+
+本地插件开发市场、原生清单/SDK/创建器、用户提供的 Work 技能流适配、SubAgent 无固定总时限和后台协作、小窗切换及持久置顶已进入源码，见第56节及[本地插件接口](docs/LOCAL_PLUGINS.md)。来源覆盖清单与运行时技能数量分别记录，不把兼容清单或源码资源存在当成第三方插件已验收。
+
+最新插件开发故障修复及 Work 技能全版本补齐见第57节：统一发现入口包含内置技能，主 Code/Work 宿主请求批准会话可使用只读插件校验，不再依赖沙箱外 SDK 或系统 Node；`WorkAgentSkill/` 全树实际为124个物理来源、104个不同源正文SHA、93个名称。第56节此前98份是只统计latest系列的历史结果，不是全树总数。来源逐项映射见[完整清单](apps/desktop/resources/prompts/skills/work-sources/inventory.md)，最终验证仍以[1.3.3验证记录](docs/VALIDATION_1.3.3.md)本轮追加部分为准。
+
+内置Skill/Plugin的手动引用、Work专属PPTMaster与ASD-STE100，以及参考T3 Code的下一轮队列初版见第58节；队列现已按用户最新要求升级为最多10条、正常完成后自动FIFO发送，见第62节，取代第58节的8条及手动继续行为。Code基础Skill仍为9个，Work为16个基础Skill加124个来源；两种模式各另有2个真实内置插件目录项。主界面Code/Work/Chat均支持队列，QuickChat和实际SubAgent不提供队列。最终检查以验证记录的最新追加结果为准。
 
 仓库忽略规则及新仓库准备检查见第44节，面向公开仓库访客的 README 调整见第45节；首页提供产品能力、快速开始与开发入口，内部留档过程继续保留在本文及版本验证记录中。
 
@@ -25,7 +33,7 @@
 - 不擅自重建项目、迁移框架、移动模块、创建替代仓库或改变包管理器。
 - 不执行 `git reset --hard`、`git checkout --`、`git clean -fd` 等丢弃现有工作的命令；不把已有未跟踪源码当临时文件删除。
 - 未经明确请求不提交、推送、发布 GitHub Release、不执行云端 SQL、不生成或安装正式安装包。`--dir` 解包验证与正式 NSIS 安装包是两个不同操作。
-- 用户最新指定版本为 **1.3.2**；本轮交付实验版，不生成安装包。已生成的1.3.0/1.3.1安装包及发布SQL保留真实历史元数据，不代表包含当前源码。
+- 用户最新指定版本为 **1.3.3**；当前交付源码与实验版，未获明确要求时不生成或发布安装包。已生成的1.3.0/1.3.1/1.3.2安装包及发布SQL保留真实历史元数据，不代表包含当前源码。
 - 保留用户已确定的水青色原子图标。不要替换成旧红色 M 或 Electron 默认图标。
 - 不将真实 API Key、OAuth Secret、Token、Cookie、个人数据库、日志、截图或会话内容加入代码、文档和测试夹具。历史对话中的测试 Key 不得再次使用。
 - 不通过关闭防护、加白名单、改系统 ACL、删除 DLL、修改官方二进制或跳过哈希校验来“修复”打包与隔离。
@@ -39,7 +47,7 @@
 | 产品名 / Agent 名 | Mingshen Harness / Mingshen |
 | 发布者 / 维护主体 | Ming / 新哲文院算法社 |
 | 平台 | Windows 10/11 x64 桌面 GUI；原生 MXC 需要兼容的较新 Windows 11，旧系统选择 Docker |
-| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.2 |
+| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.3 |
 | 协议修订号 | `apps/desktop/src/shared/release.ts` 中的 `2026-11-04.3`，与应用版本分别管理；新增备用审批/压缩供应商的数据发送说明，旧版用户重新同意 |
 | 分发 | 当前用户 x64 NSIS、首版不签名；1.2.6起确认后后台下载/校验ZIP并在会话结束后启动安装器，旧网页链接手动打开 |
 | 语言与外观 | 默认简体中文，支持 English；默认“简约”保留白色日间/近黑石墨夜间，第二风格“光轨”为冰白矿青/深墨青；风格重载或重启生效，日夜即时切换，原子图标保留 |
@@ -124,7 +132,7 @@
 | `apps/desktop/src/main/chat/` | 发送、Agent 工具循环、取消、标题、活动/汇总、子 Agent、删除与退出协调 |
 | `apps/desktop/src/main/sessions/` | 会话配置/工作区继承、父子归档与恢复、按最后打开时间自动清理 |
 | `apps/desktop/src/main/providers/` | 供应商/Key/模型管理，四种协议请求与 SSE、原生续接、完整错误和脱敏 |
-| `apps/desktop/src/main/storage/` | SQLite、Repository、safeStorage 密文；当前 schema version 8，保留本地FTS/游标分页/变更序号及全部历史迁移 |
+| `apps/desktop/src/main/storage/` | SQLite、Repository、safeStorage 密文；当前 schema version 9，保留本地FTS/游标分页/变更序号及全部历史迁移 |
 | `apps/desktop/src/main/permissions/` | 审批、提问 broker、会话内前缀与路径授权 |
 | `apps/desktop/src/main/tools/` | 文件、文档、命令、搜索、patch、自定义工具和致命命令保护 |
 | `apps/desktop/src/main/documents/` | 文档读取/OCR、结构化作者 schema、内存生成 DOCX/PPTX 与隔离 Chromium PDF 打印 |
@@ -209,9 +217,8 @@ Windows 通知 CLSID 固定在 `main/index.ts`。快捷方式、任务栏窗口 
 PowerShell 在仓库根目录执行；当前开发机例子：
 
 ```powershell
-cd C:\Users\ASUS\Desktop\MingshenHarness
+Set-Location -LiteralPath 'C:\Users\ASUS\Desktop\MingshenHarness'
 .\package-win.cmd --check
-.\package-win.cmd --dir
 ```
 
 只有用户要求生成正式安装包时执行：
@@ -222,31 +229,33 @@ cd C:\Users\ASUS\Desktop\MingshenHarness
 
 | 命令 | 行为 |
 | --- | --- |
-| `.\package-win.cmd --check` | 查找 Node/pnpm，检查 Electron Windows 运行时及 33 项必需资源（含 TencentDB 记忆核心、许可/清单、文档 worker、两份更新日志、压缩提示词和 TypeScript 索引解析器）、记忆源码/运行时哈希与 ESM 依赖闭包、离线 OCR/原生依赖和版本；不下载或构建 |
+| `.\package-win.cmd --check` | 查找 Node/pnpm，检查 Electron Windows 运行时及随包资源（含 TencentDB 记忆核心、许可/清单、文档 worker、Office COM 脚本、Chat/Work 提示词、全部内置技能及来源目录、PPTMaster/ASD-STE100 资源、插件 SDK、双语内嵌文档和 TypeScript 索引解析器）、源码/运行资源哈希与依赖闭包、离线 OCR/原生依赖和版本；不下载或构建，资源数量以本次预检输出为准 |
 | `.\package-win.cmd --dir` | Electron 准备、图标、原生运行时、生产构建、预检、完整解包构建和 afterPack；不创建 NSIS 安装包 |
 | `.\package-win.cmd` | 同上并创建 NSIS 安装包；复制最终发布文件回项目 |
 | `pnpm package:win` | pnpm 已可用时的正式安装包等效入口，同样使用仓库打包包装脚本 |
 
-版本 1.3.2 的预期输出（历史版本发布材料保留）：
+版本 1.3.3 的预期输出（1.3.2 历史版本发布材料保留）：
 
 ```text
-apps\desktop\release-artifacts\MingshenHarness-1.3.2-x64.exe
-apps\desktop\release-artifacts\MingshenHarness-1.3.2-x64.zip
-apps\desktop\release-artifacts\MingshenHarness-1.3.2-x64.zip.sha256
-apps\desktop\release-artifacts\MingshenHarness-1.3.2-x64.zip.json
+apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.exe
+apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip
+apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.sha256
+apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.json
 ```
 
 实际构建目录由脚本创建：
 
 ```text
-%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.2-<random>\
+%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.3-<random>\
   electron\                  临时原版运行时，结束后受限清理
   temp\                      构建子进程的 TEMP/TMP
   output\win-unpacked\      完整应用目录
-  output\MingshenHarness-1.3.2-x64.exe
+  output\MingshenHarness-1.3.3-x64.exe
 ```
 
-`--dir` 会打印可运行 EXE 的绝对路径；正式打包会打印项目输出及 `Cached installer:`。如果安装包构建成功、只是复制回 Documents 失败，使用缓存中的完整安装包，不要再次全盘清理重装。失败时打印 `Build files retained for diagnostics:`；该目录不一定有成功安装包，先看构建退出码及目标文件。
+`--dir` 是可选的解包验证，不是生成安装包前必须单独执行的步骤。它会打印可运行 EXE 的绝对路径；正式打包会打印项目输出及 `Cached installer:`。如果安装包构建成功、只是复制回项目输出目录失败，使用控制台提示的缓存文件。ZIP、SHA256 及 JSON 各自复制失败时会显示 `Update artifact retained in build cache:`，需分别核对实际路径，不能仅凭退出0断定所有文件已复制回项目。构建失败时打印 `Build files retained for diagnostics:`；该目录不一定有成功安装包，先看构建退出码及目标文件，不要再次全盘清理重装。
+
+源码预检还会与根目录的 `WorkAgentSkill/`、`ppt-master/`、`asd-ste100-skill-master/` 核对来源及哈希，打包前需保留这些来源目录和 `apps/desktop/resources/prompts/skills/` 内的完整副本。安装后的应用使用随包副本，不要求用户保留开发仓库或这些来源目录。
 
 ### 6.2 打包调用链
 
@@ -1435,3 +1444,324 @@ README及当前操作指引同步新目录与准备步骤，历史失败结果�
 实际重新计算本地`MingshenHarness-1.3.2-x64.zip`：293723586字节，SHA-256为`14883fad61715f6f7a03f3a334dead291f983e14f1056c971fd7c84d0e173a23`，与`.zip.json`及`.zip.sha256`一致。ZIP根只有`MingshenHarness-1.3.2-x64.exe`，解压长度293737762字节，并流式计算包内EXE哈希，与旁置EXE一致。Supabase说明、部署指南及1.3.2验证记录同步实际发布文件状态；第49节及开发阶段“未打包”为当轮历史，不改写为智能体生成了正式安装包。
 
 本轮只生成发布SQL及文档，静态核对版本、URL、完整ZIP哈希、大小、公告1000字符上限和upsert字段；不重新打包、安装/升级、修改应用版本、上传、执行云SQL、Git提交或推送。未重新下载远端ZIP核对内容，也未认证线上RPC已生效；由维护者在已部署0003的Supabase SQL Editor手动执行新文件，再检查`mingshen_get_latest_release_v2()`。重新构建或替换ZIP后须重新核对SHA和字节数。
+
+## 51. 2026-11-14 / 1.3.3 光轨企业工作台升级与输入预览修复
+
+用户要求研究企业级 Agent 的界面布局，全面升级光轨主题的质感、界面和动效，版本升至1.3.3，并修复输入时“编辑原文”自行跳到“格式预览”的问题。本轮保持现有 Electron/React/TypeScript 结构、原子图标、业务数据和权限边界；未替换组件库，未新增依赖。
+
+界面升级集中在`orbit-workbench.css`末尾的1.3.3层：统一面板、标题、侧栏、会话、执行时间轴、审查、终端和任务区的表面层级与1px边框；降低装饰性渐变、泛光和阴影，保留冰白矿青、窄光轨和原子图标。输入框成为唯一抬升的对话表面；运行节点、状态栏、流式消息、详情展开和设置层使用短时、状态导向的动效。键盘焦点和减少动效路径同步补齐。调研方向参考企业级 Agent/工作台普遍采用的“导航退后、状态与数据在前、人类审批在任务上下文内、动效解释状态”原则；当前环境网络抓取不可达，未将未实际读取的网页作为证据引用。
+
+输入预览问题在`ChatView.tsx`修复：仅当浏览器明确报告`insertFromPaste`/`insertFromPasteAsQuotation`，且对应粘贴仍处于等待状态时打开预览；普通键入、IME组合输入、过期粘贴标记和预览内快捷键都不会再自动切换。新增`composer-input.ts`纯函数及单元测试，保留预览内容仍使用原始Markdown/LaTeX发送。
+
+版本已同步至根/桌面`package.json`、`release.ts`、`mingshen-acp.mjs`、启动/打包提示、README、双语文档、协议适用版本、第三方说明、SECURITY及AGENT。历史1.3.2安装包、发布SQL、哈希和大小不变。新增[1.3.3验证记录](docs/VALIDATION_1.3.3.md)，记录本轮实际检查、失败重跑和未覆盖范围。
+
+最终源码检查：Node/Web TypeScript通过，Biome329文件通过（633ms），定向Vitest3文件14项通过；生产构建main112/preload3/renderer2237模块、25份固定TencentDB源哈希及CSS 314.03kB通过；`node scripts/check-package.cjs --source`通过33资源、生产依赖和1.3.3版本。真实Electron输入专项11/11组通过（8截图、1次本地请求、无异常）；光轨工作台专项12/12组通过（13次本地请求、2次worker、30截图、无renderer异常）；长时间历史专项11/11组通过（0布局问题、48测量、13截图、无异常/崩溃），1440空闲输入P95 9.1ms、流式输入P95 61.8ms且均0长任务。首次完整Vitest并行运行130文件1615项中4项因Windows临时目录超时/EBUSY失败；串行重跑4文件95项全部通过，保留首次失败并记录为环境并发边界，不宣称全部并行环境稳定。
+
+实际查看1440夜间运行/空态、日间完成态及800紧凑态截图，未发现阻断性遮挡或水平溢出；800抽屉截图的明暗对比受透明叠加/截图时序影响，未作为产品主题结论。未生成1.3.3 NSIS/ZIP、未安装/升级、未访问用户正常数据或付费服务、未提交/推送。外部企业Agent网页抓取在环境内超时，未伪造引用；方向依据本地企业应用方向库与现有DESIGN.md。
+
+## 52. 2026-11-15 / 1.3.3 DOCX 旧稿局部编辑与精细排版
+
+用户要求优化文档处理和排版，解决此前必须预埋占位符才能替换旧稿区段的限制。本轮沿用`create_document`、现有文档依赖和受控文件网关，版本保持1.3.3、schema8及协议修订号`2026-11-04.3`；不新增依赖、不迁移框架、不修改用户数据和图标。
+
+新增`src/main/documents/document-edit.ts`及对应测试。`read_document`/`read_file`的`structure:true`返回DOCX源SHA-256、正文block和含表格单元格的paragraph编号；`create_document.edit`要求该SHA，支持`replace_text`跨run唯一文字替换、`replace_blocks`完整正文段落/表格区间替换或删除，以及`format_paragraph`。一次最多100项，全部按原始快照定位，拒绝重叠、歧义、源hash变化和不支持的目标，不提交半份结果。默认另存，读取原稿独立检查profile权限、审批和隔离网关；覆盖、原子提交、并发冲突与取消边界沿用既有实现。
+
+文字/排版/删除仅改变正文XML，其余包内部件保留原始字节；插入富内容可更新必要关系、样式、编号和脚注等，无关页眉、页脚、媒体、原图表及元数据按原部件保留。正文XML与ZIP会重新序列化，不能宣称任意Office文件无损或改字后分页完全不变。选区涉及书签、批注、跨段字段/权限范围、修订、内容控件、分节及脚注引用等时拒绝；签名/含宏文件拒绝。富内容插入要求标准`w:`前缀，其他前缀可做行内文字和段落排版。文档级`settings.xml`保护未单独做完整兼容验证，不能把选区守卫扩展为所有Office保护机制已验证。
+
+DOCX/PDF新增`layout`控制对齐、段前/后磅值、倍数行距、英寸缩进、与下段同页、段中不分页及段前分页；表格`column_widths`采用相对比例，DOCX写入固定网格/单元格宽度，PDF使用列比例。旧稿/模板中的指定列宽表格按原稿实际正文尺寸计算，限尺寸明确的单节单栏正文。独立Word公式补齐`m:oMathParaPr/m:jc`，修复仅设置普通段落对齐却仍居中的问题；行内公式随文字，独立公式的justify按左对齐处理。PPTX明确拒绝新段落布局和结构化单元格参数。
+
+最终定向Vitest：11文件通过/1文件跳过、193项通过/1项跳过（34.38秒）；Node/Web类型检查、Biome331文件、生产构建main113/preload3/renderer2237模块、25份固定TencentDB源哈希、33项资源/依赖/1.3.3预检通过。真实Electron文档专项18/18组通过，60次本地Agent请求、0辅助请求，9张截图；完整证据为`.impeccable/review/v133-document-authoring-1794752646597/`。检查原稿未变、未改部件保留、旧hash不写入、原生公式/脚注/关联，以及段落布局PDF。前一轮2项HTML断言因新增样式分号失败，改为仅有布局时追加样式后重跑通过；结果不与最终193项相加。
+
+使用documents技能的标准渲染器尝试失败，环境缺少LibreOffice `soffice.exe`，不记为通过。改用本机Microsoft Word COM对6份生成夹具导出8页，实际逐页检查；验证正文/表格原生公式编辑保存重开、旧稿页眉/页脚/图片/脚注保留、18pt首行缩进、8pt段后、1.5倍行距、两端对齐、段中不分页、3:1列宽及独立公式左对齐。首轮Word视觉检查发现公式居中问题后修正并完整重跑，最终`word-render/result.json`记录`equationJustification:3`。工具生成的8页PDF和1张语义预览也已查看，无阻断性裁切或重叠；语义HTML不充当Word版面证明，Markdown嵌套列表已有偏大间距未在本轮重写。
+
+提示词、README、中英文使用手册/更新日志、[文档工具说明](docs/DOCUMENT_TOOLS.md)及[1.3.3验证记录](docs/VALIDATION_1.3.3.md)同步。差异空白检查无错误，8份相关Markdown的114个本地文件目标存在。未执行本轮完整应用测试、ASAR专项、NSIS/ZIP、安装/升级、云SQL、付费模型或Git提交/推送；未认证完整Office/LibreOffice/第三方扩展兼容矩阵。正常退出旧实验实例后运行`.\run-experimental.cmd`使用已构建源码。
+
+## 53. 2026-11-17 / 1.3.3 大型 Skill 导入与三模式调研
+
+用户要求保持1.3.3，把原4,000文件的本地扩展上限提高到20,000；同时研究办公/开发Agent并加入CodeAgent、WorkAgent与独立ChatAgent。用户明确要求遇到模糊之处先提问。因此本轮仅落地独立的导入修复，三模式与办公增强的产品边界待答复；子任务返回的建议/问题不是用户确认，不能据此开始迁移或把模式标成已实现。
+
+`extensions/extension-service.ts`的单扩展文件数改为20,000，将超限检查放在实际加入文件前，恰好达限后遇到空目录或被忽略目录不会误报。`marketplace/skill-marketplace-service.ts`的独立1,000文件上限同步改为20,000，错误明确显示数量；市场仍按远端全部blob保守计数，本地忽略既有目录。保留64MiB大小、单份技能正文32,000字符和扩展正文总预算120,000字符，未把资源全部加入模型上下文。
+
+定向Vitest最终2文件通过，6项通过/1项真实GitHub集成跳过（3.00秒）。以虚拟readdir清单验证20,000进入后续大小检查、20,001提前拒绝，真实小目录验证复制、忽略目录、入库和去重；市场使用离线缓存验证相同边界且无下载/临时目录/入库。首轮真实20k夹具产生约40k文件，清理Hook超过10秒并使同轮2项既有测试超时，退出1（139.10秒）；已替换为上述有界测试，未把失败记录或模拟扫描称作真实20k全链路性能验收。Node/Web类型检查、Biome331文件（775ms）、生产构建main113/preload3/renderer2237模块及25份TencentDB源哈希均通过。
+
+联网读取Cline、PenguinHarness、Trae Agent、CommandCode及Anthropic/Microsoft官方资料，并对照当前SessionService、Repository、ChatService、App和文档模块，新增[三模式与办公调研记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。关键增量为渐进技能、确定性办公生成/编辑与重算/渲染验收、连续失败换策略、可恢复工具原文与更细检查点。CommandCode公开仓库未声明许可证，npm为UNLICENSED，不复制实现；本机官方Office技能/运行时不作为产品再分发依赖。
+
+待用户确认Chat附件只读解析、web_search是否包含web_fetch、可选Office COM、运行中Code/Work切换和自定义Profile适用范围。已确定要求继续保留：主界面切换；Code/Work共用目录与会话；Chat独立页面/分组、不选目录、不使用自定义Agent；三模式共用供应商和压缩配置。Chat未来须在工具发现和执行双层强制白名单，并跳过MCP/Skills/Hook等；仅workspacePath=null不构成限制。
+
+双语使用手册和更新日志只写入实际导入修复；`node scripts/check-package.cjs --source`通过33项资源、生产依赖和1.3.3版本预检，`git diff --check`无空白错误。版本1.3.3、schema8、协议修订号和已有数据目录保持。没有UI修改、模式迁移、正式打包、发布、云SQL、用户正常DB/Key访问或提交/推送。详细结果见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。
+
+## 54. 2026-11-17 / 1.3.3 三模式与 Code/Work 专精实装
+
+用户逐项确认第53节五个问题并授权“开始实装/继续”。本轮实现主界面 CodeAgent、WorkAgent、ChatAgent 切换，版本保持1.3.3，协议修订号保持`2026-11-04.3`，原子图标及数据目录不变。schema9在原schema1-8后顺序追加`agent_mode`、`chat_group_id`及聊天分组表，旧会话默认Code，迁移不复制/清空历史。新增ExcelJS4.4.0（MIT）作为原生XLSX结构化作者库，lockfile、第三方说明及资源预检同步；不复制本机Office技能、脚本、运行时或未获许可的CommandCode实现。
+
+### 模式、数据与权限
+
+- Code/Work使用同一会话、工作目录、历史、草稿与附件；任务及子任务运行时前后端均拒绝切换，完成或手动停止后生效于下一轮。自定义Profile新增`applicableModes`，旧配置默认两者通用，限制适用范围同时用于直接会话、切换和子Agent选择。
+- Chat有独立页面、选中状态和目录，支持搜索、分组新建/改名/移动/删除、会话重命名、置顶、归档/恢复及删除，不选择工作文件夹，不显示本地文件/任务工作台或自定义Profile。删除分组仅移动到未分组，保留会话内容；窄屏选中对话后收起抽屉。
+- Chat的`availableTools`、ChatService执行入口和ToolRegistry均强制只允许`web_search`及`web_fetch`；跳过项目指令、记忆、Skills、MCP发现/启动、Hook、自定义工具、命令、浏览器操作及子Agent。不是仅靠提示词或`workspacePath=null`限制。
+- Chat可主动上传PNG/JPEG/WebP/GIF/BMP/TIFF/AVIF位图、PDF、DOC/DOCX、XLS/XLSX及PPTX，只解析上传字节；真实编码大小和25MiB限制在主进程核验，图片还核对MIME与文件头签名，SVG、伪装内容和旧二进制PPT明确拒绝。草稿保存和发送阶段都去掉调用者提供的本地路径与伪造提取内容。供应商、模型、压缩、重试和基础设置共用。
+- 审查修复Profile权限优先级：具体工具/subject规则优先于组回退，不再因对象字段顺序覆盖显式deny；`use_skill`和输出恢复先带subject检查deny/allowlist，再请求ask审批。
+
+### 实际专精机制
+
+`agents/domain-skills.ts`及`resources/prompts/skills/`提供12个原创工作流（代码5、办公6、共享质量1），覆盖工程/调试/验证/前端/平台以及Word/Excel/PPT/分析/研究/运营。目录仅注入元数据，`use_skill`按需读取正文和选中扩展资源，单页32,000字符；资源相对路径、文本类型和2MB限制保留，加载不等于执行脚本或授权。
+
+`failure-loop-guard.ts`按工具名和规范化JSON参数累计失败，相同调用失败3次后阻止重放并要求换策略，12次连续失败/拦截终止本轮；成功重置连续失败计数。`BoundedOutput`、`ToolOutputStore`保留大工具结果并提供`read_tool_output`会话隔离分页；单结果最多4,000,000 UTF-16字符的头尾及明确中间缺口，单会话最多40条/16,000,000字符，删除会话同步清理。UTF-16分页与截取边界有代理对回归，不宣称超出捕获上限的中间原文可恢复。
+
+`SnapshotService.createFileCheckpoint`为主会话full-access host的文件工具写入增加局部写前点。restore只处理manifest范围、先做同范围safety，不清理范围外文件；单文件25MiB、单点及单轮累计128MiB、每轮最多128点，达到预算后可见提示并保留运行开始快照。命令、MCP及外部副作用不是逐文件快照保证。既有AST/LSP、测试/Lint/类型检查与最多三轮验证闭环继续使用。
+
+### Office工具与真实边界
+
+`documents/office-document*`和`office_document`提供XLSX结构化创建/编辑（类型、公式、区域/追加行、样式、列宽、合并、冻结、筛选、表格及工作表操作），以及PPTX旧稿形状文字/表格单元格/备注的源SHA绑定编辑。未修改ZIP部件保留原始字节；宏、签名、外链、OLE及无法保真的复杂部件拒绝，不能称任意Office文件无损。PPT生成增加商务主题、封面、页脚页码、表格/图表风格；已有DOCX局部编辑与排版继续保留。
+
+资产读取、输出预检、源SHA、覆盖、审批、隔离网关、文件锁、外部变更和取消一起生效；每个文件原子提交，PDF和重算工作簿不是跨文件事务。Work完成前最多三轮、每轮六份已改Office文件进入结构/可用重算/渲染检查；图像模型在允许的host路径可读取导出PDF页面后再复核，不把导出成功当目视通过。
+
+可选COM仅Work主会话的full-access host启用，使用临时副本、不自动安装Office、不在隔离失败时宿主回退，已有同类Office实例时降级。宏自动化禁用；在Open前由HWND取得确切PID，核对名称/可执行路径/创建时间及Automation命令行，要求为本次新实例；再证明Documents/Workbooks/Presentations为空，才登记可清理pidfile。非空或无法证明为空时不Close/Quit或清理；正常/超时/取消均按已登记身份清理，不按名称批量结束。取消原原因向上传递。
+
+COM专属预检对DOCX/XLSX/PPTX的非hyperlink外部关系、Word跨run自动字段及XLSX数据连接降级，保留结构结果，不修改普通inspect/edit的支持范围。Word使用16参数`OpenNoRepairDialog`，明确隐藏/只读/不修复/不显示编码对话框，不更改Office全局设置或Protected View。失败和超时返回最后阶段，隔离路径脱敏。不能声称所有Word外链/字段更新或所有XLSX复杂部件已经由普通编辑入口完整阻止。
+
+本轮真实Excel重算由999→5、正常退出/5秒超时清理、已有实例降级且不关闭、取消后确切PID清理均通过；Excel与PowerPoint曾导出有效PDF，但当时未逐页检查。Word本轮打开阻塞，未验收通过；第52节Word历史验收不替代本轮COM接口。最新源码与桌面验证结果、首次失败和剩余边界继续记录在[1.3.3验证记录](docs/VALIDATION_1.3.3.md)，后续维护必须读取追加部分。
+
+本轮不生成正式NSIS/ZIP、不安装/升级、不读正常用户DB/Key、不访问付费模型或云端发布、不提交/推送。实验入口仍为先`pnpm build`，正常退出旧实验实例后执行`.\run-experimental.cmd`。
+
+### 收尾结果与后续维护
+
+完整串行Vitest已退出0：133文件通过/3文件跳过，1718项通过/12项跳过（267.54秒）。该轮早于最后的发送准备锁和COM预检/诊断补充；最后修改另以Renderer3文件18项、Office及文档/决策运行时3文件74项通过/3项手动COM跳过覆盖，不与全量数字相加。首次全量失败、Windows junction夹具修复、独立重跑及剩余并行环境边界保留在验证记录。外层deadline另以零延迟期限定向1项通过，不再依赖Excel启动慢来制造超时，也不将此用例称为已证明Office实例清理。
+
+前端追加按会话的准备锁/启动锁：草稿落盘和FileReader前锁定，编辑重发在IPC前锁定，失败解锁、成功保持至运行结束，不互相误释放。修复800px Chat输入框被挤进0px网格列及窄屏偏好污染桌面侧栏；桌面侧栏与窄屏抽屉状态分离。最新TypeScript、Biome348文件（328ms）、生产构建121/3/2242模块、48资源/生产依赖/1.3.3预检均通过；未生成安装包。收尾差异空白检查通过，10份相关Markdown可解析、127个本地文件目标存在。
+
+最终真实Electron专项`.impeccable/review/v133-agent-modes-1794915550504/`退出0：11/11组、21次本地模拟请求、11界面截图、无renderer异常，覆盖模式共用/独立目录、延迟附件和重发准备锁、后端运行锁、文件检查点/大输出恢复、Chat上传与恶意工具拒绝、分组表单/目录管理及正常重启持久化。实际查看1440px Chat日夜/Code夜间、800px Chat日夜/抽屉和分组截图，输入框完整、无阻断性遮挡或水平溢出。Work Excel真实重算42*2=84、PDF导出、1页图片回传模型input_image通过，该页已实际查看；最小夹具不代表复杂报表美观或公式矩阵已验收。
+
+最新Word手动诊断因已有Word返回unavailable/OFFICE_IN_USE（最后阶段“检查Office进程”），源字节不变，未接管或关闭。测试要求verified因此退出1，不能把占用降级称为Word渲染已通过，也不能证明此前Open阻塞已解决。先前无owner的PowerPoint未批量结束；不宣称系统所有Office进程都已清空。PowerPoint本轮仍缺逐页目视验收，Word本轮未验收通过。具体命令、失败记录与证据以[1.3.3验证记录](docs/VALIDATION_1.3.3.md)末节为准。
+
+## 55. 2026-11-17 至 18 / 1.3.3 专业技能、自动发现与可配置快捷窗口
+
+用户要求继续增强 Code/Work 的专业能力，参考 ZCode、WorkBuddy 与 Codex 的公开机制，自动探测已安装 Skills/插件，并增加 Chat 快捷窗口和主界面/托盘全局快捷键；最新指令将快捷键改为设置内自行录制并检测占用。版本保持1.3.3、schema9、协议修订号`2026-11-04.3`，数据目录、原子图标和现有框架保留。
+
+### 专业工作流和 Office 设计
+
+五个 Code 技能及五份条件加载参考强化任务契约、仓库侦察、大型改动、故障取证、测试设计、前端验收与发布安全，沿用现有计划、代码索引、LSP、受管命令、失败保护、输出恢复、检查点和验证闭环。Work 技能及四份 Office 参考强化受众、语气、论证、内容取舍、叙事、表格表达和逐页检查；资料来源和不可复制边界见[Code调研](docs/CODE_AGENT_RESEARCH_1.3.3.md)、[办公调研](docs/OFFICE_AGENT_RESEARCH_1.3.3.md)。这些是原创工作流和确定性工具增强，不是复制竞品私有技能，也不是同模型质量A/B或能力追平证明。
+
+`office-visuals.ts`及文档schema提供`executive/consulting/editorial/minimal`设计预设和`airy/balanced/compact`密度。DOCX/PDF增强封面、正文层级、表格和callout；PPTX以`slide.kind`控制封面、章节、statement、cards、timeline、数据和收束，增加原生`metric_grid`及`callout`，默认内容带居中，显式坐标保留。Excel增加报告表面、标题/表头、条纹、网格线、打印区域、重复标题行、方向和按页适配，旧工作表可用`format_sheet`单独应用。
+
+### 全部启用能力的按需发现
+
+`ExtensionService`为所有已安装且启用的Skill/插件建立元数据索引；会话手动选择的扩展优先展开，其他能力可由`discover_capabilities`按上下文查询和分页发现，再以精确ID交给`use_skill`读取正文或相对路径文本参考。禁用扩展不进入结果；插件关联MCP同时受启用状态、Profile、审批和隔离约束，直接调用也不能绕过停用状态。参考加载限制相对路径、真实路径边界、链接、文本编码、单资源大小与页预算；不自动执行扩展脚本。Chat依旧不索引、不加载Skill/插件/MCP。
+
+### 快捷窗口、快捷键和草稿
+
+`quick-chat-controller.ts`管理独立Chat会话的10分钟滑动租约，首次及过期后的下一次唤起新建，会话未过期的再次唤起续期；读取状态、发送和等待不续期。旧历史、已保存草稿和后台任务保留。快捷窗口复用`ChatView`，不选择工作目录，沿用Chat上传只读问答及`web_search/web_fetch`限制；IPC和runtime事件仅限当前快捷会话，不能调用本地文件、命令、MCP、Skills、Hook、子Agent或修改全局设置。缺模型、加载失败、停止、新建、打开主界面、关闭隐藏及正常重启有实际路径。
+
+设置 → 外观与语言 → 全局快捷键可逐项录制，录入完成即尝试保存，支持Ctrl、Shift、Alt至少一个加一个受支持主键；默认`Ctrl+M`打开Chat小窗，`Ctrl+Alt+L`显示/聚焦主界面或收回托盘。重复、Windows保留组合和不支持的键有明确校验；Numpad不冒充主键区数字，非QWERTY字母优先按实际`event.key`。录制期间临时释放本应用绑定，Esc、失焦、切页、卸载和迟到请求均恢复；系统实际注册检测占用，失败或持久化异常回退原绑定，状态反映实际结果，不抢占其他应用。配置存入`app_settings`的`desktop.shortcuts`，没有新增schema。
+
+主窗口与快捷窗口的草稿变更只同步相应会话。保存携带`baseRevision`，在现有SQLite savepoint内比较，冲突不改文字或附件，保留当前窗口内容并停止自动覆盖；用户明确选择“用本地内容覆盖”或“载入最新草稿”。旧无`baseRevision`调用保留兼容。正常退出/重载等待全部窗口和会话flush结束，任一失败取消操作；`Promise.allSettled`避免先失败的草稿让仍在保存的窗口提前解锁。新建前快捷窗口必须保存成功，主窗口flush有2秒等候上限并记录失败，避免卡住主窗口阻止拉起；这不放弃主窗口草稿。
+
+### 验证边界
+
+最终结果继续追加在[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。Office样例目录为`.impeccable/review/v133-office-craft-1794920209360/`：Excel重算及1页PDF、PPTX七页PDF已实际逐页查看，源文件字节不变；Word因已有用户实例返回`OFFICE_IN_USE`，本轮未渲染通过，不关闭用户Office来取得测试结果。样例不是复杂财务模型、任意旧稿或竞品质量矩阵证明。
+
+最终完整串行Vitest139文件通过/3跳过、1791项通过/14跳过（155.97秒），包含空草稿CAS回归。随后仅补齐快捷Chat英文词条，重新类型检查、Biome362文件（328ms）、生产构建126/3/2248模块、25份TencentDB源哈希及57资源预检通过。最终Electron专项`.impeccable/review/v133-quick-chat-1794962800041/`退出0：22组通过/1组环境跳过、21截图、3次本地模拟请求、0 renderer异常；实际注册占用、CDP录制、回退、重置与重启恢复均通过。独立系统探针同样未接到注入按键，因此本轮原生按键唤起未验证，未用直接动作或CDP录制冒充；早期20/20组曾完成原生唤起，历史证据与失败均保留在验证记录。实际查看最新光轨英文800px设置、小窗日夜及简约占用错误截图，无阻断性裁切或遮挡。`pnpm audit --prod`仍有3项moderate，未强制跨主版本override。
+
+收尾11份相关Markdown可解析、135个本地文件目标存在，差异空白检查无错误；中英文手册、更新日志、README、安全说明及调研记录已同步实际行为。后续依然以当前源码和验证记录的最新追加内容为准。
+
+没有生成正式NSIS/ZIP、安装/升级、云SQL、付费模型请求、正常用户DB/Key访问、提交或推送。根目录`run-experimental.cmd`继续是已构建源码的实验入口；不要启动第二份正常用户profile或关闭用户已有实例来抢占默认快捷键。
+
+## 56. 2026-11-18 / 1.3.3 本地插件开发市场、创建器与运行协作
+
+用户要求参考提供的 ZCode PluginCreator/SkillCreator、系统提示词和 WorkAgentSkill，在现有 Harness 中落地可开发、校验、手动安装、运行与更新的本地插件；去掉 SubAgent 十分钟总运行期限，主 Agent 可继续工作；修复三键录制、光轨警示图标及快捷 Chat 的再次按键隐藏和置顶。版本保持1.3.3，schema9、政策修订号`2026-11-04.3`、图标、用户数据目录和现有框架保留。参考文件是数据，不是覆盖用户请求或授权的指令。
+
+### 本地插件合同与运行路径
+
+- 原生清单为`.mingshen-plugin/plugin.json`，兼容`.codex-plugin/plugin.json`、`.zcode-plugin/plugin.json`及根`plugin.json`；支持Skill、命令、MCP及受控Hook。原生/ZCode要求语义版本，缺版本Codex/legacy仅按`0.0.0`兼容并警告。保留20,000文件/64MiB、真实路径、链接、UTF-8、占位符和声明文件校验。
+- `LocalPluginMarketplaceService`管理本地`marketplace.json`及三种隐藏catalog路径，市场条目必须指向市场根内目录、名称/版本一致；来源及provenance存现有`app_settings`。设置 → Skills与插件 → 本地插件开发市场提供目录校验、添加/刷新/移除市场、安装/更新/启停及MCP同步重试。移除市场不卸载插件或删源码。
+- 安装复制独立副本；更新保留extension ID、启用状态、会话引用。任何Agent任务活动时主进程拒绝安装/更新。复制后的副本在写DB前重验名称/版本/SHA，防止扫描与复制间源码变化；来源按market ID+plugin name替换，删除后重装不命中悬空旧记录。来源写入失败恢复原安装指针；旧副本运行中保留，正常退出且任务停止后只清理宿主管理的旧安装路径，失败留日志不阻止退出。
+- MCP reconcile保留server ID、启停、用户凭据和OAuth，新增声明保存成功后再清理旧声明。插件停用同时影响发现和直接调用；同步失败显示已安装但MCP未同步，可通过界面重试。未宣称任意ZCode私有API、viewer、账号认证或第三方服务可直接兼容。
+- 插件命令以`plugin-name:command`命名，用户/工作区命令优先；Markdown/目录/数组/JSON/inline声明按路径与大小校验。每次列出/发送刷新已安装启用插件，下一轮观察更新；shell placeholder仍经原审批链，Chat不加载插件命令。
+- Hook只处理当前会话显式引用且启用的插件。安装/启用提供发现能力，不自动执行所有插件Hook。动作型`PreToolUse/PostToolUse/Stop/SubagentStop`要求主Code/Work、host、full_access、可写Profile及已信任项目，MCP和Shell动作逐次审批，Shell另需显式设置。请求批准、Docker、Chat及实际子Agent不执行这些动作。
+- `UserPromptSubmit`仅为低优先级prompt上下文；`Interrupt`仅在显式用户Stop后以独立、最多约1.5秒的signal非阻塞记录prompt活动。两者的command/MCP声明给warning且runtime跳过，不弹审批/启动进程/恢复工具。未知Hook事件拒绝。插件文本不能覆盖用户、安全或权限规则。
+
+### 创建器、来源与专业流程
+
+Code/Work默认可发现`builtin:skill-creator`、`builtin:plugin-creator`、`builtin:harness-plugin-api`，按需加载正文；`use_skill`同时返回当前实际SDK绝对路径，不猜用户工作区里的SDK位置。SDK位于`resources/sdk/plugin-dev/`，提供create/validate/marketplace，故意保留的TODO必须实现后才能通过；`authoritative:false`预检不能替代宿主校验。模型`local_plugin`只支持inspect/validate/list_markets，仅有工作区的host+full_access主Code/Work开放，并受Profile读取权限和工作区真实路径约束；没有安装/更新/启用工具。手动步骤与完整合同见[本地插件说明](docs/LOCAL_PLUGINS.md)。
+
+`WorkAgentSkill/`按最新七组版本族92份SKILL加六个独立入口核对，共98份物理正文、93个唯一名称、98个唯一SHA。不是把98个来源原样注册；运行时为19个原创领域工作流，办公能力默认在Work目录可用，正文按需加载。新增PDF、视觉设计、离线HTML可视化、图片来源工作流，强化原有Word/Excel/PPT的结构、叙事、语气、排版和验证参考。设计资源361文件/4,809,702字节，包括74个骨架、8个子技能，82个入口有机器索引并保留许可。Office/PDF来源许可冲突或明确专有的正文/脚本不机械复制，使用原创适配，宿主私有JWT/Viewer/Canvas接口不随技能启用。完整出处见`work-visual-design/references/source-provenance.md`。
+
+`core/coding/work/runtime/tools.md`吸收参考中的任务契约、证据、独立工作并行、失败换策略和交付质量原则，没有将参考中的私有运行时或高优先级措辞作为授权。
+
+### SubAgent与快捷窗口
+
+SubAgent不再组合十分钟`AbortSignal.timeout`，继承父任务取消signal；spawn立即返回，父会话可继续独立工具，显式wait或完成前自动补收结果。子任务明确完成/失败、用户停止、父取消或退出仍终止，单次工具/网络/模型请求超时和失败保护保留。完成Promise的十分钟清理是完成后查询记录保留时间，不是运行期限。
+
+小窗显示/隐藏/快捷键toggle/托盘入口统一顺序队列，隐藏不续租；延迟页面载入不会把已隐藏小窗重新弹出，连续show/hide/show和失败重试保留最后一次操作。Pin按钮同步真实BrowserWindow AlwaysOnTop，偏好跨重启保存。录制器允许Windows普通Ctrl+Alt的AltGraph标记，支持三键和四键；默认Ctrl+M、Ctrl+Alt+L保留。光轨警示图标使用固定居中容器。最终窄窗视觉收口和验证结果以本轮验证记录末节为准。
+
+### 本轮验证基线与边界
+
+首轮冻结运行时代码后完整串行Vitest（session15699）退出0：141文件通过/3跳过，1843项通过/15跳过，217.88秒；最后MCP Hook信任补查后的完整结果见下文。Node脚本10文件73项通过；SDK八组通过。此前全量3项提问测试在异步Hook前置后过早读取broker，改为等待真实登记事件；另一轮测试与Hook最后改动交错导致2项prompt遍历断言失败，当前13项Hook单测及随后冻结全量均通过。历史失败保留在验证记录，未放大全局超时掩盖。
+
+快捷窗口隔离Electron专项`v133-quick-chat-1794977002241`为30/30组、24截图、3次本地模拟模型请求、0renderer异常，包含真实Windows全局按键、三/四键录制、占用回退、显示竞争、崩溃恢复和置顶重启。插件专项覆盖真实设置UI、Skill、命令、MCP、审批Hook、停用、更新和重启；最后的窄窗截图与检查结果继续追加到[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。
+
+资源预检包含453项资源和生产依赖，递归检查内置技能、82设计入口及封包副本哈希。源码构建不是正式安装包；未生成NSIS/ZIP、安装/升级、云SQL、付费模型、正常用户DB/Key或提交/推送。审计仍有3项moderate传递依赖，Word实机占用降级与复杂Office/第三方插件未验收边界沿用前轮真实记录，不因本轮通过而改成已验证。
+
+### 最终收口
+
+文档复核发现MCP Hook缺少动作前项目信任检查，现已在查询Server、审批和调用前拒绝未信任/无工作区项目，目标14项通过，并独立复核；Shell原有信任检查保留。Interrupt仅声明式通知不要求信任，文档已纠正；SkillCreator不再暗示存在模型安装工具，明确独立Skill由设置导入、插件由用户从开发市场安装。
+
+最后冻结完整串行Vitest（session36167）退出0：**141文件通过/3跳过，1844项通过/15跳过，236.97秒**。随后无运行时代码修改。Node/Web类型检查、Biome370文件（625ms）、453资源/生产依赖/1.3.3预检及生产构建130/3/2250模块通过；25份TencentDB源哈希通过，main1552.66kB、renderer JS2515.16kB、CSS354.87kB。
+
+最终插件市场专项`v133-local-plugins-1794980255768`退出0：9/9组、23次本地Responses请求、2次真实Hook审批、5次预期Chat工具拒绝、7截图、0renderer异常；真实安装/更新/停用、重启引用、stdio MCP、命令、Hook及旧副本退出清理通过。增强断言同时检查设置滚动容器和插件区内部宽度，Simple800为590/590与550/550，Orbit英文800为565/565与525/525；最终截图已查看，无横向溢出。≤1280px隐藏顶部装饰标识，避免模式按钮重叠，产品品牌保留。
+
+三模式专项`v133-agent-modes-1794978939868`退出0：11/11组、21次本地Responses请求、11界面截图、0renderer异常；模式切换/准备锁、局部检查点、大输出恢复、Chat上传及恶意工具拒绝和重启持久化通过。真实Excel隔离副本重算42*2=84、PDF页面回传模型及input_image通过，唯一页面已目视检查；仍为最小计算夹具，不代替复杂报表或Word验收。此轮与上文快捷窗口30组早于最后MCP信任补查，不伪称补查后重跑，相关行为未修改。
+
+收尾20份相关Markdown可解析、150个本地文件目标存在，`git -c core.safecrlf=false diff --check`通过。全部命令、失败历史、截图证据和剩余边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)最新追加部分；根目录`run-experimental.cmd`可运行当前已构建实验版，不启动第二份正常用户profile或关闭既有实例来抢占快捷键。
+
+## 57. 2026-11-18 / 1.3.3 插件开发故障与 Work 全版本技能清单
+
+用户截图显示内置创建器可加载但`discover_capabilities`三次返回空、受保护会话未提供`local_plugin`、系统Node不在PATH且安装目录SDK被沙箱拒绝。用户同时要求核查`WorkAgentSkill/`每个技能，包括同名PDF的不同版本。版本仍为1.3.3，schema9及政策修订号`2026-11-04.3`不变，不生成正式安装包、不操作正常用户profile或付费模型。
+
+### 统一发现和宿主校验
+
+`domain-skills.ts`提供内置能力元数据，`chat-service.ts`将其与`ExtensionService`扫描的已安装启用扩展统一合并，再过滤、排序和分页。会话手选扩展仍优先，停用项仍排除。Code默认9个基础入口，Work默认14个基础入口加124个来源入口；这些数量不包括用户另外安装的启用扩展。Chat没有该发现和加载能力。
+
+只读`local_plugin`支持主Code/Work、host、有工作区的请求批准及完全访问会话。`inspect/validate`先约束绝对路径及工作区范围、保护Git和Windows路径、拒绝链接，再按canonical路径复查Profile读取权限；请求批准需要路径读取审批，Profile ask在完全访问模式也需要审批。等待批准后重新检查safe path、lstat和realpath，根目录变化则不扫描、不记忆本次会话授权。扫描/读取/哈希透传取消signal，取消原因不转为普通插件校验错误。Docker、worktree、Chat及实际子Agent仍不开放该工具。
+
+宿主校验直接调用主进程服务，无系统Node、PATH或SDK子进程前提。Creator及SDK返回说明已同步；SDK仅为用户可选CLI预检，不授予沙箱外访问。安装、更新和启停仍由用户在设置的本地插件开发市场手动完成。生成任务完成后提供实际市场路径和界面步骤并结束当前轮次，不一边占用活动任务一边等待安装。
+
+### 全树来源及适配边界
+
+此前98份只覆盖最新七个版本系列的92份及六个独立入口，遗漏26个历史版本文件。全树重新按每个物理`SKILL.md`核对，共124路径、104不同源正文SHA、93名称。每个路径都有独立稳定ID、原始路径、版本、SHA、许可处理和打包资源映射；相同正文的历史版本可共享资源，入口不消失。完整[机器目录](apps/desktop/resources/prompts/skills/work-sources/catalog.json)及[逐项清单](apps/desktop/resources/prompts/skills/work-sources/inventory.md)随包保留，运行时不依赖仓库外层`WorkAgentSkill/`。
+
+82个设计骨架/子技能的原始参考资源保留来源字节及许可，来源入口通过明确的Mingshen资源路由读取跨目录参考，不扩宽单技能资源边界。其余22个不同源正文（含主设计入口）使用原创工作流适配，区分可用、条件可用和无对应宿主操作的能力；不机械复制许可冲突的Office/PDF正文和私有宿主脚本。PDF共10个物理来源、5个不同源正文：制作、阅读、查看讨论、通用处理四类流程，另外保留Viewer 0.2.1的历史正文差异。
+
+全部来源入口默认对Work可发现，以精确ID按需加载，无需用户逐项启用，也不把124份正文塞进每次提示词。Code不加载Work来源，Chat仍禁用Skills。来源清单完整和文本可加载不等于所有上游工具已实现；私有JWT/认证、Viewer/Canvas宿主API、任意PDF编辑或未经验证的脚本不会因内置而自动可用。具体操作路由和不可用项在适配正文中说明。
+
+### 本轮验证
+
+新增覆盖统一发现、同名多版本、全部来源加载、资源隔离、canonical Profile deny/ask、审批期间目录链接替换及扫描中途取消的回归；真实Electron专项使用独立profile和本地合成供应商验证创建器、请求批准校验、来源分页与手动插件生命周期。命令、最终结果和失败历史在[1.3.3验证记录](docs/VALIDATION_1.3.3.md)本轮追加部分记录，以实际完成结果为准，不复用第56节全量数字证明本轮改动。
+
+冻结后的完整串行Vitest退出0：**141文件通过/3跳过，1855项通过/14跳过（179.88秒）**；Node脚本11文件89/89，SDK八组，Node/Web类型检查和Biome370文件通过。资源预检763项、生产依赖及1.3.3通过；生产构建main130/preload3/renderer2250模块及25份TencentDB源哈希通过。catalog SHA稳定为`c5937d1fce55b1cbde2d272016fa961175b918e489d2f3e34ff92ce94257e9e7`；独立全树集合核对未映射源、缺失入口、资源根及SHA差异均为0。
+
+最终Electron插件专项`v133-local-plugins-1794992595490`退出0：**16/16组、89次本地Responses请求、4次实际审批、6次Chat预期拒绝、9截图、0renderer异常**。清空PATH后受保护Work仍可加载内置Skill并审批校验；Work分页发现124来源并真实加载五种PDF正文，Code/Chat隔离；真实设置安装、停用、更新、重启引用及旧副本清理通过。实际查看最终光轨日夜/800英文市场及读取审批截图，无横向溢出。此前桌面会话选择竞态、审批字段断言和未等待动画的截图问题均为夹具问题，修正并重跑，细节在验证记录；没有修改模式或审批安全边界以通过测试。
+
+最终构建之后仅更新smoke夹具及文档，没有再改运行时代码。收尾23份Markdown可解析、282个本地链接目标存在，smoke语法及差异空白检查通过。源码实验入口仍为`run-experimental.cmd`，旧实验实例应正常退出后再启动；不关闭用户实例抢占快捷键。没有正式安装包或发布，前轮依赖与Office未验收边界继续保留。
+
+## 58. 2026-11-18 / 1.3.3 手动内置引用、Work新增技能与下一轮队列
+
+用户要求内置可调用Skill和Plugin同时支持自动发现及手动引用；新增PPTMaster、ASD-STE100仅供Work使用，Code原技能保留；调研并实装T3 Code中适合当前Harness的能力。版本保持1.3.3，schema9、政策修订号`2026-11-04.3`、图标、用户数据路径和现有框架不变。
+
+### 内置与已安装能力的引用
+
+输入框“+ 引用”提供内置Skills、内置Plugins、已安装Skills、已安装Plugins四组，支持搜索、多选、取消和可移除chip。同名Work来源显示原始路径、版本和SHA指纹，可选择具体PDF版本。自动发现保持可用，手选表示本轮任务偏好，不授予额外权限。
+
+`SessionBuiltinCapabilityService`独立保存`session.builtinCapabilities.v1.<sessionId>`，内置Skill与Plugin合计最多32项，不写入有外键约束的`session_extensions`。Code/Work切换时保留选择，Work-only项在Code隐藏且不进入提示词，切回恢复；fork、子会话和工作区新会话按现有继承路径复制，删除会话清理。Chat拒绝list/set。目标会话或任意后代运行、等待审批或准备发送时禁止变更；异步读取catalog后重新检查模式和忙碌状态。模式切换另由`main/index.ts`的递归`chatService.isSessionBusy`守卫覆盖准备阶段，不能只查看`SessionService`的数据库status判断是否存在IPC缺口。
+
+手选Skill的精确ID进入任务提示。Profile允许`use_skill`且无需交互审批时，按总64,000字符预算预载实际只读正文，包括默认读取策略；ask、deny、不可用或超预算项仅保留精确ID，实际使用仍走`use_skill`、审批和资源边界。正文从属于用户指令、应用规则及权限，已预载正文无需再次读取。
+
+`builtin-plugins.ts`登记真实工具组`builtin:plugin-github`与`builtin:plugin-browser`，Code/Work均可自动发现和手选，按实际注册工具及Profile可用工具取交集。Plugin提示是工具偏好，禁止将Plugin ID交给`use_skill`；选中不会登录、连接账号、打开浏览器或放宽审批。Token Saver仍为自动中间件，不伪装为可调用插件。
+
+### Work专属PPTMaster和ASD-STE100
+
+- `builtin:work-ppt-master`：上游6.9.0，MIT，Copyright 2025-2026 Hugo He。包内`work-ppt-master/references/source/`保留13,089文件、39,892,466字节，树SHA-256为`6e8023b4b8ab81e0fb4cffb71c1dcea8dd4f6f6abca490395c21fb273bfe473c`；排除`.env.example`，LICENSE、12,027个SVG图标和186个CC0 WAV的NOTICE随包。
+- `builtin:work-asd-ste100`：上游0.4.0，MIT，Copyright 2026 Dustin Yuchen Teng。包内9文件、231,661字节，树SHA-256为`0886b021b0f18d8997736af0a3b51a3492dd2c3b378ebb7484bead7803e04930`；保留规则、示例与标准库linter，不包含官方完整词典，不声称官方认证或由linter证明语义保真。
+
+两者仅属于Work，Code基础9个Skill保持原有范围；领域总表为21项（19个原有原创工作流加2个开源适配），Work基础16项加旧来源124项。旧Work catalog、ID和SHA未重写，PDF仍10物理入口/5不同源正文。新增资源的完整文件集合、字节、SHA、许可及无链接情况已独立对账。
+
+Wrapper把上游流程路由到真实`create_document`和`office_document inspect/edit_presentation/verify`；`read_document`的PPTX能力仅是幻灯片文字提取。上游脚本和Python依赖不会自动运行或安装。`use_skill`只读取不超过2MiB的UTF-8文本资源并分页，SVG可读取，WAV不能通过该接口返回或播放；需要执行或复制资源时仍按当前任务授权、工作区、审批和隔离规则处理。完整打包和可加载不能替代真实Office或上游脚本全流水线验收。
+
+### T3 Code调研与实际落地
+
+参照[pingdotgg/t3code](https://github.com/pingdotgg/t3code)固定commit`3babab1497ddd82dfd90a0d53ad4d16ebae41063`的Composer、生命周期和contracts，借鉴队列交互并用当前架构实现，没有复制远端控制面或供应商runtime。来源、MIT说明、代码位置及未实装候选见[T3调研记录](docs/T3_CODE_RESEARCH_1.3.3.md)。
+
+`QueuedPromptService`与`QueuedPromptTray`允许主界面Code/Work/Chat在任务忙碌时加入下一轮，当前run继续；支持文字编辑、附件整体替换、删除和上下排序。完成、失败、停止或审批结束均不自动发送，必须点继续。最多8项、附件总量50MiB、单文件仍25MiB；存储只保留验证后的附件字节，不保留本地路径，列表仅返回元数据，继续时交由现有`ChatService`重新校验及处理。QuickChat六组IPC拒绝，实际SubAgent的add/continue由服务层拒绝；Chat的工具边界保持不变。
+
+配置快照包含mode、workspace、profile、provider、model、permission、approval和execution，变化时阻断继续。发送前持久化`sending`claim并锁定同会话继续操作，接受后记录runId再出队；清理失败返回可见warning且不能重复派发，重启后仍保留防重放状态，可明确删除。fork不复制队列，删除会话清理。该队列不修改已执行轮次，也不实现Steer、provider-native continuation、远端控制面或自动Resume。
+
+### 验证与交付
+
+本轮最终自动检查、真实Electron引用/队列交互、视觉证据及失败修正继续记录在[1.3.3验证记录](docs/VALIDATION_1.3.3.md)最新追加部分，不复用第57节数字作为本轮证明。README、双语手册/更新日志、第三方通知、调研和DESIGN已同步实际合同。
+
+最终完整串行Vitest为144文件通过/3跳过、1880项通过/14跳过（188.09秒）；之后仅修正引用空状态三个英文分组插值，重新Node/Web类型检查、Biome380文件及生产构建通过。Node脚本11文件89/89、SDK八组、13,865资源/生产依赖/1.3.3预检通过。最终文案构建的Electron引用专项`v133-local-plugins-1795007753673`为26/26组、104次本地Responses请求、4次实际审批、15截图；队列专项`v133-queued-prompts-1795008343768`为10/10组、10次本地Responses请求、7截图，两者均0 renderer异常。实际查看光轨日夜及800英文引用/队列截图，队列前景命中、纵向完整可见且无横向溢出；主Chat队列、实际SubAgent拒绝及QuickChat六组IPC拒绝均有真实运行证据。完整数字、最终构建先后关系及Office边界以验证记录为准。
+
+没有生成正式NSIS/ZIP、安装/升级、云SQL、付费模型调用、正常用户DB/Key操作、提交或推送。实验入口仍为`run-experimental.cmd`；前轮依赖审计、Word占用降级和复杂Office/第三方服务未验收边界保留。
+
+## 59. 2026-11-18 / 1.3.3 frontend-design 安装与光轨布局收口
+
+用户指定安装`WorkAgentSkill/frontend-design`并据此优化光轨布局。已安装到`C:\Users\ASUS\.codex\skills\frontend-design`，两份文件共19,564字节，文件集合及SHA-256与源一致，Apache 2.0许可保留；没有覆盖已有技能。此为当前开发环境的Codex技能安装，不改变CodeAgent/WorkAgent内置技能范围。已直接完整阅读并在本轮应用；后续新会话可自动识别。应用继续保持1.3.3，schema9、政策修订号`2026-11-04.3`、正式水青原子图标及用户数据位置不变。
+
+设计采用连续工作平面：56px无外框标题条、48px工具轨、12px侧边距、8px间隙、44px面包屑与24px状态栏。会话、审查和任务沿同一网格对齐；右下任务默认`clamp(224px, 28dvh, 304px)`，窄窗或短高文件编辑时收至160px。`App.tsx`集中声明480px最小聊天宽度与88/96px侧栏/Inspector外壳预算；保留原抽屉互斥、布局持久化和节点挂载机制。移除重复轨道品牌、假M身份与中央装饰光轨字标，主bitmap品牌和实际操作保留。
+
+日间为白色阅读面及低饱和灰绿外壳，夜间为低饱和墨青，原Orbit品牌、发送和语义色保持。输入框为唯一轻微抬升工具面，上下文分为模型、Agent和工作目录三列，聊天pane宽度不超过600px时重排，权限/引用/指标与推理/发送分层；长模型和供应商仍分别缩略并保留完整title及辅助技术名称。工作台元数据12px，正文14/15px，ChatAgent光轨独立侧栏264px、会话标题13px、时间12px、空态标题固定24px。更新入口保留自适应宽度。主要修改集中`App.tsx`、`orbit-workbench.css`及`agent-modes.css`，没有新增依赖或替换UI框架。
+
+流式入场仅保留3px位移，移除首帧0.55透明度；正文从第一帧保持完全不透明。运行节点和状态信号只在真实运行时呼吸，聚焦、展开与设置使用短反馈；应用关闭动效、系统减少动态效果及隐藏窗口继续生效。DESIGN、双语使用手册/更新日志已按最终有效token、几何和实际模式同步。
+
+最终构建后串行真实Electron：光轨工作台`v133-orbit-layout-1795013890831` **17/17组、13次本地请求（含2次worker）、45截图、0 renderer异常**，涵盖手选引用、实际忙碌队列、文件/任务并排、草稿节点、日夜/双语、800到2559窗口、720x450 CSS缩放等效、Work/独立Chat及真实QuickChat 400x560。风格专项`v133-interface-style-1795013451429` **20/20组、2次本地请求、40截图、两次实际启动、0异常**，涵盖首帧、重载/退出恢复、未保存编辑保护、隐藏暂停和减少动效。长历史最终专项 **11/11组、48测量、13截图、0布局问题/异常/崩溃**，空闲/流式输入P95 11.1/12.4ms，均0长任务。早期15组通过和22:17长历史属于收口前构建，不代替上述最终证据。
+
+Node/Web类型检查、Biome380文件、生产构建main135/preload3/renderer2254及25份TencentDB固定源哈希通过，最终renderer JS2553.66kB/CSS360.93kB；13,865资源/生产依赖/1.3.3预检通过。设计检测器在两份主布局文件无建议，`agent-modes.css`有12项既有共享样式建议；Taste静态检查同时指出共享Chat的旧渐变，光轨已以更高优先级纯色覆盖，不为消除不适用告警改变Simple。实际Electron截图和尺寸为验收依据，未把普通浏览器无preload页面当成桌面应用。完整命令、修正历史与对比证据见[验证记录](docs/VALIDATION_1.3.3.md)本轮末节。
+
+既有renderer helper定向3文件10项通过，8份相关Markdown可解析、110个本地文件链接目标存在，差异空白检查通过；三份smoke临时进程已退出。本轮未重跑完整后端Vitest，前轮1880项是历史功能基线；没有正式NSIS/ZIP、安装升级、线上写入、付费模型、正常用户profile/DB/Key、提交或推送。使用`run-experimental.cmd`运行当前构建，已有实验实例应正常退出后再启动。未认证完整Windows系统DPI/辅助技术矩阵或复杂Office/第三方插件兼容性。
+
+## 60. 2026-11-19 / 1.3.3 光轨任务区与办公起始布局
+
+用户再次指定`frontend-design`继续升级光轨布局。本轮沿用第59节的连续工作平面、配色、中文字体、原子图标及现有框架，重点为可调节的任务区、文件身份、Work空态与编辑保护；版本仍为1.3.3，schema9和政策修订号`2026-11-04.3`不变。
+
+`App.tsx`与`orbit-workbench.css`将右栏组织为文件/审查/终端、8px横向分隔条、任务区。任务区可拖动、单行收起或由Agent入口展开；折叠保留实际组件、计划表单和草稿节点。`PanelResizeHandle`扩展bottom方向，支持上/下方向键每次16px、Home/End最小/最大、Enter或双击恢复默认；Esc、pointer cancel和lost capture撤销拖动，不保存中间值。高度保存为工作区及风格隔离的可选`taskPanelHeight`，有限值限制160–640px并按窗口可用高度钳制；`taskPanelCollapsed`只接受布尔值。重置删除自定义高度，使其重新跟随窗口默认值，而非写入当时像素值；未新增schema。悬停仅高亮32px握柄，完整8px命中区和键盘焦点保留。
+
+审查文件行分成文件名和父目录，预览头优先显示文件名，长目录从末端保留可见内容；完整路径仍在tooltip及辅助技术名称中。行的无障碍名称同时保留新增/删除数。会话行52px、标题13px，右栏辅助按钮和任务操作32px；空态与输入区对齐。光轨Work空会话有Word、Excel、PPT三个起始任务，真实点击只追加草稿并聚焦，不发送模型请求或创建文件；Code、Chat、小窗及简约的既有模式入口保留。
+
+未保存计划时，切换其他会话、Chat、新建或归档当前会话及祖先前先阻止导航，展开任务并返回计划页提示保存或取消；同会话Code/Work切换不卸载编辑器。保护不自动保存、不放弃，也不承诺未保存计划跨重启恢复。通知回复恢复只在选择成功后标记完成，计划结束编辑后重新读取待恢复状态；不能因导航被阻止而提前吞掉恢复标记。保存时仍使用原revision合同。
+
+最终Node/Web类型检查、Biome380文件、定向Vitest5文件37项及13,865资源/生产依赖/版本预检通过。最终生产构建为main135/preload3/renderer2254模块、25份TencentDB源哈希一致，renderer JS2568.04kB/CSS364.11kB。最终光轨专项`v133-orbit-layout-1795051139732`退出0：25/25组、13次本地请求（含2次worker）、52截图、0renderer异常，覆盖真实拖拽、取消、重置、持久化、计划导航/归档保护、双语办公起始入口和三模式/小窗。风格20/20组及长历史11/11组在最后一条握柄hover样式收口前完成，后者48次测量、13截图、0问题，空闲/流式输入P95为7.3/9.9ms且0长任务；不将其误写为最后hover修改后重跑。最终工作台在该修改后完整重跑并实际查看截图。
+
+早期桌面失败属于旧编辑器节点引用和CDP拖动按钮状态夹具，修复后完整重跑，证据与收口先后详见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)本轮末节。DESIGN与双语手册/日志同步。没有重跑完整后端Vitest、生成正式安装包、正常用户profile/DB/Key操作、付费请求、云写入、提交或推送；实验入口仍为`run-experimental.cmd`。
+
+收尾8份相关Markdown可解析、151个本地文件目标存在，差异空白检查通过；只读进程检查未发现三份smoke或其临时profile进程残留。
+
+## 61. 2026-11-19 / 1.3.3 文档同步与打包资源复核
+
+用户要求同步文档、检查资源并提供命令，由维护者自行打包。本轮只更新README、双语使用手册/更新日志、本交接及[1.3.3验证记录](docs/VALIDATION_1.3.3.md)，未修改运行时代码。补齐本轮任务区、Work起始草稿、未保存计划的归档保护和响应式抽屉说明；当前结构表校正为schema9，打包指南移除旧48项/12技能说明和迁移前Documents输出措辞，说明来源目录、可选解包步骤及逐文件缓存回退。
+
+实际在当前Desktop目录使用`D:\NodeJs\node.exe` v24.19.0、pnpm11.25.0运行`.\package-win.cmd --check`，退出0：**13,865项资源、生产依赖及1.3.3版本通过**，未使用pnpm校验绕过或重装依赖。10个打包/运行时/图标/Work来源Node测试文件串行**80/80通过、0失败/跳过（41.60秒）**，包含迁移后hoisted/app-local解析、Windows复制/路径保护、真实ASAR夹具的文档依赖闭包和缺失拒绝。核对builder的10处extraResources源存在，prompts/SDK全树、Office脚本和Markdown文档映射完整，x64/当前用户/未签名NSIS及原子图标配置保持。
+
+正式命令仍为当前仓库根目录`.\package-win.cmd`，自动准备运行时、图标和沙箱、重建应用、预检并执行afterPack，最终生成`apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.exe`及同名ZIP、ZIP.sha256、ZIP.json。保留`WorkAgentSkill/`、`ppt-master/`和`asd-ste100-skill-master/`用于源码对账；安装应用只依赖随包副本。缓存回退路径及实际发布元数据以本次打包输出为准，不复用旧1.3.2材料。本轮未生产构建、生成解包/NSIS/ZIP、安装升级、执行云SQL、访问正常用户DB/Key、提交或推送，源码预检和测试夹具不代表正式包已验收。
+
+文档收尾8份Markdown可解析、152个本地文件目标存在，差异空白检查通过；文档更新后再次运行用户入口预检退出0，仍为13,865资源、生产依赖及1.3.3版本通过。
+
+## 62. 2026-11-19 / 1.3.3 十条自动FIFO队列
+
+用户要求像Codex一样预编辑后续消息，最多保留10条并按加入先后，在上一任务完成后自动发送下一条。版本继续为1.3.3，schema9、政策修订号`2026-11-04.3`、图标与数据目录不变；第58节8条及手动继续属于历史实现。
+
+`QueuedPromptService`按首次加入顺序派发队首，当前执行不计入10条待发上限。移除上下移动和逐项继续，兼容reorder API拒绝非原位请求，continue API仅允许首项用于异常后的队列级恢复。正常成功完成后自动接续，切换到其他会话或收起窗口不影响主进程派发；审批等待不推进。手动停止、运行失败、自动发送失败及应用重启保留并暂停队列，恢复从首项开始。新一轮正常运行成功也可重新接续；配置变化、归档或未确认派发均阻塞队首，不跳过。
+
+`ChatService`通过明确的`completed/failed/interrupted`结果在执行与资源清理结束后结算，不能用较早发出的`run_completed`直接发送。超短任务结算等待`preparingSends`清理，队列发送确认前已完成的下一轮由发送finally再次调度；runId和发送许可共同防止重复结算、跨轮次越队及并发派发。Stop先暂停队列再abort，dispose先停队列再关其他服务及数据库。队列中的`/compact`按关联runId接续，普通手动压缩不恢复暂停队列。
+
+编辑或选择替换附件先经IPC取得主进程hold，整个队列等待保存/取消后释放，避免把编辑前的正文或附件发送出去。显式取消沿用原已保存内容；切换会话、组件卸载、重载或renderer失联放弃hold时保持暂停，等待用户恢复。hold绑定取得时的会话、token及webContents，旧回调不能释放其他窗口的编辑；新`queued_prompts_updated`事件通知界面重读完整队列，异步列表用版本防止旧结果覆盖。主Chat可用，QuickChat新增两项编辑IPC仍由白名单拒绝，实际SubAgent继续由服务层拒绝。
+
+保留先持久`sending`claim再发送、接受后记runId再出队的防重放协议，清理失败锁定且在自动队列显示原因；重启不自动重放未确认项。仍为存储版本2，可读取原8条队列；附件每项25MiB、总50MiB、配置快照、fork不复制及删除清理合同不变。
+
+本轮实际验证及桌面运行证据见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)本轮追加部分，不复用第58至61节数字作为自动队列证明。README、DESIGN、双语手册/日志及T3研究记录已同步当前合同。
+
+### 最终收口验证
+
+最终完整串行Vitest由捆绑Node在`apps/desktop`执行，退出0：**145文件通过/3跳过，1918项通过/14跳过，227.21秒**。验证记录中的1904项是同一轮收口前历史结果，不是另一套最终数字，也不与1918相加。最终TypeScript类型检查和Biome **381文件**通过；`pnpm build`通过，main **135**、preload **3**、renderer **2254**模块及25份TencentDB固定源哈希一致，产物为main **1620.64kB**、preload **31.47kB**、renderer JS **2580.45kB**、CSS **365.61kB**，入口文件为`index-DcGB_3ap.js`和`index-C2x_YhHG.css`。`.\package-win.cmd --check`退出0：**13,865项资源、生产依赖及1.3.3版本通过**。
+
+最终`node scripts/queued-prompt-smoke.mjs`退出0，证据`.impeccable/review/v133-queued-prompts-1795060125059/result.json`记录**16/16组、38次本地Responses请求、9截图、0renderer错误和实际重启**。Work自动队列两项FIFO通过；超过25MiB的附件替换失败后暂停并保留原附件，0次自动请求，手动恢复后才发送原附件；队列直接`@General`关联的真实child完成后才发送parent后续，parent历史只含initial/followup，child保留独立任务正文。普通直接`@`保持原行为，18项lifecycle测试覆盖不伪造parent run事件且不开放SubAgent queue。早期`1795059737286`在`backgroundSession`选择处超时，已通过的3组和0renderer错误保留为失败历史；原因是helper只展开`showAll`、未等待初始group展开，修正为轮询先展开group再`showAll`并滚动目标到可见，mention夹具也移除了错误要求复制parent history的`parentHistory`断言。最终完整运行在这些夹具修正后通过。先前v1审查finding因无确切历史shape或写入证据已撤回；未修改队列storage或schema。
+
+已实际查看最终光轨日间、800px英文夜间及附件替换失败截图，未见队列控件遮挡或横向溢出。9份相关Markdown可解析，154个本地链接目标存在、0缺失；smoke临时profile进程已退出，用户原有实验实例未关闭。最后运行时代码变更后已完成上述完整测试、构建和桌面验证，之后只修正smoke夹具及文档。没有生成安装包，没有安装/升级、云写入、付费模型、正常用户profile/Key、Git提交或推送。
+
+## 63. 2026-11-19 / 1.3.3 README 与 GitHub Release 文案
+
+用户准备自行提交新版本，要求同步 README 并准备 Release 标题及简介。本轮整理 README 的版本亮点，按模式、办公格式、技能/本地插件、十条自动队列和快捷窗口组织说明；明确 Gemini 原生协议、Gemini/DeepSeek 缓存及 Word 表格原生公式属于 1.3.2 已有能力，避免重复计作 1.3.3 新增。修正旧快捷键说明把 `Ctrl+Alt+L` 也称作二键组合的表述，保留其默认三键和录制支持范围。
+
+新增 [Release 文案](docs/RELEASE_1.3.3.md)，含中英文标题、简介、亮点及使用/升级说明。建议沿用 `V1.3.3` 标签，正文使用该标签的 GitHub 绝对文档链接；维护者发布时需将标签指向包含本版改动的最终提交。124 个 Work 物理来源与 104 种源正文 SHA、93 个名称分别说明，不当成 124 项独立原创技能；Office 能力仍按条件和实际支持范围描述，不声明完整安装/升级或所有第三方环境已验收。
+
+本轮验证为文档检查：项目现有 Marked 成功解析 README 和 Release 文案，49 个本地链接/图片、6 个页内导航锚点、6 个固定标签链接对应的本地源码目标均存在；三处应用版本为 1.3.3，所列脚本与启动入口存在，差异空白检查通过。固定标签目标核对是本地文件检查，不代表远端标签已创建或发布。完整结果见[验证记录](docs/VALIDATION_1.3.3.md)本轮追加节。
+
+本轮只修改 README、Release 文案、交接和验证记录，未修改应用代码、许可、版本、schema9、政策修订号、图标、用户数据或历史发布元数据；未重跑应用测试、构建或打包，未创建标签、提交、推送、发布 GitHub Release 或执行云 SQL。第62节完整测试及上一轮打包资源核对继续作为对应轮次证据。
+
+## 64. 2026-11-19 / 1.3.3 已有安装包的发布 SQL
+
+维护者已自行完成1.3.3打包，并提供 `https://github.com/SkyH1aa/MingshenHarness/releases/download/V1.3.3/MingshenHarness-1.3.3-x64.zip` 下载直链。本轮新增 [publish-release-1.3.3.sql](supabase/publish-release-1.3.3.sql)，沿用 `public.mingshen_app_releases`、0003迁移及同版本幂等upsert，填入版本、721字符公告、实际ZIP哈希、大小和直链。由维护者在已部署0003的Supabase SQL Editor手动执行，之后检查 `mingshen_get_latest_release_v2()`；本轮未执行云端SQL或确认线上发布状态。
+
+实际本地ZIP修改时间为2026-11-19 12:13:13（Asia/Shanghai），大小 **318504814字节（303.75 MiB）**，完整SHA-256为 `39039e54ec234f0c23ce629a6cb81aac5f26f979a264ff6f60f390f245d12d90`。对同一只读共享ZIP流重算哈希、读取归档并与 `.zip.json`、`.zip.sha256` 核对，全部一致。ZIP根目录仅有 `MingshenHarness-1.3.3-x64.exe`，解压长度319403978字节，流式SHA-256为 `2d896db38745bfe292528e514441e204cc462d3f9291b49449d01a3b6f24c669`，与旁置EXE相同；只读Windows版本资源显示ProductVersion为1.3.3，没有执行安装器。
+
+Supabase README、部署说明和[1.3.3验证记录](docs/VALIDATION_1.3.3.md)同步已生成实际包及本地发布材料的状态。第62、63节“未生成安装包”是智能体对应开发轮次的历史边界，不改写成智能体打包；旧1.3.2/1.3.1/1.3.0 SQL及元数据保持原样。新SQL的字段、URL、64位SHA、字节范围、公告1000字符约束、upsert和returning静态核对通过，差异空白通过。
+
+本轮没有重新下载远端ZIP、重新打包、安装/升级、上传、执行云SQL、读取正常用户DB/Key、提交或推送；本地产物一致不代表远端文件已独立核验或安装升级已验收。重新构建或替换ZIP后必须重算哈希和大小。若云端仍有8.8.8等更高生效版本，需维护者确认后处理，不自动更改其他发布记录。

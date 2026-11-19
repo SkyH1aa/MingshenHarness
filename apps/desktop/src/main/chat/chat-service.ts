@@ -1,9 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
+import { lstat, realpath } from "node:fs/promises";
 import { release as osRelease } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { toolRoundLimit } from "../../shared/agent-limits";
 import { resolveSubagentModelId } from "../../shared/agent-profile-model";
-import { validateComposerDraftId } from "../../shared/composer-draft";
+import {
+  type ComposerDraft,
+  type SaveComposerDraftInput,
+  validateComposerDraftAttachment,
+  validateComposerDraftId,
+  validateComposerDraftInput,
+} from "../../shared/composer-draft";
 import type {
   ActivityEvent,
   AgentProfileView,
@@ -37,8 +44,17 @@ import type { ProjectMemoryEdit } from "../../shared/project-memory";
 import { normalizeQuestions } from "../../shared/questions";
 import type { ExecutionCheckpoint } from "../../shared/workbench";
 import type { AgentProfileService } from "../agents/agent-profile-service";
+import { builtinPluginDiscoveryRecords, isBuiltinPluginId } from "../agents/builtin-plugins";
 import type { IndexSnapshot } from "../agents/code-index-service";
 import type { CustomCommandService } from "../agents/custom-command-service";
+import {
+  builtinCapabilityDiscoveryRecords,
+  CAPABILITY_DISCOVERY_TOOL,
+  capabilityDiscoverySchema,
+  domainSkillCatalog,
+  loadDomainSkill,
+  USE_SKILL_TOOL,
+} from "../agents/domain-skills";
 import type { LspDiagnosticsService } from "../agents/lsp-diagnostics-service";
 import type { ProjectConfigService } from "../agents/project-config-service";
 import type { ProjectInstructionService } from "../agents/project-instruction-service";
@@ -56,6 +72,7 @@ import {
   ProjectMemoryService,
 } from "../agents/project-memory-service";
 import type { ProjectToolingService } from "../agents/project-tooling-service";
+import type { SessionBuiltinCapabilityService } from "../agents/session-builtin-capability-service";
 import {
   TencentMemoryAnalysisError,
   type TencentMemoryMessage,
@@ -69,8 +86,21 @@ import {
   documentAssetPaths,
   documentAuthoringSchema,
 } from "../documents/document-authoring-schema";
+import { officeDocumentAssets } from "../documents/office-document";
+import { officeDocumentSchema } from "../documents/office-document-schema";
 import type { ExtensionService } from "../extensions/extension-service";
-import type { PluginHookService } from "../extensions/plugin-hook-service";
+import {
+  LOCAL_PLUGIN_TOOL,
+  type LocalPluginReadService,
+  type LocalPluginRequest,
+  localPluginRequestSchema,
+} from "../extensions/local-plugin-tool";
+import {
+  formatPluginPromptContext,
+  type PluginHookExecutionEvent,
+  type PluginHookInvocationContext,
+  type PluginHookService,
+} from "../extensions/plugin-hook-service";
 import type { McpService } from "../mcp/mcp-service";
 import type { ApprovalBroker } from "../permissions/approval-broker";
 import { AutomaticApprovalService } from "../permissions/automatic-approval-service";
@@ -95,6 +125,7 @@ import {
   tokenSaverPrompt,
 } from "../token-saver/token-saver-service";
 import { usageRecorder } from "../token-saver/usage";
+import { safePrefix } from "../tools/bounded-output";
 import type { CustomToolService } from "../tools/custom-tool-service";
 import {
   isDangerousCommand,
@@ -105,10 +136,14 @@ import { cacheableCommand, readonlyCommand } from "../tools/tool-result-cache";
 import { changedFiles, snapshotWorkspaceChanges } from "../workspace/change-tracker";
 import type { DockerService } from "../workspace/docker-service";
 import { FileLockService } from "../workspace/file-lock-service";
+import { safeFilePath } from "../workspace/safe-file-path";
 import type { SnapshotService } from "../workspace/snapshot-service";
 import type { WorktreeService } from "../workspace/worktree-service";
+import { CHAT_TOOLS, chatToolRejection, chatUpload, isChatSession } from "./agent-mode-policy";
+import { validateChatAttachments } from "./attachment-validation";
 import { ContextCompactionService } from "./context-compaction-service";
 import { ExecutionSafetyService, LOCAL_EDIT_TOOLS } from "./execution-safety-service";
+import { FailureLoopGuard } from "./failure-loop-guard";
 import { HostContextService } from "./host-context";
 import { persistedPlanPrompt, SessionWorkbenchService } from "./session-workbench-service";
 import {
@@ -117,11 +152,15 @@ import {
   TOOL_CHAIN_DESCRIPTOR,
   type ToolChainStep,
 } from "./tool-chain";
+import { READ_TOOL_OUTPUT_TOOL, ToolOutputStore } from "./tool-output-store";
+
+export type ChatRunOutcome = "completed" | "failed" | "interrupted";
 
 interface ChatServiceOptions {
   repository: Repository;
   providerService: ProviderService;
   agentProfileService: AgentProfileService;
+  sessionBuiltinCapabilityService?: SessionBuiltinCapabilityService;
   customCommandService: CustomCommandService;
   promptDirectory: string;
   appVersion: string;
@@ -131,6 +170,7 @@ interface ChatServiceOptions {
   questionBroker: QuestionBroker;
   permissions: PermissionStore;
   extensionService: ExtensionService;
+  localPluginMarketplaceService?: LocalPluginReadService;
   pluginHookService: PluginHookService;
   browserService: BrowserService;
   githubService: GitHubService;
@@ -143,6 +183,13 @@ interface ChatServiceOptions {
   worktreeService: WorktreeService;
   dockerService: DockerService;
   emit: (event: ChatStreamEvent) => void;
+  onRunSettled?: (input: { sessionId: string; runId: string; outcome: ChatRunOutcome }) => void;
+  onRunStopped?: (sessionId: string) => void;
+  onDelegatedSubagentRunStarted?: (input: {
+    sessionId: string;
+    runId: string;
+    childSessionId: string;
+  }) => void;
 }
 
 interface PendingToolCall {
@@ -168,10 +215,18 @@ interface RoundState {
   providerState: Extract<MessagePart, { type: "provider_state" }> | null;
 }
 
+interface PendingRunSettlement {
+  sessionId: string;
+  runId: string;
+  outcome: ChatRunOutcome;
+}
+
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 3;
 const MAX_CONCURRENT_SUBAGENT_LIMIT = 8;
 const MAX_SUBAGENT_OUTPUT = 40_000;
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const PINNED_SKILL_PROMPT_BUDGET_CHARS = 64_000;
+export const USER_INTERRUPT_REASON = "mingshen:user-stop";
+const INTERRUPT_HOOK_TIMEOUT_MS = 1_500;
 const BROWSER_TOOL_NAMES = new Set([
   "browser_open",
   "browser_navigate",
@@ -200,7 +255,13 @@ const FILE_MUTATION_TOOL_NAMES = new Set([
   "delete_file",
   "create_document",
 ]);
+const WORK_ONLY_TOOL_NAMES = new Set(["office_document"]);
 const READ_ONLY_TOOLS = new Set([
+  "office_document",
+  "read_tool_output",
+  "use_skill",
+  "discover_capabilities",
+  "local_plugin",
   "recall_context",
   "memory_search",
   "execute_tool_chain",
@@ -287,8 +348,11 @@ function wildcardMatch(value: string, pattern: string): boolean {
 }
 
 function permissionGroup(toolName: string): string {
+  if (toolName === "read_tool_output") return "read";
+  if (toolName === "use_skill" || toolName === "discover_capabilities") return "read";
+  if (toolName === "local_plugin") return "read";
   if (toolName === "recall_context") return "read";
-  if (["read_file", "read_document", "view_image"].includes(toolName)) {
+  if (["read_file", "read_document", "view_image", "use_skill"].includes(toolName)) {
     return "read";
   }
   if (toolName === "memory_search") return "read";
@@ -333,7 +397,7 @@ function permissionGroup(toolName: string): string {
   return toolName;
 }
 
-function agentPermission(
+export function agentPermission(
   profile: AgentProfileView | null,
   toolName: string,
   subject = "",
@@ -342,35 +406,91 @@ function agentPermission(
     return null;
   }
   const group = permissionGroup(toolName);
-  let action: "allow" | "ask" | "deny" | null = null;
-  let explicitToolAction: "allow" | "ask" | "deny" | null = null;
+  const subjectValue = subject || toolName;
+  let groupAction: "allow" | "ask" | "deny" | null = null;
+  let globalAction: "allow" | "ask" | "deny" | null = null;
+  let explicitAction: "allow" | "ask" | "deny" | null = null;
+  let explicitScore = -1;
+  const actionPriority = { allow: 0, ask: 1, deny: 2 } as const;
+  const considerExplicit = (
+    value: "allow" | "ask" | "deny",
+    category: number,
+    exact: boolean,
+    pattern: string,
+  ) => {
+    const score =
+      category * 1_000_000 +
+      (exact ? 100_000 : 0) +
+      pattern.replace(/[*?]/g, "").length * 10 -
+      pattern.replace(/[^*?]/g, "").length;
+    if (
+      score > explicitScore ||
+      (score === explicitScore &&
+        (explicitAction === null || actionPriority[value] > actionPriority[explicitAction]))
+    ) {
+      explicitAction = value;
+      explicitScore = score;
+    }
+  };
   for (const [key, value] of Object.entries(profile.permissions)) {
     const [scope, ...patternParts] = key.split(":");
     const pattern = patternParts.join(":");
-    if (!pattern && (key === group || wildcardMatch(toolName, key))) {
-      action = value;
-      if (key !== group) explicitToolAction = value;
-    } else if (pattern && scope === group && wildcardMatch(subject || toolName, pattern)) {
-      action = value;
-      if (scope === toolName) explicitToolAction = value;
+    if (!pattern) {
+      if (key === group) groupAction = value;
+      else if (key === "*") globalAction = value;
+      else if (wildcardMatch(toolName, key)) {
+        considerExplicit(value, key === toolName ? 2 : 1, key === toolName, key);
+      }
+    } else if ((scope === toolName || scope === group) && wildcardMatch(subjectValue, pattern)) {
+      considerExplicit(value, scope === toolName ? 4 : 3, !/[*?]/.test(pattern), pattern);
     }
   }
+  const fallback = groupAction ?? globalAction;
+  if (explicitAction !== null) return explicitAction;
   if (toolName === "create_document") {
-    if (explicitToolAction !== null) return explicitToolAction;
     const inherited = agentPermission(profile, "write_file", subject);
-    return action ?? inherited;
+    return inherited ?? fallback;
+  }
+  if (
+    toolName === "use_skill" ||
+    toolName === "discover_capabilities" ||
+    toolName === "local_plugin" ||
+    toolName === "read_tool_output"
+  ) {
+    return agentPermission(profile, "read_file", subject) ?? fallback;
   }
   if (["view_image", "exec_command", "write_stdin", "request_verification"].includes(toolName)) {
-    if (explicitToolAction !== null) return explicitToolAction;
     return (
       agentPermission(profile, toolName === "view_image" ? "read_file" : "run_command", subject) ??
-      action
+      fallback
     );
   }
-  return action;
+  return fallback;
 }
 
 function allowedByProfile(profile: AgentProfileView | null, toolName: string): boolean {
+  if (toolName === "read_tool_output") return allowedByProfile(profile, "read_file");
+  if (toolName === "local_plugin") {
+    if (
+      profile?.toolAllowlist.length &&
+      profile.toolAllowlist.some((pattern) => wildcardMatch(toolName, pattern))
+    )
+      return true;
+    return allowedByProfile(profile, "read_file");
+  }
+  if (toolName === "office_document")
+    return (
+      allowedByProfile(profile, "read_file") ||
+      (!profile?.readOnly && allowedByProfile(profile, "write_file"))
+    );
+  if (toolName === "use_skill" || toolName === "discover_capabilities") {
+    if (
+      profile?.toolAllowlist.length &&
+      profile.toolAllowlist.some((pattern) => wildcardMatch(toolName, pattern))
+    )
+      return true;
+    return allowedByProfile(profile, "read_file");
+  }
   if (toolName === "recall_context") return allowedByProfile(profile, "read_file");
   if (
     ["view_image", "exec_command", "write_stdin", "request_verification"].includes(toolName) &&
@@ -458,39 +578,6 @@ function resolveProfileMention(
   };
 }
 
-function validateAttachments(value: ChatAttachmentInput[] | undefined): ChatAttachmentInput[] {
-  if (!value?.length) {
-    return [];
-  }
-  return value.map((attachment) => {
-    const name = attachment.name.trim();
-    if (!name || name.length > 255) {
-      throw new Error("附件名称长度必须为 1 到 255 个字符。");
-    }
-    if (
-      !Number.isFinite(attachment.size) ||
-      attachment.size <= 0 ||
-      attachment.size > MAX_ATTACHMENT_BYTES
-    ) {
-      throw new Error(`附件「${name}」超过单文件 25 MiB 限制。`);
-    }
-    if (!attachment.dataUrl.startsWith("data:")) {
-      throw new Error(`附件「${name}」没有有效内容。`);
-    }
-    if (!["image", "audio", "video", "file"].includes(attachment.kind)) {
-      throw new Error(`附件「${name}」的类型不受支持。`);
-    }
-    return {
-      size: attachment.size,
-      kind: attachment.kind,
-      dataUrl: attachment.dataUrl,
-      ...(attachment.path ? { path: attachment.path } : {}),
-      name,
-      mimeType: attachment.mimeType.trim() || "application/octet-stream",
-    };
-  });
-}
-
 function parseArguments(value: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(value || "{}");
@@ -570,6 +657,36 @@ function displayPath(value: string, workspacePath: string | null): string {
   return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : value;
 }
 
+function pathIsInside(root: string, target: string): boolean {
+  const local = relative(root, target);
+  return local === "" || (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local));
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLocaleLowerCase("en-US") === right.toLocaleLowerCase("en-US")
+    : left === right;
+}
+
+async function resolveCanonicalPluginRoot(
+  workspacePath: string,
+  rootPath: string,
+): Promise<{ workspacePath: string; pluginPath: string }> {
+  const boundedRoot = await safeFilePath(workspacePath, rootPath);
+  const metadata = await lstat(boundedRoot);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory())
+    throw new Error("LOCAL_PLUGIN_PATH_INVALID: rootPath must be a real directory.");
+  const [canonicalWorkspace, canonicalPluginRoot] = await Promise.all([
+    realpath(workspacePath),
+    realpath(boundedRoot),
+  ]);
+  if (!pathIsInside(canonicalWorkspace, canonicalPluginRoot))
+    throw new Error(
+      "LOCAL_PLUGIN_PATH_OUTSIDE_WORKSPACE: plugin source directories must stay inside the current workspace.",
+    );
+  return { workspacePath: canonicalWorkspace, pluginPath: canonicalPluginRoot };
+}
+
 function activityDescription(
   toolName: string,
   args: Record<string, unknown>,
@@ -591,6 +708,35 @@ function activityDescription(
       kind: "edit",
       title: `制作 ${basename(path || rawPath) || "文档"}`,
       detail: path,
+    };
+  }
+  if (toolName === "use_skill") {
+    return {
+      kind: "read",
+      title: "按需加载技能",
+      detail: String(args.name ?? ""),
+    };
+  }
+  if (toolName === "discover_capabilities") {
+    return {
+      kind: "read",
+      title: "发现按需技能与插件",
+      detail: String(args.query ?? "全部已启用能力"),
+    };
+  }
+  if (toolName === "local_plugin") {
+    return {
+      kind: "read",
+      title:
+        args.action === "validate"
+          ? "校验本地插件"
+          : args.action === "inspect"
+            ? "检查本地插件"
+            : "读取本地插件市场",
+      detail:
+        typeof args.rootPath === "string"
+          ? displayPath(args.rootPath, workspacePath)
+          : "已注册来源",
     };
   }
   if (toolName === "update_todos") {
@@ -708,6 +854,8 @@ function githubActivityTitle(toolName: string): string {
 }
 
 export class ChatService {
+  private readonly failureGuards = new Map<string, FailureLoopGuard>();
+  private readonly exhaustedFileCheckpoints = new Set<string>();
   readonly workbench: SessionWorkbenchService;
   private readonly fileLocks = new FileLockService();
   private readonly executionSafety: ExecutionSafetyService;
@@ -737,17 +885,26 @@ export class ChatService {
   private readonly managedChildren = new Set<string>();
   private readonly approvedMcpProcesses = new Map<string, Set<string>>();
   private readonly activeRuns = new Map<string, AbortController>();
-  private readonly activeExecutions = new Map<string, Promise<void>>();
-  private readonly runPromises = new Map<string, Promise<void>>();
+  private readonly activeExecutions = new Map<string, Promise<unknown>>();
+  private readonly runPromises = new Map<string, Promise<unknown>>();
   private readonly preparingSends = new Map<string, Promise<{ runId: string }>>();
   private readonly preparingControllers = new Map<string, AbortController>();
   private readonly removingSessions = new Map<string, Promise<void>>();
+  private readonly pendingRunSettlements = new Map<string, PendingRunSettlement>();
   private closing = false;
   private activeSubagents = 0;
   private readonly subagentWaiters: Array<() => void> = [];
   private readonly delegatedTasks = new Map<
     string,
-    Map<string, { promise: Promise<DelegatedResult>; delivered: boolean }>
+    Map<
+      string,
+      {
+        promise: Promise<DelegatedResult>;
+        delivered: boolean;
+        label: string;
+        startedAt: string;
+      }
+    >
   >();
 
   readonly contextCompaction: ContextCompactionService;
@@ -858,7 +1015,7 @@ export class ChatService {
     runId: string,
     signal: AbortSignal,
   ): Promise<void> {
-    if (!session.workspacePath) return;
+    if (isChatSession(session) || !session.workspacePath) return;
     const { root } = this.memorySession(session.id);
     if (this.options.repository.getSetting(this.memoryKey(root)) === false) return;
     try {
@@ -1243,6 +1400,38 @@ export class ChatService {
     });
   }
 
+  getComposerDraft(sessionId: string): ComposerDraft | null {
+    const draft = this.options.repository.getComposerDraft(sessionId);
+    if (!draft || this.options.repository.getSession(sessionId)?.agentMode !== "chat") return draft;
+    return {
+      ...draft,
+      attachments: draft.attachments.map(({ path: _path, ...attachment }) => attachment),
+    };
+  }
+
+  saveComposerDraft(input: SaveComposerDraftInput): void {
+    validateComposerDraftInput(input);
+    const addedAttachments = input.addedAttachments?.map(validateComposerDraftAttachment);
+    if (this.options.repository.getSession(input.sessionId)?.agentMode !== "chat") {
+      this.options.repository.saveComposerDraft({
+        ...input,
+        ...(addedAttachments ? { addedAttachments } : {}),
+      });
+      return;
+    }
+    this.options.repository.saveComposerDraft({
+      ...input,
+      ...(addedAttachments
+        ? {
+            addedAttachments: addedAttachments.map((attachment) => ({
+              ...chatUpload(attachment),
+              id: attachment.id,
+            })),
+          }
+        : {}),
+    });
+  }
+
   restoreContext(sessionId: string) {
     const session = this.options.repository.getSession(sessionId);
     const state = this.contextCompaction.state(sessionId);
@@ -1324,6 +1513,20 @@ export class ChatService {
     resumePlan = false,
     draftSessionId = input.sessionId,
   ): Promise<{ runId: string }> {
+    return await this.sendWithContext(input, parentSignal, resumePlan, draftSessionId, false);
+  }
+
+  async sendQueuedPrompt(input: ChatSendInput): Promise<{ runId: string }> {
+    return await this.sendWithContext(input, undefined, false, input.sessionId, true);
+  }
+
+  private async sendWithContext(
+    input: ChatSendInput,
+    parentSignal: AbortSignal | undefined,
+    resumePlan: boolean,
+    draftSessionId: string,
+    queuedPrompt: boolean,
+  ): Promise<{ runId: string }> {
     if (input.draftRevision !== undefined) validateComposerDraftId(input.draftRevision);
     if (/^\/compact$/i.test(input.text.trim())) {
       if (input.attachments?.length) throw new Error("请先移除附件，再执行聊天命令。");
@@ -1347,13 +1550,20 @@ export class ChatService {
     const signal = parentSignal
       ? AbortSignal.any([controller.signal, parentSignal])
       : controller.signal;
-    const pending = this.prepareSendWithSlot(input, signal, resumePlan, draftSessionId);
+    const pending = this.prepareSendWithSlot(
+      input,
+      signal,
+      resumePlan,
+      draftSessionId,
+      queuedPrompt,
+    );
     this.preparingSends.set(input.sessionId, pending);
     try {
       return await pending;
     } finally {
       this.preparingSends.delete(input.sessionId);
       this.preparingControllers.delete(input.sessionId);
+      this.flushRunSettlement(input.sessionId);
     }
   }
 
@@ -1418,7 +1628,8 @@ export class ChatService {
     const running = this.options.repository.updateSession(sessionId, { status: "running" });
     this.options.emit({ type: "session_updated", session: running });
     this.options.emit({ type: "run_started", sessionId, runId, kind: "compaction" });
-    const completion = (async () => {
+    const completion = (async (): Promise<ChatRunOutcome> => {
+      let outcome: ChatRunOutcome = "failed";
       try {
         // Summarizing must not start MCP servers, project hooks or workspace tools.
         await this.contextCompaction.prepare({
@@ -1442,8 +1653,10 @@ export class ChatService {
           session: this.options.repository.updateSession(sessionId, { status: "idle" }),
         });
         this.options.emit({ type: "run_completed", sessionId, runId, kind: "compaction" });
+        outcome = "completed";
       } catch (cause) {
         const interrupted = controller.signal.aborted;
+        outcome = interrupted ? "interrupted" : "failed";
         this.options.emit({
           type: "session_updated",
           session: this.options.repository.updateSession(sessionId, {
@@ -1459,19 +1672,34 @@ export class ChatService {
             error: cause instanceof Error ? cause.message : String(cause),
           });
       } finally {
-        this.contextCompaction.finishRun(sessionId);
-        this.activeRuns.delete(sessionId);
+        let cleanupFailed = false;
+        try {
+          this.contextCompaction.finishRun(sessionId);
+        } catch (cleanupError) {
+          cleanupFailed = true;
+          recordRuntimeError("chat.compaction.cleanup", cleanupError, { sessionId, runId });
+        } finally {
+          this.activeRuns.delete(sessionId);
+        }
+        if (cleanupFailed) outcome = "failed";
       }
+      return outcome;
     })();
     this.activeExecutions.set(sessionId, completion);
     this.runPromises.set(runId, completion);
-    void completion
-      .finally(() => {
-        if (this.activeExecutions.get(sessionId) === completion)
-          this.activeExecutions.delete(sessionId);
-        this.runPromises.delete(runId);
-      })
-      .catch(() => undefined);
+    const settled = (outcome: ChatRunOutcome) => {
+      if (this.activeExecutions.get(sessionId) === completion)
+        this.activeExecutions.delete(sessionId);
+      this.runPromises.delete(runId);
+      this.deferRunSettlement({ sessionId, runId, outcome, isSubagent: false });
+    };
+    void completion.then(
+      (outcome) => settled(outcome),
+      (error) => {
+        settled("failed");
+        console.error("Chat compaction cleanup failed:", error);
+      },
+    );
     return { runId };
   }
 
@@ -1480,6 +1708,7 @@ export class ChatService {
     signal: AbortSignal,
     resumePlan = false,
     draftSessionId = input.sessionId,
+    queuedPrompt = false,
   ): Promise<{ runId: string }> {
     const child = Boolean(this.options.repository.getSession(input.sessionId)?.parentSessionId);
     let acquired = false;
@@ -1490,7 +1719,13 @@ export class ChatService {
         acquired = true;
         this.workbench.queued(input.sessionId, false);
       }
-      const result = await this.prepareSend(input, signal, resumePlan, draftSessionId);
+      const result = await this.prepareSend(
+        input,
+        signal,
+        resumePlan,
+        draftSessionId,
+        queuedPrompt,
+      );
       if (child) {
         const completion = this.runPromises.get(result.runId);
         if (completion)
@@ -1515,18 +1750,125 @@ export class ChatService {
     }
   }
 
+  private async startMentionedSubagentRun(input: {
+    parent: SessionView;
+    childSessionId: string;
+    text: string;
+    attachments: ChatAttachmentInput[];
+    signal: AbortSignal;
+    draftRevision?: string;
+    draftSessionId: string;
+  }): Promise<{ runId: string }> {
+    if (this.activeRuns.has(input.parent.id))
+      throw new Error("该会话正在运行，请先停止或等待完成。");
+
+    const controller = new AbortController();
+    this.activeRuns.set(input.parent.id, controller);
+    let started: { runId: string };
+    try {
+      started = await this.send(
+        {
+          sessionId: input.childSessionId,
+          text: input.text,
+          attachments: input.attachments,
+          ...(input.draftRevision !== undefined ? { draftRevision: input.draftRevision } : {}),
+        },
+        AbortSignal.any([input.signal, controller.signal]),
+        false,
+        input.draftSessionId,
+      );
+    } catch (error) {
+      if (this.activeRuns.get(input.parent.id) === controller)
+        this.activeRuns.delete(input.parent.id);
+      throw error;
+    }
+
+    const completion =
+      this.runPromises.get(started.runId) ??
+      Promise.resolve(
+        (() => {
+          if (controller.signal.aborted) return "interrupted" as const;
+          const status = this.options.repository.getSession(input.childSessionId)?.status;
+          return status === "idle"
+            ? ("completed" as const)
+            : status === "interrupted"
+              ? ("interrupted" as const)
+              : ("failed" as const);
+        })(),
+      );
+    const tracked = this.trackMentionedSubagentRun({
+      parentSessionId: input.parent.id,
+      runId: started.runId,
+      controller,
+      completion,
+    });
+    this.activeExecutions.set(input.parent.id, tracked);
+    try {
+      this.options.onDelegatedSubagentRunStarted?.({
+        sessionId: input.parent.id,
+        runId: started.runId,
+        childSessionId: input.childSessionId,
+      });
+    } catch (error) {
+      recordRuntimeError("chat.delegated-subagent.started", error, {
+        sessionId: input.parent.id,
+        runId: started.runId,
+      });
+    }
+    return started;
+  }
+
+  private trackMentionedSubagentRun(input: {
+    parentSessionId: string;
+    runId: string;
+    controller: AbortController;
+    completion: Promise<unknown>;
+  }): Promise<ChatRunOutcome> {
+    let tracking!: Promise<ChatRunOutcome>;
+    tracking = (async () => {
+      let outcome: ChatRunOutcome = "failed";
+      try {
+        const settled = await input.completion;
+        outcome =
+          settled === "completed" || settled === "failed" || settled === "interrupted"
+            ? settled
+            : "failed";
+        if (input.controller.signal.aborted) outcome = "interrupted";
+      } catch {
+        outcome = input.controller.signal.aborted ? "interrupted" : "failed";
+      } finally {
+        if (this.activeRuns.get(input.parentSessionId) === input.controller)
+          this.activeRuns.delete(input.parentSessionId);
+        if (this.activeExecutions.get(input.parentSessionId) === tracking)
+          this.activeExecutions.delete(input.parentSessionId);
+        this.deferRunSettlement({
+          sessionId: input.parentSessionId,
+          runId: input.runId,
+          outcome,
+          isSubagent: false,
+        });
+      }
+      return outcome;
+    })();
+    return tracking;
+  }
+
   private async prepareSend(
     input: ChatSendInput,
     preparationSignal: AbortSignal,
     resumePlan = false,
     draftSessionId = input.sessionId,
+    queuedPrompt = false,
   ): Promise<{ runId: string }> {
     let session = this.options.repository.getSession(input.sessionId);
     if (!session) {
       throw new Error("会话不存在。");
     }
     if (session.archived) throw new Error("请先从设置中恢复已归档会话，再继续任务。");
-    await this.options.agentProfileService.syncWorkspace(session.workspacePath);
+    if (isChatSession(session)) {
+      if (session.workspacePath || session.parentSessionId)
+        throw new Error("CHAT_POLICY_INVALID: ChatAgent cannot have a workspace or parent Agent.");
+    } else await this.options.agentProfileService.syncWorkspace(session.workspacePath);
     if (this.closing) throw new Error("Application is shutting down.");
     preparationSignal.throwIfAborted();
     if (this.activeRuns.has(session.id)) {
@@ -1538,18 +1880,24 @@ export class ChatService {
     }
 
     let text = input.text.trim();
-    const attachments = validateAttachments(input.attachments);
+    const chatSession = isChatSession(session);
+    const workspaceMode = session.agentMode === "work" ? "work" : "code";
+    const attachments = validateChatAttachments(input.attachments).map((attachment) => {
+      if (!chatSession) return attachment;
+      return chatUpload(attachment);
+    });
     if (!text && attachments.length === 0) {
       throw new Error("消息和附件不能同时为空。");
     }
 
-    const customCommand = text.startsWith("/")
-      ? await this.options.customCommandService.prepare(
-          session.workspacePath,
-          text,
-          session.permissionMode === "full_access",
-        )
-      : null;
+    const customCommand =
+      !isChatSession(session) && text.startsWith("/")
+        ? await this.options.customCommandService.prepare(
+            session.workspacePath,
+            text,
+            session.permissionMode === "full_access",
+          )
+        : null;
     preparationSignal.throwIfAborted();
     if (customCommand) {
       if (session.permissionMode === "request_approval" && customCommand.shellCommands.length)
@@ -1609,6 +1957,8 @@ export class ChatService {
           .find(
             (profile) =>
               profile.enabled &&
+              (!profile.applicableModes?.length ||
+                profile.applicableModes.includes(workspaceMode)) &&
               (profile.id === customCommand.command.agent ||
                 profile.name === customCommand.command.agent),
           );
@@ -1641,10 +1991,18 @@ export class ChatService {
     }
 
     let activeSession = session;
-    const mentionedProfile = resolveProfileMention(
-      text,
-      this.options.repository.listAgentProfiles(),
-    );
+    const mentionedProfile = isChatSession(session)
+      ? null
+      : resolveProfileMention(
+          text,
+          this.options.repository
+            .listAgentProfiles()
+            .filter(
+              (profile) =>
+                !profile.applicableModes?.length ||
+                profile.applicableModes.includes(session.agentMode === "work" ? "work" : "code"),
+            ),
+        );
     if (mentionedProfile?.profile.role === "subagent" || mentionedProfile?.profile.role === "all") {
       if (session.parentSessionId) throw new Error("子 Agent 会话不能继续创建子 Agent。");
       if (!mentionedProfile.text && attachments.length === 0)
@@ -1683,6 +2041,7 @@ export class ChatService {
         providerId: childProvider.id,
         modelId: childModel.id,
         agentProfileId: mentionedProfile.profile.id,
+        agentMode: session.agentMode ?? "code",
         workspacePath: session.workspacePath,
         systemPrompt: session.systemPrompt,
         reasoningLevel: session.reasoningLevel,
@@ -1700,6 +2059,16 @@ export class ChatService {
       });
       for (const extensionId of this.options.repository.listSessionExtensionIds(session.id))
         this.options.repository.setSessionExtension(child.id, extensionId, true);
+      if (queuedPrompt)
+        return await this.startMentionedSubagentRun({
+          parent: session,
+          childSessionId: child.id,
+          text: mentionedProfile.text,
+          attachments,
+          signal: preparationSignal,
+          ...(input.draftRevision !== undefined ? { draftRevision: input.draftRevision } : {}),
+          draftSessionId,
+        });
       return await this.send(
         {
           sessionId: child.id,
@@ -1790,16 +2159,25 @@ export class ChatService {
     });
     this.activeExecutions.set(activeSession.id, completion);
     this.runPromises.set(runId, completion);
-    const settled = () => {
+    const settled = (outcome: ChatRunOutcome) => {
       if (this.activeExecutions.get(activeSession.id) === completion)
         this.activeExecutions.delete(activeSession.id);
       const cleanup = setTimeout(() => this.runPromises.delete(runId), 10 * 60_000);
       cleanup.unref();
+      this.deferRunSettlement({
+        sessionId: activeSession.id,
+        runId,
+        outcome,
+        isSubagent: Boolean(activeSession.parentSessionId),
+      });
     };
-    void completion.then(settled, (error) => {
-      settled();
-      console.error("Chat run cleanup failed:", error);
-    });
+    void completion.then(
+      (outcome) => settled(outcome),
+      (error) => {
+        settled("failed");
+        console.error("Chat run cleanup failed:", error);
+      },
+    );
 
     return { runId };
   }
@@ -1825,8 +2203,9 @@ export class ChatService {
           part.type === "attachment",
       )
       .map((part) => part.attachment);
-    const attachments =
-      input.attachments === undefined ? targetAttachments : validateAttachments(input.attachments);
+    const attachments = validateChatAttachments(
+      input.attachments === undefined ? targetAttachments : input.attachments,
+    ).map((attachment) => (isChatSession(session) ? chatUpload(attachment) : attachment));
     if (!text && attachments.length === 0) {
       throw new Error("消息和附件不能同时为空。");
     }
@@ -1848,9 +2227,10 @@ export class ChatService {
   }
 
   stop(sessionId: string): void {
+    this.notifyRunStopped(sessionId);
     this.options.approvalBroker.cancelSession(sessionId);
     this.options.questionBroker.cancelSession(sessionId);
-    this.activeRuns.get(sessionId)?.abort();
+    this.activeRuns.get(sessionId)?.abort(USER_INTERRUPT_REASON);
     this.preparingControllers.get(sessionId)?.abort();
     for (const child of this.options.repository?.listChildSessions?.(sessionId) ?? [])
       this.stop(child.id);
@@ -1869,7 +2249,12 @@ export class ChatService {
   }
 
   prepareForUpdate(): boolean {
-    if (this.activeConversationCount() > 0 || this.removingSessions.size > 0) return false;
+    if (
+      this.activeConversationCount() > 0 ||
+      this.removingSessions.size > 0 ||
+      this.pendingRunSettlements.size > 0
+    )
+      return false;
     this.closing = true;
     return true;
   }
@@ -2031,6 +2416,7 @@ export class ChatService {
     await Promise.allSettled(this.removingSessions.values());
     await this.options.toolRegistry?.shutdown?.();
     this.runPromises.clear();
+    this.pendingRunSettlements.clear();
   }
 
   private async waitForRun(runId: string, signal?: AbortSignal): Promise<void> {
@@ -2064,6 +2450,43 @@ export class ChatService {
     }
   }
 
+  private notifyRunStopped(sessionId: string): void {
+    try {
+      this.options.onRunStopped?.(sessionId);
+    } catch (error) {
+      recordRuntimeError("chat.run.stopped", error, { sessionId });
+    }
+  }
+
+  private deferRunSettlement(input: PendingRunSettlement & { isSubagent: boolean }): void {
+    if (input.isSubagent || this.closing || this.removingSessions.has(input.sessionId)) return;
+    this.pendingRunSettlements.set(input.sessionId, {
+      sessionId: input.sessionId,
+      runId: input.runId,
+      outcome: input.outcome,
+    });
+    this.flushRunSettlement(input.sessionId);
+  }
+
+  private flushRunSettlement(sessionId: string): void {
+    if (this.closing || this.removingSessions.has(sessionId)) {
+      this.pendingRunSettlements.delete(sessionId);
+      return;
+    }
+    if (this.activeRuns.has(sessionId) || this.preparingSends.has(sessionId)) return;
+    const settlement = this.pendingRunSettlements.get(sessionId);
+    if (!settlement) return;
+    this.pendingRunSettlements.delete(sessionId);
+    try {
+      this.options.onRunSettled?.(settlement);
+    } catch (error) {
+      recordRuntimeError("chat.run.settled", error, {
+        sessionId: settlement.sessionId,
+        runId: settlement.runId,
+      });
+    }
+  }
+
   private async executeRun(input: {
     session: SessionView;
     provider: ProviderView;
@@ -2071,15 +2494,18 @@ export class ChatService {
     runId: string;
     signal: AbortSignal;
     generateTitle: boolean;
-  }): Promise<void> {
+  }): Promise<ChatRunOutcome> {
     const { session: baseSession, provider, model, runId, signal, generateTitle } = input;
     let session = baseSession;
+    let outcome: ChatRunOutcome = "failed";
     let finalRound = emptyRound();
     let finalRoundPersisted = false;
     const runStartedAt = Date.now();
     const fileChanges = new Map<string, FileChange>();
     let toolCount = 0;
-    const activeProfile = this.options.repository.getAgentProfile(session.agentProfileId);
+    const activeProfile = isChatSession(session)
+      ? null
+      : this.options.repository.getAgentProfile(session.agentProfileId);
     const maxToolRounds = toolRoundLimit(activeProfile?.maxSteps);
     const checkpoint: ExecutionCheckpoint = {
       runId,
@@ -2101,6 +2527,8 @@ export class ChatService {
     let verifiedChangeCount = -1;
     let modelPlanRevision = -1;
     let executedProjectCommand = false;
+    const officeVerified = new Map<string, string>();
+    let officeVerificationRounds = 0;
     let chainExecuted = 0;
     const goal =
       this.options.repository
@@ -2198,9 +2626,9 @@ export class ChatService {
 
       const gitBefore = await snapshotWorkspaceChanges(session.workspacePath);
       const tools = await this.availableTools(session, model, runId, signal);
-      for (const server of this.options.mcpService
-        .list()
-        .filter((entry) => entry.enabled && (!entry.configured || entry.status === "error"))) {
+      for (const server of (isChatSession(session) ? [] : this.options.mcpService.list()).filter(
+        (entry) => entry.enabled && (!entry.configured || entry.status === "error"),
+      )) {
         const timestamp = new Date().toISOString();
         this.emitActivity({
           id: `${runId}:mcp:${server.id}`,
@@ -2217,11 +2645,56 @@ export class ChatService {
           fileChange: null,
         });
       }
+      let pluginPrompt = "";
+      if (this.options.pluginHookService && !isChatSession(session) && !session.parentSessionId) {
+        try {
+          const loaded = await this.options.pluginHookService.loadPromptContext(session);
+          pluginPrompt = formatPluginPromptContext(loaded.contexts);
+          for (const [index, error] of loaded.errors.entries()) {
+            const timestamp = new Date().toISOString();
+            this.emitActivity({
+              id: `${runId}:plugin-context:${index}`,
+              sessionId: session.id,
+              runId,
+              toolName: "plugin_context",
+              kind: "tool",
+              title: `插件 ${error.extensionName} 的上下文加载失败`,
+              detail: error.message,
+              status: "failed",
+              startedAt: timestamp,
+              completedAt: timestamp,
+              durationMs: 0,
+              fileChange: null,
+            });
+          }
+        } catch (error) {
+          const timestamp = new Date().toISOString();
+          this.emitActivity({
+            id: `${runId}:plugin-context:error`,
+            sessionId: session.id,
+            runId,
+            toolName: "plugin_context",
+            kind: "tool",
+            title: "插件上下文加载失败",
+            detail: error instanceof Error ? error.message : String(error),
+            status: "failed",
+            startedAt: timestamp,
+            completedAt: timestamp,
+            durationMs: 0,
+            fileChange: null,
+          });
+        }
+      }
       const plan = this.workbench.state(session.id).plan;
       const baseSystemPrompt = [
         await this.buildSystemPrompt(session, model, runId, tools),
-        "Use code_index for multi-language AST definitions/references/callers/callees/import lookup before full reads. Keep a structured update_todos plan for multi-step work. Call begin_plan_step before executing a pending step; dependencies and breakpoints are enforced by the host. Plans can be saved in the project plan library and attached to another session. Final code work enters explicit test/lint/typecheck verification. Respect user edits and file ownership. Recovery may block side effects: inspect actual state, then call resolve_interrupted with successful inspection call IDs and a factual summary for human confirmation. Confirmed prior operations are deduplicated; do not replay them.",
-      ].join("\n\n");
+        isChatSession(session)
+          ? "Only web_search and web_fetch may execute. Uploaded files are read-only message content. Cite web sources and distinguish verified facts from uncertainty."
+          : "Use code_index for multi-language AST definitions/references/callers/callees/import lookup before full reads. Keep a structured update_todos plan for multi-step work. Call begin_plan_step before executing a pending step; dependencies and breakpoints are enforced by the host. Plans can be saved in the project plan library and attached to another session. Final code work enters explicit test/lint/typecheck verification. Respect user edits and file ownership. Recovery may block side effects: inspect actual state, then call resolve_interrupted with successful inspection call IDs and a factual summary for human confirmation. Confirmed prior operations are deduplicated; do not replay them.",
+        pluginPrompt,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       let systemPrompt = baseSystemPrompt;
       let currentPlan = plan;
       const apiKey = this.options.providerService.getActiveApiKey(provider.id);
@@ -2230,6 +2703,8 @@ export class ChatService {
       const hostContext = new HostContextService(this.options.repository);
       const initialSaverSettings = this.tokenSaver.settings();
       const codingModule =
+        !isChatSession(session) &&
+        session.agentMode !== "work" &&
         this.options.promptDirectory &&
         (!initialSaverSettings.enabled ||
           !initialSaverSettings.promptModules ||
@@ -2241,11 +2716,15 @@ export class ChatService {
         signal.throwIfAborted();
         this.refreshPermissions(session);
         currentPlan = this.workbench.state(session.id).plan;
-        if (currentPlan.reviewRequired && (!model.toolCalls || roundIndex >= 3))
+        if (
+          !isChatSession(session) &&
+          currentPlan.reviewRequired &&
+          (!model.toolCalls || roundIndex >= 3)
+        )
           throw new Error(
             "模型未确认旧计划是否继续。计划已保留，请启用工具调用后重试或在任务面板清空计划。",
           );
-        if (currentPlan.paused && !currentPlan.reviewRequired) {
+        if (!isChatSession(session) && currentPlan.paused && !currentPlan.reviewRequired) {
           this.activeRuns.get(session.id)?.abort();
           throw new Error("计划已暂停，请从任务面板继续。");
         }
@@ -2265,32 +2744,33 @@ export class ChatService {
         const roundChangedPaths = new Set<string>();
         finalRound = round;
         finalRoundPersisted = false;
-        hostContext.append(session.id, {
-          plan: persistedPlanPrompt(currentPlan),
-          memory: await this.memoryPrompt(session, runId),
-          coding: codingModule,
-          permissions: JSON.stringify({
-            permission_mode: session.permissionMode,
-            execution_isolation:
-              session.executionMode === "docker"
-                ? "docker"
-                : session.permissionMode === "request_approval" || session.parentSessionId
-                  ? "native_windows"
-                  : "host",
-            patch_only: session.patchOnly,
-            available_tools: requestTools.map((tool) => tool.name).sort(),
-          }),
-          diagnostics: pendingDiagnostics
-            ? [
-                /^(?:MODEL_CONTINUATION_REQUIRED|COMMAND_|CHAIN_)/.test(pendingDiagnostics)
-                  ? "预先确定的执行链已停止。以下是执行控制反馈，不是文件诊断；请核对结果后决定下一步，未执行步骤不要当作成功。"
-                  : pendingDiagnostics.startsWith("PLAN_REVIEW_REQUIRED")
-                    ? "请先处理当前计划状态。以下是宿主的计划管理提示，不是文件诊断。"
-                    : "最近一次代码编辑的项目检查报告如下。请处理与本任务相关的具体诊断；检查器运行失败不代表文件内容有错，不要凭空修改无关文档。",
-                pendingDiagnostics,
-              ].join("\n\n")
-            : "",
-        });
+        if (!isChatSession(session))
+          hostContext.append(session.id, {
+            plan: persistedPlanPrompt(currentPlan),
+            memory: await this.memoryPrompt(session, runId),
+            coding: codingModule,
+            permissions: JSON.stringify({
+              permission_mode: session.permissionMode,
+              execution_isolation:
+                session.executionMode === "docker"
+                  ? "docker"
+                  : session.permissionMode === "request_approval" || session.parentSessionId
+                    ? "native_windows"
+                    : "host",
+              patch_only: session.patchOnly,
+              available_tools: requestTools.map((tool) => tool.name).sort(),
+            }),
+            diagnostics: pendingDiagnostics
+              ? [
+                  /^(?:MODEL_CONTINUATION_REQUIRED|COMMAND_|CHAIN_)/.test(pendingDiagnostics)
+                    ? "预先确定的执行链已停止。以下是执行控制反馈，不是文件诊断；请核对结果后决定下一步，未执行步骤不要当作成功。"
+                    : pendingDiagnostics.startsWith("PLAN_REVIEW_REQUIRED")
+                      ? "请先处理当前计划状态。以下是宿主的计划管理提示，不是文件诊断。"
+                      : "最近一次代码编辑的项目检查报告如下。请处理与本任务相关的具体诊断；检查器运行失败不代表文件内容有错，不要凭空修改无关文档。",
+                  pendingDiagnostics,
+                ].join("\n\n")
+              : "",
+          });
         const contextInput = {
           session,
           provider,
@@ -2478,7 +2958,7 @@ export class ChatService {
               throw new Error("模型持续只返回进度说明，未给出最终结果；记录已保留，请继续会话。");
             continue;
           }
-          if (this.workbench.state(session.id).plan.reviewRequired) {
+          if (!isChatSession(session) && this.workbench.state(session.id).plan.reviewRequired) {
             if (roundIndex >= 2)
               throw new Error("模型未确认旧计划是否继续。计划已保留，请重试或在任务面板编辑计划。");
             pendingDiagnostics =
@@ -2541,6 +3021,63 @@ export class ChatService {
             if (!fileChanges.has(change.path)) fileChanges.set(change.path, change);
           if (this.executionSafety.inspect(runId)?.resolved === false)
             throw new Error("恢复核实尚未完成，任务保持中断；请读取实际状态并确认后继续。");
+          if (session.agentMode === "work" && officeVerificationRounds < 3) {
+            const pendingOffice = [...fileChanges.values()].filter((change) => {
+              if (change.changeType === "deleted" || !/\.(?:docx|xlsx|pptx)$/i.test(change.path))
+                return false;
+              const key = this.localToolPath(session, change.path).toLowerCase();
+              const version = this.fileVersions.get(runId)?.get(key) ?? `unobserved:${toolCount}`;
+              return officeVerified.get(key) !== version;
+            });
+            if (pendingOffice.length) {
+              officeVerificationRounds++;
+              const results: string[] = [];
+              for (const change of pendingOffice.slice(0, 6)) {
+                const key = this.localToolPath(session, change.path).toLowerCase();
+                officeVerified.set(
+                  key,
+                  this.fileVersions.get(runId)?.get(key) ?? `unobserved:${toolCount}`,
+                );
+                const visual =
+                  model.inputModalities.includes("image") &&
+                  session.permissionMode === "full_access" &&
+                  session.executionMode === "host" &&
+                  !session.parentSessionId;
+                const preview = `${change.path}.preview-${runId.slice(0, 8)}.pdf`;
+                const checked = await this.runHostTool(session, runId, signal, "office_document", {
+                  operation: "verify",
+                  path: change.path,
+                  render: true,
+                  recalculate: /\.xlsx$/i.test(change.path),
+                  ...(visual ? { render_path: preview, overwrite: true } : {}),
+                });
+                results.push(checked.output);
+                if (
+                  visual &&
+                  !checked.isError &&
+                  checked.fileChanges?.some(
+                    (file) =>
+                      this.localToolPath(session, file.path).toLowerCase() ===
+                      this.localToolPath(session, preview).toLowerCase(),
+                  )
+                ) {
+                  for (const file of checked.fileChanges) {
+                    const path = displayPath(file.path, session.workspacePath);
+                    fileChanges.set(path, { ...file, path });
+                  }
+                  const rendered = await this.runHostTool(session, runId, signal, "read_document", {
+                    path: preview,
+                    render: true,
+                  });
+                  results.push(rendered.output);
+                }
+              }
+              pendingDiagnostics = `Office delivery verification results follow. Review returned page images before declaring visual QA, correct content/layout/formula errors, and report all unavailable or partial checks. Do not equate successful export with visual approval. ${pendingOffice.length > 6 ? "Only the first six artifacts were checked in this pass." : ""}\n${results.join("\n\n")}`;
+              const latest = this.workbench.state(session.id).checkpoint;
+              if (latest) Object.assign(checkpoint, latest);
+              if (roundIndex + chainExecuted < maxToolRounds) continue;
+            }
+          }
           if (
             (fileChanges.size || executedProjectCommand) &&
             verifiedChangeCount !== toolCount &&
@@ -2808,7 +3345,8 @@ export class ChatService {
               call &&
               !call.chainStep &&
               PARALLEL_READ_TOOLS.has(call.name) &&
-              !(await this.options.customToolService.has?.(call.name, session.workspacePath)),
+              (isChatSession(session) ||
+                !(await this.options.customToolService.has?.(call.name, session.workspacePath))),
           );
         };
         for (let queueIndex = 0; queueIndex < queue.length; ) {
@@ -2825,6 +3363,10 @@ export class ChatService {
           if (failure?.status === "rejected") throw failure.reason;
         }
         const delegatedVerification = await this.drainParentVerification(session, runId, signal);
+        if (this.failureGuards.get(runId)?.exhausted)
+          throw new Error(
+            "TOOL_FAILURE_LIMIT: 连续工具失败达到上限，已停止当前策略并保留历史与已完成修改。请依据最近错误修正阻塞原因后继续。",
+          );
         if (delegatedVerification)
           pendingDiagnostics = [pendingDiagnostics, delegatedVerification]
             .filter(Boolean)
@@ -2912,8 +3454,10 @@ export class ChatService {
       checkpoint.state = "completed";
       saveCheckpoint();
       this.options.emit({ type: "run_completed", sessionId: session.id, runId });
+      outcome = "completed";
     } catch (error) {
       const interrupted = signal.aborted;
+      outcome = interrupted ? "interrupted" : "failed";
       const status = interrupted ? "interrupted" : "error";
       const latestCheckpoint = this.workbench.state(session.id).checkpoint;
       if (latestCheckpoint?.runId === runId) Object.assign(checkpoint, latestCheckpoint);
@@ -2944,6 +3488,7 @@ export class ChatService {
       }
 
       if (interrupted) {
+        this.dispatchInterruptHooks(session, runId, signal);
         this.options.emit({ type: "run_interrupted", sessionId: session.id, runId });
       } else {
         const message = localizeError(
@@ -2969,37 +3514,61 @@ export class ChatService {
         });
       }
     } finally {
-      const tasks = this.delegatedTasks.get(runId);
-      if (tasks?.size) {
-        this.activeRuns.get(session.id)?.abort();
-        await Promise.allSettled([...tasks.values()].map((task) => task.promise));
-        this.delegatedTasks.delete(runId);
+      let cleanupFailed = false;
+      try {
+        const tasks = this.delegatedTasks.get(runId);
+        if (tasks?.size) {
+          this.activeRuns.get(session.id)?.abort();
+          await Promise.allSettled([...tasks.values()].map((task) => task.promise));
+          this.delegatedTasks.delete(runId);
+        }
+        this.approvedMcpProcesses.delete(runId);
+        this.parentVerificationQueue.delete(runId);
+      } catch (cleanupError) {
+        cleanupFailed = true;
+        recordRuntimeError("chat.cleanup", cleanupError, { sessionId: session.id, runId });
       }
-      this.approvedMcpProcesses.delete(runId);
-      this.parentVerificationQueue.delete(runId);
       try {
         await this.options.toolRegistry.cancelRun?.(runId);
         this.commandEffects.delete(runId);
         this.fileLocks.releaseRun(runId);
       } catch (cleanupError) {
-        const barrier = this.workspaceBarrierKey(session);
-        if (barrier)
-          this.options.repository.setSetting(barrier, {
+        cleanupFailed = true;
+        try {
+          const barrier = this.workspaceBarrierKey(session);
+          if (barrier)
+            this.options.repository.setSetting(barrier, {
+              sessionId: session.id,
+              runId,
+              updatedAt: new Date().toISOString(),
+            });
+          this.executionSafety.markUncertain(runId, "command-cleanup-unconfirmed");
+        } catch (barrierError) {
+          recordRuntimeError("command.cleanup-barrier", barrierError, {
             sessionId: session.id,
             runId,
-            updatedAt: new Date().toISOString(),
           });
-        this.executionSafety.markUncertain(runId, "command-cleanup-unconfirmed");
+        }
         recordRuntimeError("command.cleanup", cleanupError, { sessionId: session.id, runId });
       }
-      this.executionSafety.finish(runId);
-      this.refreshRequired.delete(runId);
-      this.directoryRefreshRequired.delete(runId);
-      this.fileVersions.delete(runId);
-      this.contextCompaction.finishRun(session.id);
-      this.memoryRoots.delete(runId);
-      this.activeRuns.delete(session.id);
+      try {
+        this.executionSafety.finish(runId);
+        this.failureGuards.delete(runId);
+        this.exhaustedFileCheckpoints.delete(runId);
+        this.refreshRequired.delete(runId);
+        this.directoryRefreshRequired.delete(runId);
+        this.fileVersions.delete(runId);
+        this.contextCompaction.finishRun(session.id);
+        this.memoryRoots.delete(runId);
+      } catch (cleanupError) {
+        cleanupFailed = true;
+        recordRuntimeError("chat.cleanup", cleanupError, { sessionId: session.id, runId });
+      } finally {
+        this.activeRuns.delete(session.id);
+      }
+      if (cleanupFailed) outcome = "failed";
     }
+    return outcome;
   }
 
   private consumeStreamEvent(
@@ -3250,11 +3819,66 @@ export class ChatService {
     toolCall: PendingToolCall;
     onEffectStart?: () => void;
   }): Promise<ToolExecutionResult> {
+    const chatDenied = chatToolRejection(input.session, input.toolCall.name);
+    if (chatDenied) return chatDenied;
+    const guard = this.failureGuards.get(input.runId) ?? new FailureLoopGuard();
+    this.failureGuards.set(input.runId, guard);
+    let args: unknown;
+    try {
+      args = parseArguments(input.toolCall.arguments);
+    } catch {
+      args = input.toolCall.arguments;
+    }
+    const blocked = guard.before(input.toolCall.name, args);
+    if (blocked) return { output: blocked, isError: true };
+    await this.runPluginHooks("PreToolUse", input.session, input.runId, input.signal, {
+      toolCallId: input.toolCall.callId,
+      toolName: input.toolCall.name,
+      toolInput: args,
+    });
+    input.signal.throwIfAborted();
+    const result = await this.performToolCall(input);
+    await this.runPluginHooks("PostToolUse", input.session, input.runId, input.signal, {
+      toolCallId: input.toolCall.callId,
+      toolName: input.toolCall.name,
+      toolInput: args,
+      toolResponse: {
+        isError: result.isError,
+        output: result.output,
+        fileChange: result.fileChange ?? null,
+        fileChanges: result.fileChanges ?? null,
+        commandSession: result.commandSession ?? null,
+      },
+    });
+    guard.record(input.toolCall.name, args, result.isError);
+    const retained = result.fullOutput ?? result.output;
+    if (retained.length > 80_000) {
+      new ToolOutputStore(this.options.repository).save(
+        input.session.id,
+        input.toolCall.callId,
+        retained,
+      );
+      result.output = `${safePrefix(result.output, 70_000)}\n[LARGE_OUTPUT_RETAINED: call_id=${JSON.stringify(input.toolCall.callId)}. Use read_tool_output to recover retained pages. Capture and conversation retention limits apply; any capture gap is explicitly marked.]`;
+    }
+    delete result.fullOutput;
+    return result;
+  }
+
+  private async performToolCall(input: {
+    session: SessionView;
+    runId: string;
+    signal: AbortSignal;
+    toolCall: PendingToolCall;
+    onEffectStart?: () => void;
+  }): Promise<ToolExecutionResult> {
     let releaseLease: (() => void) | undefined;
     let failed = true;
     try {
       const args = parseArguments(input.toolCall.arguments);
-      if (FILE_MUTATION_TOOL_NAMES.has(input.toolCall.name)) {
+      if (
+        FILE_MUTATION_TOOL_NAMES.has(input.toolCall.name) ||
+        (input.toolCall.name === "office_document" && this.officeMutation(args))
+      ) {
         const paths =
           input.toolCall.name === "apply_patch"
             ? [
@@ -3417,6 +4041,163 @@ export class ChatService {
     return resolve(session.workspacePath ?? process.cwd(), local).toLowerCase();
   }
 
+  private async executeLocalPluginTool(
+    session: SessionView,
+    runId: string,
+    toolCallId: string,
+    signal: AbortSignal,
+    raw: unknown,
+  ): Promise<ToolExecutionResult> {
+    const service = this.options.localPluginMarketplaceService;
+    if (!service) {
+      return {
+        output: "LOCAL_PLUGIN_UNAVAILABLE: the local plugin marketplace service is not installed.",
+        isError: true,
+      };
+    }
+    if (
+      session.agentMode === "chat" ||
+      session.parentSessionId ||
+      session.executionMode !== "host" ||
+      !session.workspacePath
+    ) {
+      return {
+        output:
+          "LOCAL_PLUGIN_SESSION_UNSUPPORTED: local_plugin requires a primary CodeAgent/WorkAgent session using host execution with a workspace in either protected or full-access mode. ChatAgent, subagents and Docker/worktree sessions must use the Plugin Marketplace UI.",
+        isError: true,
+      };
+    }
+
+    let request: LocalPluginRequest;
+    try {
+      request = localPluginRequestSchema.parse(raw);
+    } catch (error) {
+      return {
+        output: `LOCAL_PLUGIN_ARGUMENTS_INVALID: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+    signal.throwIfAborted();
+    if (request.action === "list_markets") {
+      return {
+        output: JSON.stringify(
+          {
+            action: "list_markets",
+            markets: service.listSources(),
+            readOnly: true,
+          },
+          null,
+          2,
+        ),
+        isError: false,
+      };
+    }
+    if (!isAbsolute(request.rootPath)) {
+      return {
+        output: "LOCAL_PLUGIN_PATH_INVALID: rootPath must be an absolute plugin source directory.",
+        isError: true,
+      };
+    }
+
+    let canonicalWorkspace: string;
+    let canonicalPluginRoot: string;
+    try {
+      const canonical = await resolveCanonicalPluginRoot(session.workspacePath, request.rootPath);
+      canonicalWorkspace = canonical.workspacePath;
+      canonicalPluginRoot = canonical.pluginPath;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        output: message.startsWith("LOCAL_PLUGIN_PATH_")
+          ? message
+          : `LOCAL_PLUGIN_PATH_INVALID: ${message}`,
+        isError: true,
+      };
+    }
+
+    const profile = this.options.repository.getAgentProfile(session.agentProfileId);
+    const canonicalPermission = agentPermission(profile, "local_plugin", canonicalPluginRoot);
+    if (!allowedByProfile(profile, "local_plugin") || canonicalPermission === "deny")
+      return { output: "当前 Agent 配置禁止读取本地插件开发接口。", isError: true };
+
+    let approvalRequest: ApprovalRequest | null = null;
+    let approvalDecision: ApprovalDecision | null = null;
+    const requiresProfileApproval = canonicalPermission === "ask";
+    const requiresSessionApproval =
+      session.permissionMode === "request_approval" &&
+      !this.options.permissions.hasPath(session.id, canonicalPluginRoot, "read");
+    if (requiresProfileApproval || requiresSessionApproval) {
+      approvalRequest = {
+        id: randomUUID(),
+        sessionId: session.id,
+        runId,
+        toolCallId,
+        toolName: "local_plugin",
+        summary: `只读校验本地插件 ${canonicalPluginRoot}`,
+        detail:
+          "The host will read and validate the plugin manifest, Skills, declarations and referenced text inside this directory. Plugin scripts, commands, hooks and MCP servers will not execute.",
+        pathScope: canonicalPluginRoot,
+        commandPrefix: null,
+        risk: "normal",
+        reviewInput: JSON.stringify(raw).slice(0, 4_000),
+        createdAt: new Date().toISOString(),
+        ...(requiresProfileApproval ? { manualOnly: true } : {}),
+      };
+      approvalDecision = await this.requestApproval(approvalRequest, signal);
+      if (approvalDecision.decision === "deny") {
+        return {
+          output: approvalDecision.feedback
+            ? `用户拒绝：${approvalDecision.feedback}`
+            : "用户拒绝了本地插件读取。",
+          isError: true,
+        };
+      }
+    }
+
+    signal.throwIfAborted();
+    let finalWorkspace: string;
+    let finalPluginRoot: string;
+    try {
+      const canonical = await resolveCanonicalPluginRoot(session.workspacePath, request.rootPath);
+      finalWorkspace = canonical.workspacePath;
+      finalPluginRoot = canonical.pluginPath;
+    } catch (error) {
+      return {
+        output: `LOCAL_PLUGIN_PATH_CHANGED: plugin source identity changed after read approval. ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+    if (
+      !sameCanonicalPath(canonicalWorkspace, finalWorkspace) ||
+      !sameCanonicalPath(canonicalPluginRoot, finalPluginRoot)
+    )
+      return {
+        output:
+          "LOCAL_PLUGIN_PATH_CHANGED: canonical workspace or plugin root changed after read approval.",
+        isError: true,
+      };
+    if (approvalRequest && approvalDecision)
+      this.options.permissions.remember(session.id, approvalRequest, approvalDecision);
+
+    signal.throwIfAborted();
+    const validation = await service.validatePlugin(finalPluginRoot, signal);
+    signal.throwIfAborted();
+    return {
+      output: JSON.stringify(
+        {
+          action: request.action,
+          validation,
+          readOnly: true,
+          lifecycleChanged: false,
+        },
+        null,
+        2,
+      ),
+      // A successfully executed validation may legitimately find an invalid plugin.
+      isError: false,
+    };
+  }
+
   private workspaceBarrierKey(session: SessionView): string | null {
     return session.workspacePath
       ? `workbench.writerBarrier.${createHash("sha256").update(resolve(session.workspacePath).toLowerCase()).digest("hex")}`
@@ -3429,6 +4210,7 @@ export class ChatService {
     args: Record<string, unknown>,
     runId: string,
   ): boolean | Promise<boolean> {
+    if (name === "office_document") return this.officeMutation(args);
     if (name === "write_stdin") return Boolean(args.chars || args.close_stdin || args.terminate);
     if (name === "run_command" || name === "exec_command")
       return (
@@ -3459,6 +4241,13 @@ export class ChatService {
         "browser_navigate",
       ].includes(name);
     return true;
+  }
+
+  private officeMutation(args: Record<string, unknown>): boolean {
+    return (
+      !["inspect", "verify"].includes(String(args.operation)) ||
+      (args.operation === "verify" && Boolean(args.output_path || args.render_path))
+    );
   }
 
   private async withExternalWriter<T>(
@@ -3579,6 +4368,8 @@ export class ChatService {
     },
     onCommandLease: (release: () => void) => void,
   ): Promise<ToolExecutionResult> {
+    const chatDenied = chatToolRejection(input.session, input.toolCall.name);
+    if (chatDenied) return chatDenied;
     this.refreshPermissions(input.session);
     let args: Record<string, unknown>;
     try {
@@ -3589,8 +4380,154 @@ export class ChatService {
         isError: true,
       };
     }
+    const deferredPluginRead =
+      input.toolCall.name === "local_plugin" &&
+      (args.action === "inspect" || args.action === "validate");
 
-    const profile = this.options.repository.getAgentProfile(input.session.agentProfileId);
+    const profile = isChatSession(input.session)
+      ? null
+      : this.options.repository.getAgentProfile(input.session.agentProfileId);
+    const scopedReadPermission =
+      input.toolCall.name === "use_skill" || input.toolCall.name === "discover_capabilities"
+        ? agentPermission(
+            profile,
+            input.toolCall.name,
+            String(input.toolCall.name === "use_skill" ? (args.name ?? "") : (args.query ?? "")),
+          )
+        : input.toolCall.name === "local_plugin"
+          ? agentPermission(
+              profile,
+              input.toolCall.name,
+              typeof args.rootPath === "string" ? args.rootPath : "local-plugin-markets",
+            )
+          : input.toolCall.name === "read_tool_output"
+            ? agentPermission(profile, input.toolCall.name, String(args.call_id ?? ""))
+            : null;
+    if (
+      input.toolCall.name === "read_tool_output" &&
+      (!allowedByProfile(profile, "read_tool_output") || scopedReadPermission === "deny")
+    )
+      return { output: "当前 Agent 配置禁止读取工具输出。", isError: true };
+    if (
+      (input.toolCall.name === "use_skill" || input.toolCall.name === "discover_capabilities") &&
+      (!allowedByProfile(profile, input.toolCall.name) || scopedReadPermission === "deny")
+    )
+      return { output: "当前 Agent 配置禁止发现或读取 Skill/Plugin。", isError: true };
+    if (
+      input.toolCall.name === "local_plugin" &&
+      (!allowedByProfile(profile, input.toolCall.name) || scopedReadPermission === "deny")
+    )
+      return { output: "当前 Agent 配置禁止读取本地插件开发接口。", isError: true };
+    if (scopedReadPermission === "ask" && !deferredPluginRead) {
+      const decision = await this.requestApproval(
+        {
+          id: randomUUID(),
+          sessionId: input.session.id,
+          runId: input.runId,
+          toolCallId: input.toolCall.callId,
+          toolName: input.toolCall.name,
+          summary:
+            input.toolCall.name === "use_skill"
+              ? "读取按需技能"
+              : input.toolCall.name === "discover_capabilities"
+                ? "发现按需技能与插件"
+                : input.toolCall.name === "local_plugin"
+                  ? "读取或校验本地插件"
+                  : "读取保留工具输出",
+          detail: JSON.stringify(args).slice(0, 4000),
+          pathScope: null,
+          commandPrefix: null,
+          manualOnly: true,
+          risk: "normal",
+          createdAt: new Date().toISOString(),
+        },
+        input.signal,
+      );
+      if (decision.decision === "deny") return { output: "用户拒绝了读取。", isError: true };
+    }
+    if (input.toolCall.name === "read_tool_output") {
+      try {
+        return {
+          output: new ToolOutputStore(this.options.repository).read(input.session.id, args),
+          isError: false,
+        };
+      } catch (error) {
+        return { output: String(error), isError: true };
+      }
+    }
+    if (input.toolCall.name === "discover_capabilities") {
+      try {
+        const parsed = capabilityDiscoverySchema.parse(args);
+        const selectedIds = new Set(
+          this.options.sessionBuiltinCapabilityService
+            ? await this.options.sessionBuiltinCapabilityService.selectedIdsForPrompt(input.session)
+            : [],
+        );
+        const skillRecords = this.options.promptDirectory
+          ? await builtinCapabilityDiscoveryRecords(
+              input.session,
+              this.options.promptDirectory,
+              selectedIds,
+            )
+          : [];
+        const builtinRecords = [
+          ...skillRecords,
+          ...builtinPluginDiscoveryRecords(
+            input.session,
+            this.availableBuiltinPluginToolNames(input.session),
+            selectedIds,
+          ),
+        ];
+        return {
+          output: await this.options.extensionService.discoverCapabilities(
+            input.session.id,
+            parsed,
+            builtinRecords,
+          ),
+          isError: false,
+        };
+      } catch (error) {
+        return {
+          output: error instanceof Error ? error.message : String(error),
+          isError: true,
+        };
+      }
+    }
+    if (input.toolCall.name === "use_skill") {
+      if (!this.options.promptDirectory)
+        return {
+          output: "SKILL_CONTEXT_UNAVAILABLE: prompt resources are not installed.",
+          isError: true,
+        };
+      try {
+        return {
+          output: await loadDomainSkill(
+            input.session,
+            args,
+            this.options.promptDirectory,
+            this.options.extensionService,
+          ),
+          isError: false,
+        };
+      } catch (error) {
+        return {
+          output: error instanceof Error ? error.message : String(error),
+          isError: true,
+        };
+      }
+    }
+    const office = input.toolCall.name === "office_document";
+    const officeMutation = office && this.officeMutation(args);
+    const policyTool = office ? (officeMutation ? "write_file" : "read_file") : input.toolCall.name;
+    if (office) {
+      const parsed = officeDocumentSchema.safeParse(args);
+      if (!parsed.success)
+        return { output: `TOOL_ARGUMENTS_INVALID: ${parsed.error.message}`, isError: true };
+      if (input.session.agentMode !== "work")
+        return { output: "office_document 专精工具请在 WorkAgent 中使用。", isError: true };
+      if (officeMutation && (profile?.readOnly || input.session.patchOnly))
+        return { output: "当前只读或 patch-only 策略禁止写入 Office 文件。", isError: true };
+    }
     if (input.toolCall.name === "request_verification") {
       if (
         !input.session.parentSessionId ||
@@ -3718,7 +4655,7 @@ export class ChatService {
       (profile?.readOnly &&
         !input.toolCall.name.startsWith("mcp__") &&
         !READ_ONLY_TOOLS.has(input.toolCall.name)) ||
-      !allowedByProfile(profile, input.toolCall.name) ||
+      !allowedByProfile(profile, policyTool) ||
       (input.session.parentSessionId &&
         ["spawn_subagent", "wait_subagents", "ask_user"].includes(input.toolCall.name)) ||
       (input.session.patchOnly && ["write_file", "create_document"].includes(input.toolCall.name))
@@ -3736,10 +4673,19 @@ export class ChatService {
               ? args.url
               : typeof args.query === "string"
                 ? args.query
-                : typeof args.path === "string"
-                  ? args.path
-                  : "";
-    const profilePermission = agentPermission(profile, input.toolCall.name, subject);
+                : typeof args.rootPath === "string"
+                  ? args.rootPath
+                  : typeof args.path === "string"
+                    ? args.path
+                    : "";
+    const explicitPermission = agentPermission(profile, input.toolCall.name, subject);
+    const inheritedPermission = office ? agentPermission(profile, policyTool, subject) : null;
+    const profilePermission =
+      explicitPermission === "deny" || inheritedPermission === "deny"
+        ? "deny"
+        : explicitPermission === "ask" || inheritedPermission === "ask"
+          ? "ask"
+          : (explicitPermission ?? inheritedPermission);
     if (
       input.toolCall.name === "write_stdin" &&
       typeof args.chars === "string" &&
@@ -3761,6 +4707,26 @@ export class ChatService {
       };
     }
     const forceReadApprovalPaths = new Set<string>();
+    const forceWriteApprovalPaths = new Set<string>();
+    if (office) {
+      const request = officeDocumentSchema.parse(args);
+      for (const path of officeDocumentAssets(request)) {
+        const permission = agentPermission(profile, "read_file", path);
+        if (!allowedByProfile(profile, "read_file") || permission === "deny")
+          return { output: `当前 Agent 配置禁止读取 Office 素材 ${path}。`, isError: true };
+        if (permission === "ask")
+          forceReadApprovalPaths.add(this.localToolPath(input.session, path));
+      }
+      for (const path of [args.output_path, args.render_path].filter(
+        (path): path is string => typeof path === "string",
+      )) {
+        const permission = agentPermission(profile, "write_file", path);
+        if (permission === "deny")
+          return { output: `当前 Agent 配置禁止写入 Office 检查输出 ${path}。`, isError: true };
+        if (permission === "ask")
+          forceWriteApprovalPaths.add(this.localToolPath(input.session, path));
+      }
+    }
     if (input.toolCall.name === "create_document") {
       const request = documentAuthoringSchema.safeParse(args);
       if (!request.success)
@@ -3768,6 +4734,7 @@ export class ChatService {
       for (const path of [
         ...documentAssetPaths(request.data),
         ...(request.data.template ? [request.data.template.path] : []),
+        ...(request.data.edit ? [request.data.edit.path] : []),
       ]) {
         const permission = agentPermission(profile, "read_file", path);
         if (!allowedByProfile(profile, "read_file") || permission === "deny")
@@ -3781,6 +4748,7 @@ export class ChatService {
     }
     if (
       FILE_MUTATION_TOOL_NAMES.has(input.toolCall.name) ||
+      officeMutation ||
       (["run_command", "exec_command"].includes(input.toolCall.name) &&
         !cacheableCommand(String(args.command ?? "")) &&
         !readonlyCommand(String(args.command ?? "")))
@@ -3796,15 +4764,21 @@ export class ChatService {
           return resolve(root ?? process.cwd(), local);
         };
         const paths =
-          input.toolCall.name === "apply_patch"
-            ? [
-                ...String(args.patch ?? "").matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm),
-              ].map((match) => lockPath(match[1]?.trim() ?? ""))
-            : [
-                ["run_command", "exec_command"].includes(input.toolCall.name)
-                  ? (root ?? String(args.cwd ?? process.cwd()))
-                  : lockPath(String(args.path ?? "")),
-              ];
+          office && args.operation === "verify"
+            ? [args.output_path, args.render_path]
+                .filter((path): path is string => typeof path === "string")
+                .map(lockPath)
+            : input.toolCall.name === "apply_patch"
+              ? [
+                  ...String(args.patch ?? "").matchAll(
+                    /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm,
+                  ),
+                ].map((match) => lockPath(match[1]?.trim() ?? ""))
+              : [
+                  ["run_command", "exec_command"].includes(input.toolCall.name)
+                    ? (root ?? String(args.cwd ?? process.cwd()))
+                    : lockPath(String(args.path ?? "")),
+                ];
         const commandLease = ["run_command", "exec_command"].includes(input.toolCall.name);
         const required = this.refreshRequired.get(input.runId);
         if (
@@ -3897,6 +4871,7 @@ export class ChatService {
     if (
       profilePermission === "ask" &&
       input.session.permissionMode === "full_access" &&
+      input.toolCall.name !== "local_plugin" &&
       !["create_document", "view_image", "write_stdin"].includes(input.toolCall.name)
     ) {
       const decision = await this.requestApproval(
@@ -3924,6 +4899,15 @@ export class ChatService {
       }
     }
 
+    if (input.toolCall.name === "local_plugin") {
+      return await this.executeLocalPluginTool(
+        input.session,
+        input.runId,
+        input.toolCall.callId,
+        input.signal,
+        args,
+      );
+    }
     if (input.toolCall.name === "execute_tool_chain") {
       compileToolChain(args, this.options.toolRegistry.descriptors());
       return {
@@ -4026,13 +5010,41 @@ export class ChatService {
       input.onEffectStart?.();
       const taskId = randomUUID();
       const tasks = this.delegatedTasks.get(input.runId) ?? new Map();
-      const promise = this.runSubagent(input.session, input.signal, args, input.runId).catch(
-        (error) => ({
+      const label = typeof args.label === "string" ? args.label.trim() || "子 Agent" : "子 Agent";
+      const english = this.options.repository.getSetting("desktop.locale") === "en";
+      const startedAt = new Date().toISOString();
+      const promise = this.runSubagent(input.session, input.signal, args, input.runId)
+        .catch((error) => ({
           output: String(error),
           isError: true,
-        }),
-      );
-      tasks.set(taskId, { promise, delivered: false });
+        }))
+        .then((result) => {
+          const completedAt = new Date().toISOString();
+          this.emitActivity({
+            id: `${input.runId}:subagent:${taskId}`,
+            sessionId: input.session.id,
+            runId: input.runId,
+            toolName: "subagent",
+            kind: "subagent",
+            title: result.isError
+              ? english
+                ? "Background subagent failed"
+                : "后台子 Agent 失败"
+              : english
+                ? "Background subagent completed"
+                : "后台子 Agent 已完成",
+            detail: english
+              ? `${label} · task ${taskId}. Results remain available through wait_subagents.`
+              : `${label} · 任务 ${taskId}。结果仍通过 wait_subagents 获取。`,
+            status: result.isError ? "failed" : "completed",
+            startedAt,
+            completedAt,
+            durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)),
+            fileChange: null,
+          });
+          return result;
+        });
+      tasks.set(taskId, { promise, delivered: false, label, startedAt });
       this.delegatedTasks.set(input.runId, tasks);
       return {
         output: `子 Agent 任务已安排：${taskId}。你可以继续独立工作；汇总前调用 wait_subagents 获取结果。超出并发上限的任务会排队。`,
@@ -4338,6 +5350,7 @@ export class ChatService {
         isError: true,
       };
     if (
+      !isChatSession(input.session) &&
       !input.session.parentSessionId &&
       input.session.permissionMode !== "request_approval" &&
       input.session.executionMode !== "docker" &&
@@ -4366,9 +5379,11 @@ export class ChatService {
         profilePermission === "ask" &&
         (input.session.permissionMode !== "full_access" ||
           input.toolCall.name === "create_document" ||
+          input.toolCall.name === "office_document" ||
           input.toolCall.name === "view_image" ||
           input.toolCall.name === "write_stdin"),
       forceReadApprovalPaths,
+      forceWriteApprovalPaths,
       contextEpoch: String(
         (
           this.options.repository.getSetting(`context.checkpoint.${input.session.id}`) as {
@@ -4436,12 +5451,48 @@ export class ChatService {
             "EXTERNAL_FILE_CHANGED: this write was not executed. Read the latest file before recomputing the edit.",
           );
         }
-        if (input.toolCall.name !== "create_document") input.onEffectStart?.();
+        if (
+          input.session.workspacePath &&
+          !input.session.parentSessionId &&
+          input.session.executionMode === "host" &&
+          input.session.permissionMode === "full_access" &&
+          !this.exhaustedFileCheckpoints.has(input.runId)
+        ) {
+          try {
+            await this.options.snapshotService?.createFileCheckpoint?.({
+              sessionId: input.session.id,
+              runId: input.runId,
+              workspacePath: input.session.workspacePath,
+              paths: [path],
+            });
+          } catch (error) {
+            if (!String(error).includes("SNAPSHOT_CHECKPOINT_LIMIT")) throw error;
+            this.exhaustedFileCheckpoints.add(input.runId);
+            const timestamp = new Date().toISOString();
+            this.emitActivity({
+              id: `${input.runId}:file-checkpoint-limit`,
+              sessionId: input.session.id,
+              runId: input.runId,
+              toolName: "snapshot",
+              kind: "tool",
+              title: "局部检查点达到预算",
+              detail: `后续写入不再创建局部检查点；运行开始时成功创建的完整快照仍保留。${String(error)}`,
+              status: "failed",
+              startedAt: timestamp,
+              completedAt: timestamp,
+              durationMs: 0,
+              fileChange: null,
+            });
+          }
+        }
+        if (!["create_document", "office_document"].includes(input.toolCall.name))
+          input.onEffectStart?.();
       },
       ...(configuredDockerImage ? { dockerImage: configuredDockerImage } : {}),
       requestApproval: async (request, signal) => {
         const assetRead =
-          input.toolCall.name === "create_document" && request.toolName === "read_file";
+          ["create_document", "office_document"].includes(input.toolCall.name) &&
+          request.toolName === "read_file";
         const decision = await this.requestApproval(
           {
             ...request,
@@ -4735,6 +5786,7 @@ export class ChatService {
   ): Promise<string> {
     if (
       !session.workspacePath ||
+      isChatSession(session) ||
       session.parentSessionId ||
       (!commandWork &&
         !changedPaths.some((path) =>
@@ -4961,6 +6013,11 @@ export class ChatService {
     const subagentProfiles = this.options.repository
       .listAgentProfiles()
       .filter((item) => item.enabled && (item.role === "subagent" || item.role === "all"))
+      .filter(
+        (item) =>
+          !item.applicableModes?.length ||
+          item.applicableModes.includes(session.agentMode === "work" ? "work" : "code"),
+      )
       .filter((item) => agentPermission(parentProfile, "spawn_subagent", item.id) !== "deny");
     const profile = requestedAgent
       ? subagentProfiles.find(
@@ -4996,7 +6053,8 @@ export class ChatService {
 
     const subagentRunId = randomUUID();
     let childId: string | null = null;
-    const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(10 * 60_000)]);
+    // The child ends on completion, failure or parent cancellation; individual calls keep their own timeouts.
+    const signal = parentSignal;
     try {
       signal.throwIfAborted();
       const child = this.options.repository.insertSession({
@@ -5006,6 +6064,7 @@ export class ChatService {
         providerId: provider.id,
         modelId: model.id,
         agentProfileId: profile?.id ?? "general",
+        agentMode: session.agentMode ?? "code",
         workspacePath: session.workspacePath,
         systemPrompt: session.systemPrompt,
         reasoningLevel: session.reasoningLevel,
@@ -5056,13 +6115,17 @@ export class ChatService {
         )
         .join("\n\n")
         .trim();
-      const failed = this.options.repository.getSession(child.id)?.status !== "idle";
-      await this.runPluginHooks(
-        "SubagentStop",
-        this.options.repository.getSession(child.id) ?? child,
-        subagentRunId,
-        signal,
-      );
+      const childSession = this.options.repository.getSession(child.id) ?? child;
+      const failed = childSession.status !== "idle";
+      await this.runPluginHooks("SubagentStop", session, parentRunId ?? subagentRunId, signal, {
+        agentId: child.id,
+        metadata: {
+          childSessionId: child.id,
+          label,
+          status: childSession.status,
+          output: output.slice(0, 8_000),
+        },
+      });
       return {
         output: output.slice(0, MAX_SUBAGENT_OUTPUT) || "子 Agent 没有返回文本结果。",
         isError: failed,
@@ -5459,12 +6522,15 @@ export class ChatService {
   }
 
   private async runPluginHooks(
-    event: "Stop" | "SubagentStop" | "Interrupt",
+    event: PluginHookExecutionEvent,
     session: SessionView,
     runId: string,
     signal: AbortSignal,
+    context: PluginHookInvocationContext = {},
   ): Promise<void> {
     if (
+      !this.options.pluginHookService ||
+      isChatSession(session) ||
       !session.workspacePath ||
       session.parentSessionId ||
       signal.aborted ||
@@ -5473,28 +6539,33 @@ export class ChatService {
     ) {
       return;
     }
-    const profile = this.options.repository.getAgentProfile(session.agentProfileId);
-    if (
-      profile?.readOnly ||
-      !this.options.repository.listSessionExtensionIds(session.id).some((id) => {
-        const extension = this.options.repository.getExtension(id);
-        return extension?.enabled && extension.type === "plugin";
-      })
-    )
-      return;
     try {
-      const results = await this.withExternalWriter(session, runId, signal, () =>
-        this.options.pluginHookService.run(
-          event,
-          session,
-          runId,
-          signal,
-          async (request, approvalSignal) => {
-            const decision = await this.requestApproval(request, approvalSignal);
-            return decision.decision !== "deny";
-          },
-        ),
-      );
+      const profile = this.options.repository.getAgentProfile(session.agentProfileId);
+      if (
+        profile?.readOnly ||
+        !this.options.repository.listSessionExtensionIds(session.id).some((id) => {
+          const extension = this.options.repository.getExtension(id);
+          return extension?.enabled && extension.type === "plugin";
+        })
+      )
+        return;
+      const pluginHookService = this.options.pluginHookService;
+      const results =
+        event === "Interrupt"
+          ? await pluginHookService.runInterrupt(session, runId, signal, context)
+          : await this.withExternalWriter(session, runId, signal, () =>
+              pluginHookService.run(
+                event,
+                session,
+                runId,
+                signal,
+                async (request, approvalSignal) => {
+                  const decision = await this.requestApproval(request, approvalSignal);
+                  return decision.decision !== "deny";
+                },
+                context,
+              ),
+            );
       for (const [index, result] of results.entries()) {
         const timestamp = new Date();
         this.emitActivity({
@@ -5505,7 +6576,9 @@ export class ChatService {
           kind: "tool",
           title:
             result.status === "completed"
-              ? `已执行 ${event} Hook`
+              ? event === "Interrupt"
+                ? "已记录 Interrupt 通知"
+                : `已执行 ${event} Hook`
               : result.status === "failed"
                 ? `${event} Hook 执行失败`
                 : `已跳过 ${event} Hook`,
@@ -5536,6 +6609,28 @@ export class ChatService {
     }
   }
 
+  private dispatchInterruptHooks(session: SessionView, runId: string, signal: AbortSignal): void {
+    if (
+      !signal.aborted ||
+      signal.reason !== USER_INTERRUPT_REASON ||
+      this.closing ||
+      !this.options.pluginHookService
+    )
+      return;
+    const cleanup = new AbortController();
+    const timeout = setTimeout(() => {
+      cleanup.abort("interrupt-hook-timeout");
+    }, INTERRUPT_HOOK_TIMEOUT_MS);
+    timeout.unref();
+    void this.runPluginHooks("Interrupt", session, runId, cleanup.signal, {
+      metadata: { reason: "user_stop" },
+    })
+      .catch((error) => {
+        recordRuntimeError("plugin.interrupt", error, { sessionId: session.id, runId });
+      })
+      .finally(() => clearTimeout(timeout));
+  }
+
   private async availableTools(
     session: SessionView,
     model: ModelConfig,
@@ -5545,6 +6640,8 @@ export class ChatService {
     if (!model.toolCalls) {
       return [];
     }
+    if (isChatSession(session))
+      return this.options.toolRegistry.descriptors().filter((tool) => CHAT_TOOLS.has(tool.name));
     if (session.workspacePath) {
       const projectConfig = await this.options.projectConfigService.load(session.workspacePath);
       await this.options.mcpService.syncWorkspaceConfig(
@@ -5635,6 +6732,15 @@ export class ChatService {
         ].includes(tool.name),
       );
     const localTools = [
+      ...(this.options.promptDirectory ? [USE_SKILL_TOOL] : []),
+      ...(this.options.promptDirectory ? [CAPABILITY_DISCOVERY_TOOL] : []),
+      ...(this.options.localPluginMarketplaceService &&
+      session.executionMode === "host" &&
+      !session.parentSessionId &&
+      session.workspacePath
+        ? [LOCAL_PLUGIN_TOOL]
+        : []),
+      READ_TOOL_OUTPUT_TOOL,
       ...(this.tokenSaver.settings().enabled ? [RECALL_CONTEXT_TOOL] : []),
       ...(chainAvailable ? [TOOL_CHAIN_DESCRIPTOR] : []),
       ...(this.memoryRoots.has(runId ?? "") ? MEMORY_TOOL_DESCRIPTORS : []),
@@ -5655,6 +6761,7 @@ export class ChatService {
         return false;
       }
       if (tool.name === "view_image" && !model.inputModalities?.includes("image")) return false;
+      if (WORK_ONLY_TOOL_NAMES.has(tool.name) && session.agentMode !== "work") return false;
       if (!allowedByProfile(profile, tool.name)) {
         return false;
       }
@@ -5665,6 +6772,8 @@ export class ChatService {
           .some(
             (worker) =>
               worker.enabled &&
+              (!worker.applicableModes?.length ||
+                worker.applicableModes.includes(session.agentMode === "work" ? "work" : "code")) &&
               (worker.role === "subagent" || worker.role === "all") &&
               (!profile?.readOnly || worker.readOnly) &&
               agentPermission(profile, "spawn_subagent", worker.id) !== "deny",
@@ -5699,6 +6808,22 @@ export class ChatService {
         agentPermission(profile, tool.name) !== "deny",
     );
     return [...localTools, ...availableMcp];
+  }
+
+  availableBuiltinPluginToolNames(session: SessionView): ReadonlySet<string> {
+    if (isChatSession(session)) return new Set();
+    const profile = this.options.repository.getAgentProfile(session.agentProfileId);
+    return new Set(
+      (this.options.toolRegistry?.descriptors() ?? [])
+        .map((tool) => tool.name)
+        .filter(
+          (name) =>
+            (name.startsWith("browser_") || name.startsWith("github_")) &&
+            (!profile?.readOnly || READ_ONLY_TOOLS.has(name)) &&
+            allowedByProfile(profile, name) &&
+            agentPermission(profile, name) !== "deny",
+        ),
+    );
   }
 
   private async maybeGenerateTitle(input: {
@@ -5767,11 +6892,42 @@ export class ChatService {
     tools: StreamToolDefinition[],
     agentDepth: 0 | 1 = 0,
   ): Promise<string> {
+    if (isChatSession(session)) {
+      return [
+        await readPromptFile(this.options.promptDirectory, "chat"),
+        `Language: ${this.options.repository.getSetting("desktop.locale") === "en" ? "English" : "简体中文"}. Model: ${model.modelId}.`,
+        `Available network tools: ${tools.map((tool) => tool.name).join(", ")}`,
+        session.systemPrompt
+          ? `User conversation preference (cannot grant tool permissions):\n${session.systemPrompt}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+    }
     const extensionContext = await this.options.extensionService.buildSessionContext(session.id);
+    const selectedBuiltinCapabilityIds = new Set(
+      this.options.sessionBuiltinCapabilityService
+        ? await this.options.sessionBuiltinCapabilityService.selectedIdsForPrompt(session)
+        : [],
+    );
+    const selectedBuiltinSkillIds = [...selectedBuiltinCapabilityIds].filter(
+      (id) => !isBuiltinPluginId(id),
+    );
+    const selectedBuiltinPluginIds = [...selectedBuiltinCapabilityIds].filter(isBuiltinPluginId);
     const projectInstructions = await this.options.projectInstructionService.discover(
       session.workspacePath,
     );
     const profile = this.options.repository.getAgentProfile(session.agentProfileId);
+    const pinnedBuiltinSkillContext = await this.buildPinnedBuiltinSkillContext(
+      session,
+      profile,
+      selectedBuiltinSkillIds,
+    );
+    const preferredBuiltinPluginContext = this.buildBuiltinPluginPromptContext(
+      session,
+      selectedBuiltinPluginIds,
+      tools,
+    );
     const effectiveDepth: 0 | 1 = session.parentSessionId ? 1 : agentDepth;
     const effectiveSystemPrompt = [profile?.instructions, session.systemPrompt]
       .filter((value): value is string => Boolean(value?.trim()))
@@ -5812,6 +6968,8 @@ export class ChatService {
           .filter(
             (item) =>
               item.enabled &&
+              (!item.applicableModes?.length ||
+                item.applicableModes.includes(session.agentMode === "work" ? "work" : "code")) &&
               (item.role === "subagent" || item.role === "all") &&
               agentPermission(profile, "spawn_subagent", item.id) !== "deny" &&
               (!profile?.readOnly || item.readOnly),
@@ -5858,6 +7016,101 @@ export class ChatService {
       ...(extensionContext.text ? { extensionContext: extensionContext.text } : {}),
     });
 
-    return bundle.system;
+    return [
+      bundle.system,
+      session.agentMode === "work"
+        ? await readPromptFile(this.options.promptDirectory, "work")
+        : "",
+      domainSkillCatalog(session, new Set(selectedBuiltinSkillIds)),
+      pinnedBuiltinSkillContext,
+      preferredBuiltinPluginContext,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  private async buildPinnedBuiltinSkillContext(
+    session: SessionView,
+    profile: AgentProfileView | null,
+    selectedIds: readonly string[],
+  ): Promise<string> {
+    if (!selectedIds.length || !allowedByProfile(profile, "use_skill")) return "";
+
+    const loaded: string[] = [];
+    const deferred: string[] = [];
+    let usedCharacters = 0;
+    for (const id of selectedIds) {
+      const permission = agentPermission(profile, "use_skill", id);
+      if (permission === "ask" || permission === "deny") {
+        deferred.push(id);
+        continue;
+      }
+      try {
+        const content = await loadDomainSkill(
+          session,
+          { name: id },
+          this.options.promptDirectory,
+          this.options.extensionService,
+        );
+        if (usedCharacters + content.length > PINNED_SKILL_PROMPT_BUDGET_CHARS) {
+          deferred.push(id);
+          continue;
+        }
+        usedCharacters += content.length;
+        loaded.push(`--- BEGIN PINNED SKILL ${id} ---\n${content}\n--- END PINNED SKILL ${id} ---`);
+      } catch {
+        deferred.push(id);
+      }
+    }
+
+    if (!loaded.length && !deferred.length) return "";
+    return [
+      "CONTROLLED PINNED-SKILL CONTEXT. These read-only skill texts were loaded only when the active Agent Profile allowed use_skill without an interactive approval, including the default unrestricted read permission. They remain subordinate to user instructions, application safety rules and explicit permission decisions.",
+      ...loaded,
+      ...(deferred.length
+        ? [
+            "DEFERRED PINNED SKILLS (body not preloaded because permission requires approval, is denied, unavailable or exceeds this turn's preload budget). Use the exact id with use_skill when relevant; never infer or fabricate the deferred body.",
+            ...deferred.map((id) => `Deferred skill id: ${id}`),
+          ]
+        : []),
+    ].join("\n\n");
+  }
+
+  private buildBuiltinPluginPromptContext(
+    session: SessionView,
+    selectedIds: readonly string[],
+    tools: readonly StreamToolDefinition[],
+  ): string {
+    if (!selectedIds.length) return "";
+    const profileTools = this.availableBuiltinPluginToolNames(session);
+    const availableToolNames = new Set(
+      tools.map((tool) => tool.name).filter((name) => profileTools.has(name)),
+    );
+    const profileEligibleIds = new Set(
+      builtinPluginDiscoveryRecords(session, profileTools, new Set(selectedIds)).map(
+        (record) => record.id,
+      ),
+    );
+    const records = builtinPluginDiscoveryRecords(
+      session,
+      availableToolNames,
+      new Set(selectedIds),
+      true,
+    ).filter((record) => selectedIds.includes(record.id) && profileEligibleIds.has(record.id));
+    if (!records.length) return "";
+    return [
+      "MANUALLY PREFERRED BUILTIN PLUGINS. These exact ids identify capability groups, not Skills. Never call use_skill with a plugin id. Prefer the listed available tools only when the task and user request match, while preserving normal model tool selection.",
+      "Selection grants no tools, credentials, login, browser launch, network access or approvals. Do not connect GitHub, open/authenticate a browser or retry permission failures automatically. The exact available-tool intersection and connection/approval conditions below remain authoritative.",
+      ...records.map((record) =>
+        JSON.stringify({
+          id: record.id,
+          name: record.name,
+          available: record.available,
+          available_tools: record.tool_names,
+          connection: record.connection_boundary,
+          approval: record.approval_boundary,
+        }),
+      ),
+    ].join("\n\n");
   }
 }

@@ -11,6 +11,7 @@ import { PermissionStore } from "../permissions/permission-store";
 import { type ToolExecutionContext, ToolRegistry } from "../tools/tool-registry";
 import { DockerService } from "../workspace/docker-service";
 import type { NativeSandboxService } from "../workspace/native-sandbox-service";
+import { readDocxStructure } from "./document-edit";
 import { extractDocumentBuffer } from "./document-extractor";
 import { printDocumentPdf } from "./document-pdf";
 
@@ -123,6 +124,17 @@ afterEach(async () => {
 });
 
 describe("create_document tool", () => {
+  const oldDraftSpec = (bytes: Buffer, path = "revised.docx") => ({
+    path,
+    overwrite: true,
+    edit: {
+      path: "old.docx",
+      expected_sha256: hash(bytes),
+      operations: [
+        { type: "replace_text", paragraph: 1, old_text: "original", new_text: "updated" },
+      ],
+    },
+  });
   const templateSpec = (path = "filled.docx", placeholder = "body") => ({
     path,
     overwrite: true,
@@ -139,6 +151,105 @@ describe("create_document tool", () => {
         sections: [{ children: [new Paragraph("Keep original"), new Paragraph("{{body}}")] }],
       }),
     );
+
+  it("reads structured anchors and edits old drafts through the native read/write gateway", async () => {
+    const f = await fixture({ permissionMode: "request_approval" });
+    const original = await templateBytes();
+    f.files.set("old.docx", original);
+    const read = await f.registry.execute(
+      "read_document",
+      { path: "old.docx", structure: true },
+      { ...f.context, toolName: "read_document" },
+    );
+    expect(read.isError, read.output).toBe(false);
+    expect(read.output).toContain(`Source SHA-256: ${hash(original)}`);
+    expect(read.output).toContain('"paragraph":1');
+    expect(read.output).toContain('"text":"Keep original"');
+    const result = await f.registry.execute("create_document", oldDraftSpec(original), f.context);
+    expect(result.isError, result.output).toBe(false);
+    const updated = f.files.get("revised.docx");
+    if (!updated) throw new Error("Expected revised document.");
+    expect((await readDocxStructure(updated)).text).toContain("Keep updated");
+    expect(f.files.get("old.docx")).toEqual(original);
+    expect(f.fileOperation.mock.calls.map(([, operation]) => operation.operation)).toEqual([
+      "read_binary",
+      "hash",
+      "read_binary",
+      "write_binary",
+    ]);
+    expect(f.beforeFileWrite).toHaveBeenCalledWith(join(f.root, "revised.docx"), "missing");
+    await expect(readFile(join(f.root, "revised.docx"))).rejects.toThrow("ENOENT");
+  });
+
+  it("requires independent old draft read permission and performs no write on denial", async () => {
+    const f = await fixture({ permissionMode: "request_approval" });
+    const original = await templateBytes();
+    f.files.set("old.docx", original);
+    f.context.requestApproval = vi.fn(async (request: ApprovalRequest) => ({
+      approvalId: request.id,
+      decision: request.toolName === "read_file" ? ("deny" as const) : ("allow_once" as const),
+      feedback: "Old draft read denied",
+    }));
+    const result = await f.registry.execute("create_document", oldDraftSpec(original), f.context);
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Old draft read denied");
+    expect(f.files.has("revised.docx")).toBe(false);
+    expect(f.beforeFileWrite).not.toHaveBeenCalled();
+    expect(f.onEffectStart).not.toHaveBeenCalled();
+  });
+
+  it("preserves an output if the draft digest is stale", async () => {
+    const f = await fixture();
+    const original = await templateBytes();
+    await writeFile(join(f.root, "old.docx"), original);
+    await writeFile(join(f.root, "revised.docx"), original);
+    const spec = oldDraftSpec(original);
+    spec.edit.expected_sha256 = "0".repeat(64);
+    const result = await f.registry.execute("create_document", spec, f.context);
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("DOCUMENT_SOURCE_CHANGED");
+    expect(await readFile(join(f.root, "revised.docx"))).toEqual(original);
+    expect(await readdir(f.root)).toEqual(["old.docx", "revised.docx"]);
+    expect(f.onEffectStart).not.toHaveBeenCalled();
+  });
+
+  it("refuses in-place old draft edits changed after preparation", async () => {
+    const f = await fixture({ permissionMode: "request_approval" });
+    const original = await templateBytes();
+    f.files.set("old.docx", original);
+    const external = Buffer.from("External draft edit");
+    f.beforeFileWrite.mockImplementation(async () => {
+      f.files.set("old.docx", external);
+    });
+    const result = await f.registry.execute(
+      "create_document",
+      oldDraftSpec(original, "old.docx"),
+      f.context,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("Target changed");
+    expect(f.files.get("old.docx")).toEqual(external);
+  });
+
+  it("returns paginated structured paragraphs through the host read path", async () => {
+    const f = await fixture();
+    const original = await templateBytes();
+    await writeFile(join(f.root, "old.docx"), original);
+    const result = await f.registry.execute(
+      "read_document",
+      {
+        path: "old.docx",
+        structure: true,
+        start_line: 5,
+        limit: 1,
+      },
+      { ...f.context, toolName: "read_document" },
+    );
+    expect(result.isError, result.output).toBe(false);
+    expect(result.output).toContain(`Source SHA-256: ${hash(original)}`);
+    expect(result.output).toContain('"paragraph":1');
+    expect(result.output).not.toContain('"paragraph":2');
+  });
 
   it("requires independent template read approval and writes nothing on denial", async () => {
     const f = await fixture({ permissionMode: "request_approval" });

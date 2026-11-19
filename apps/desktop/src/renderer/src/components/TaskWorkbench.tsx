@@ -2,6 +2,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Circle,
   FolderOpen,
   GitFork,
@@ -31,6 +32,7 @@ export interface TaskWorkbenchViewRequest {
   sessionId: string | null;
   tab: "plan" | "agents" | "library";
   requestKey: number;
+  notice?: string;
 }
 
 function agentSessionState(session: SessionView, queued: boolean): string {
@@ -58,6 +60,10 @@ export function TaskWorkbench({
   onOpenFile,
   docked = false,
   viewRequest,
+  collapsed = false,
+  onToggleCollapsed,
+  onReveal,
+  onEditingChange,
 }: {
   session: SessionView;
   sessions: SessionView[];
@@ -67,6 +73,10 @@ export function TaskWorkbench({
   onOpenFile(path: string): void;
   docked?: boolean;
   viewRequest?: TaskWorkbenchViewRequest | null;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+  onReveal?: () => void;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const orbit = useUiPreferences().activeStyle === "orbit";
   const en = useLocale() === "en";
@@ -92,6 +102,10 @@ export function TaskWorkbench({
   const receivedEvent = useRef(false);
   const handledViewRequest = useRef<number | null>(null);
   useEffect(() => {
+    onEditingChange?.(editing !== null);
+  }, [editing, onEditingChange]);
+  useEffect(() => () => onEditingChange?.(false), [onEditingChange]);
+  useEffect(() => {
     if (
       !viewRequest ||
       viewRequest.sessionId !== session.id ||
@@ -101,7 +115,9 @@ export function TaskWorkbench({
     handledViewRequest.current = viewRequest.requestKey;
     setTab(viewRequest.tab);
     setExpanded(true);
-  }, [viewRequest, session.id]);
+    if (viewRequest.notice) setError(viewRequest.notice);
+    onReveal?.();
+  }, [viewRequest, session.id, onReveal]);
   useEffect(() => {
     const id = outputToReveal.current;
     if (!id || !expandedAgents.has(id)) return;
@@ -255,7 +271,9 @@ export function TaskWorkbench({
       className={`task-workbench${docked ? " task-workbench--docked" : ""}${orbit ? " task-workbench--orbit" : ""}`}
       aria-label={tr("任务与并行 Agent")}
       data-task-view={tab}
+      data-task-session={session.id}
       data-task-docked={docked}
+      data-task-collapsed={orbit && docked && collapsed}
       data-unsaved={editing !== null || undefined}
     >
       <header className="task-workbench__header">
@@ -304,6 +322,7 @@ export function TaskWorkbench({
           onClick={() => {
             setTab("agents");
             setExpanded(true);
+            onReveal?.();
           }}
           title={tr("查看子 Agent 任务树")}
         >
@@ -321,6 +340,39 @@ export function TaskWorkbench({
           >
             <Play size={13} />
             <span className={orbit ? "visually-hidden" : undefined}>{tr("从恢复点继续")}</span>
+          </button>
+        ) : null}
+        {orbit && docked && onToggleCollapsed ? (
+          <button
+            type="button"
+            className="icon-button task-workbench__collapse"
+            data-task-action="collapse"
+            aria-expanded={!collapsed}
+            aria-label={
+              en
+                ? collapsed
+                  ? "Expand tasks"
+                  : "Collapse tasks"
+                : collapsed
+                  ? "展开任务区"
+                  : "收起任务区"
+            }
+            title={
+              en
+                ? collapsed
+                  ? "Expand tasks"
+                  : "Collapse tasks"
+                : collapsed
+                  ? "展开任务区"
+                  : "收起任务区"
+            }
+            onClick={onToggleCollapsed}
+          >
+            {collapsed ? (
+              <ChevronUp aria-hidden="true" size={16} />
+            ) : (
+              <ChevronDown aria-hidden="true" size={16} />
+            )}
           </button>
         ) : null}
       </header>
@@ -520,7 +572,10 @@ export function TaskWorkbench({
                     <button
                       type="button"
                       className="btn btn--ghost"
-                      onClick={() => setEditing(null)}
+                      onClick={() => {
+                        setEditing(null);
+                        setError("");
+                      }}
                     >
                       <X size={13} />
                       {tr("取消")}

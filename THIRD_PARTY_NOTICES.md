@@ -1,6 +1,6 @@
 # Third-party software and runtime distributions
 
-Mingshen Harness 1.3.2 retains third-party rights. A source license selected for this
+Mingshen Harness 1.3.3 retains third-party rights. A source license selected for this
 project does not relicense third-party components, names or logos. This document is
 a distribution inventory, not a replacement for the licenses shipped by dependencies.
 
@@ -21,6 +21,7 @@ a distribution inventory, not a replacement for the licenses shipped by dependen
 | docx 9.15.3 | MIT; https://github.com/dolanmiu/docx (DOCX authoring, native OMML, HTML conversion, charts and template patcher) |
 | @xmldom/xmldom 0.8.15 | MIT; https://github.com/xmldom/xmldom (bounded DOCX template XML inspection) |
 | PptxGenJS 4.0.1 | MIT; https://github.com/gitbrent/PptxGenJS (editable PPTX authoring) |
+| ExcelJS 4.4.0 | MIT; https://github.com/exceljs/exceljs (native XLSX cells, styles, formulas and tables; no built-in calculation engine) |
 | unpdf | MIT and PDF.js component notices; https://github.com/unjs/unpdf |
 | word-extractor 1.0.4 | MIT; https://github.com/morungos/node-word-extractor |
 | @napi-rs/canvas 1.1.0 | MIT and Skia component notices; https://github.com/Brooooooklyn/canvas |
@@ -90,6 +91,110 @@ not enabled. This is a local algorithm preset, not the complete upstream product
 an official Tencent service integration or an endorsement. Tencent's MIT grant
 applies to its retained code only and does not change this application's current
 `UNLICENSED` project setting or grant rights to third-party marks.
+
+## WorkAgent visual-design resource pack
+
+The WorkAgent visual-design catalog includes a copied, license-preserving subset
+of the user-supplied `WorkAgentSkill.7z` archive. The archive is 23,456,637 bytes
+with SHA-256
+`D7AEAEE62CF99E3E49391A581B16C8F4E1091A6D9DCB46FB20E9F83769FD9A17`.
+The active source package versions are:
+
+| Package | Active version |
+| --- | --- |
+| design | 0.7.2 |
+| documents | 0.2.2 |
+| image-search | 0.1.1 |
+| pdf | 0.2.3 |
+| presentations | 0.2.2 |
+| spreadsheets | 0.2.2 |
+| visualize | 0.1.2 |
+
+From the design package, 361 files totaling 4,809,702 bytes were copied unchanged
+under
+`apps/desktop/resources/prompts/skills/work-visual-design/references/design-resources/`.
+The source inventory contains 124 physical `SKILL.md` paths across the active
+package versions, retained historical versions and loose candidates. They resolve
+to 104 unique source-body SHA values and 93 unique frontmatter names. The copied
+design catalog contains 74 design-skeleton `SKILL.md` files and 8 subordinate
+design `SKILL.md` files. Their 82 original resource bodies are preserved byte for
+byte; `design-entry-manifest.json` and the work-source catalog use wrapper
+remappings rather than treating the wrapper itself as the copied resource. The
+other 22 unique bodies are original Mingshen
+adaptations for the primary design source and non-design Word, PDF, spreadsheet,
+presentation and visualization material. The remaining physical paths preserve
+historical aliases or reuse an adapted body by source SHA rather than becoming
+124 independently authored workflows.
+
+`apps/desktop/resources/prompts/skills/work-sources/catalog.json` records every
+physical source path, its source SHA value and its loadable host-relative entry.
+WorkAgent exposes the entries as discoverable, on-demand resources; they are not
+injected wholesale into the default prompt. A source SHA identifies source
+material and is not a promise that an adapted host-authored body is byte-identical
+to the source. Only the 82 design resources described above are copied unchanged.
+PDF-related material totals ten physical sources and five unique source-body SHA
+values. It covers four workflow roles: production, viewer, reading and loose
+general-purpose PDF handling. The additional body is the retained historical
+Viewer 0.2.1 source, not a fifth workflow role.
+
+Licensing and provenance:
+
+- The design package declares Apache-2.0. Its primary Open Design resources are
+  Apache-2.0, Copyright 2026 Open Design contributors. The preserved
+  `design-resources/LICENSE.md` and `NOTICE.md` identify the upstream snapshot,
+  local path mapping, modifications and brand disclaimers.
+- The retained html-ppt family is MIT, Copyright 2026 lewis. Zhangzara template
+  directories retain their MIT notices. Anthropic brand/frontend-design resources
+  retain Apache-2.0; taste and selected gstack-derived resources retain MIT and
+  their per-directory license/notice files.
+- Design-system documents may describe third-party brands for style reference.
+  Those names, trademarks, fonts and design languages remain with their owners and
+  do not imply affiliation or a trademark license.
+- Office/PDF production scripts, source application bundles, JWT/authentication
+  flows and competitor viewer/canvas integrations are not shipped or executed as
+  part of this adaptation. Some source Office/PDF skill frontmatter labels content
+  proprietary even though its package contains an Apache-2.0 file; Mingshen
+  therefore uses original host instructions and its own document tools rather than
+  mechanically redistributing those bodies or scripts. The `pdf-reading` material
+  is retained only as a capability reference where its restrictive licence
+  prevents copying.
+
+The preserved license and notice files under `design-resources/` are authoritative
+for the copied resource families. Packaging checks enumerate the design manifest
+targets and verify the copied Skill tree rather than treating the top-level Skill
+as a substitute license inventory.
+
+## PPT Master and ASD-STE100 WorkAgent skills
+
+`work-ppt-master` packages PPT Master 6.9.0 as a WorkAgent-only on-demand skill.
+The source is Copyright (c) 2025-2026 Hugo He and licensed under MIT. The packaged
+snapshot contains 13,089 files totaling 39,892,466 bytes under
+`apps/desktop/resources/prompts/skills/work-ppt-master/references/source/`. Its
+deterministic tree SHA-256 is
+`6e8023b4b8ab81e0fb4cffb71c1dcea8dd4f6f6abca490395c21fb273bfe473c`.
+The local provider configuration template is excluded. The upstream MIT text,
+icon notices and sound notices remain in that directory. The 12,027 icons retain
+their CC BY 4.0, MIT, CC0, and brand-trademark boundaries. The 186 WAV assets are
+documented CC0 copies. Mingshen does not install or execute the packaged Python
+helpers, and optional dependencies retain their own licenses. SVG icons can be
+read as text resources by the skill runtime. Binary WAV files, scripts and
+optional runtime dependencies are packaged references only: `use_skill` does not
+return, play or execute them, and using them requires an authorized workspace copy
+through the normal tools and approvals.
+
+`work-asd-ste100` packages the ASD-STE100 skill 0.4.0 as a WorkAgent-only on-demand
+skill. The source is Copyright (c) 2026 Dustin Yuchen Teng and licensed under MIT.
+The packaged snapshot contains nine files totaling 231,661 bytes under
+`apps/desktop/resources/prompts/skills/work-asd-ste100/references/source/`. Its
+deterministic tree SHA-256 is
+`0886b021b0f18d8997736af0a3b51a3492dd2c3b378ebb7484bead7803e04930`.
+It contains a paraphrased rule summary and a structural linter, not ASD's official
+approved-word dictionary. It is a general controlled-language aid, not an official
+ASD certification product.
+
+The full `SOURCE.md`, MIT license and third-party notices are packaged with each
+skill. Packaging preflight verifies both snapshots against their file count, byte
+count, deterministic tree hash and repository source when building from a checkout.
 
 ## Separately installed runtimes
 

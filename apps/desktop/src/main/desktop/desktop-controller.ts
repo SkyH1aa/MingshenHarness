@@ -23,6 +23,7 @@ export class DesktopController {
       sessionId: string,
       session: SessionView,
     ) => string | null = (_sessionId, session) => session.workspacePath,
+    private readonly openQuickChat?: () => void,
   ) {
     this.createTray();
     window.on("close", (event) => {
@@ -64,6 +65,12 @@ export class DesktopController {
     if (this.window.isMinimized()) this.window.restore();
     this.window.show();
     this.window.focus();
+  }
+  toggle(): void {
+    if (this.window.isVisible() && this.window.isFocused() && !this.window.isMinimized()) {
+      this.createTray();
+      this.window.hide();
+    } else this.show();
   }
   private quit(): void {
     this.quitting = true;
@@ -211,6 +218,14 @@ export class DesktopController {
     this.tray?.setContextMenu(
       Menu.buildFromTemplate([
         { label: en ? "Open Mingshen Harness" : "打开 Mingshen Harness", click: () => this.show() },
+        ...(this.openQuickChat
+          ? [
+              {
+                label: en ? "ChatAgent quick window" : "ChatAgent 小窗口",
+                click: this.openQuickChat,
+              },
+            ]
+          : []),
         { type: "separator" },
         ...recent.map((session) => ({
           label: session.title.replaceAll("&", "&&").slice(0, 70),

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,161 @@ vi.mock("electron", () => ({
 }));
 
 describe("McpService", () => {
+  it("reconciles plugin MCP declarations while preserving enabled state and user credentials", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-plugin-mcp-reconcile-"));
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    const secretStore = new SecretStore(database);
+    const service = new McpService(repository, secretStore, "1.3.3");
+    const installedPath = join(root, "plugin");
+    await mkdir(installedPath, { recursive: true });
+    const extension = repository.insertExtension({
+      id: "12345678-1234-4234-8234-123456789abc",
+      type: "plugin",
+      name: "Reconcile plugin",
+      description: "MCP reconcile",
+      sourcePath: join(root, "source"),
+      installedPath,
+      manifestJson: JSON.stringify({
+        name: "reconcile-plugin",
+        mcpServers: {
+          legacy: { url: "https://example.invalid/legacy" },
+          stale: { url: "https://example.invalid/stale" },
+        },
+      }),
+      contentHash: "reconcile-v1",
+    });
+    try {
+      await service.importPluginServers(extension.id);
+      const legacy = service.list().find((server) => server.name === "Reconcile plugin · legacy");
+      expect(legacy).toBeDefined();
+      if (!legacy) throw new Error("legacy plugin MCP server was not imported");
+      await service.save({
+        id: legacy.id,
+        name: legacy.name,
+        description: legacy.description,
+        transport: legacy.transport,
+        enabled: false,
+        url: legacy.url,
+        timeoutMs: legacy.timeoutMs,
+        headers: { Authorization: "user-secret" },
+        env: { USER_ONLY: "keep-me" },
+        oauthEnabled: true,
+        oauthScope: "mcp.read",
+      });
+
+      await writeFile(
+        join(installedPath, "mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            legacy: {
+              url: "https://example.invalid/current",
+              headers: {
+                Authorization: "plugin-must-not-overwrite",
+                "X-NEW": "new-value",
+              },
+              env: {
+                USER_ONLY: "plugin-must-not-overwrite",
+                NEW_PLUGIN_ENV: "new-env",
+              },
+            },
+            added: { url: "https://example.invalid/added" },
+          },
+        }),
+        "utf8",
+      );
+      repository.updateExtensionInstall({
+        id: extension.id,
+        name: extension.name,
+        description: extension.description,
+        sourcePath: extension.sourcePath,
+        installedPath: extension.installedPath,
+        manifestJson: JSON.stringify({
+          name: "reconcile-plugin",
+          mcpServers: "./mcp.json",
+        }),
+        contentHash: "reconcile-v2",
+      });
+
+      await service.importPluginServers(extension.id);
+      expect(
+        service.list().find((server) => server.name === "Reconcile plugin · legacy"),
+      ).toMatchObject({ enabled: false });
+      expect(
+        service.list().find((server) => server.name === "Reconcile plugin · stale"),
+      ).toBeUndefined();
+      const current = service.list().find((server) => server.name === "Reconcile plugin · legacy");
+      expect(current).toBeDefined();
+
+      const currentId = current?.id ?? "";
+      const secretRef = repository.getMcpServerSecretRef(currentId);
+      const stored = secretStore.read(secretRef ?? "");
+      const secrets = JSON.parse(stored) as {
+        headers: Record<string, string>;
+        env: Record<string, string>;
+        oauth?: { enabled?: boolean; scope?: string };
+      };
+      expect(secrets.headers).toMatchObject({
+        Authorization: "user-secret",
+        "X-NEW": "new-value",
+      });
+      expect(secrets.env).toMatchObject({
+        USER_ONLY: "keep-me",
+        NEW_PLUGIN_ENV: "new-env",
+      });
+      expect(secrets.oauth).toMatchObject({ enabled: true, scope: "mcp.read" });
+    } finally {
+      service.dispose();
+      database.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("hides plugin-provided MCP servers while their extension is disabled", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const service = new McpService(repository, new SecretStore(database), "1.3.3");
+    const extension = repository.insertExtension({
+      id: "12345678-1234-4234-8234-123456789abc",
+      type: "plugin",
+      name: "Diagram plugin",
+      description: "Disables its MCP tools with the plugin",
+      sourcePath: join(tmpdir(), "diagram-plugin-source"),
+      installedPath: join(tmpdir(), "diagram-plugin-installed"),
+      manifestJson: JSON.stringify({
+        mcpServers: {
+          diagrams: {
+            url: "https://example.invalid/mcp",
+          },
+        },
+      }),
+      contentHash: "extension-content-hash",
+    });
+    try {
+      await service.importPluginServers(extension.id);
+      expect(service.enabledServerNames()).toContain("Diagram plugin · diagrams");
+      const pluginServer = service
+        .list()
+        .find((server) => server.name === "Diagram plugin · diagrams");
+      expect(pluginServer).toBeDefined();
+
+      repository.setExtensionEnabled(extension.id, false);
+      expect(service.enabledServerNames()).not.toContain("Diagram plugin · diagrams");
+      const directCall = await service.callTool(pluginServer?.id ?? "", "render", {});
+      expect(directCall).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("MCP_SERVER_DISABLED"),
+      });
+      expect(directCall.output).not.toContain("MCP_OUTCOME_UNCERTAIN");
+
+      repository.setExtensionEnabled(extension.id, true);
+      expect(service.enabledServerNames()).toContain("Diagram plugin · diagrams");
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
+
   it("cancels a real HTTP MCP call and preserves an explicit uncertain-outcome error", async () => {
     let started: () => void = () => {};
     const called = new Promise<void>((done) => {

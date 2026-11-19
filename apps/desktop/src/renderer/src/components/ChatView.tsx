@@ -21,17 +21,21 @@ import {
   Globe2,
   HardDrive,
   Image,
+  ListPlus,
   LoaderCircle,
   Music2,
   Plus,
+  Presentation,
   Puzzle,
   RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
   Slash,
+  Sparkles,
   Square,
   SquarePen,
+  Table2,
   Terminal,
   Trash2,
   UserRound,
@@ -55,6 +59,7 @@ import { createPortal, flushSync } from "react-dom";
 import { canExtractAttachment } from "../../../shared/attachments";
 import type {
   ActivityEvent,
+  AgentMode,
   AgentProfileView,
   ApprovalDecision,
   ApprovalRequest,
@@ -71,11 +76,17 @@ import type {
   QuestionAnswer,
   QuestionRequest,
   RunSummary,
+  SessionBuiltinCapabilityView,
   SessionMessage,
   SessionRunState,
   SessionUpdateInput,
   SessionView,
 } from "../../../shared/domain";
+import {
+  MAX_QUEUED_PROMPTS,
+  type QueuedPromptContinueResult,
+  type QueuedPromptView,
+} from "../../../shared/queued-prompt";
 import { getLocale, tr, useLocale } from "../i18n/index";
 import { runtimeText } from "../i18n/runtime";
 import {
@@ -85,9 +96,11 @@ import {
   toolDetailsForMessage,
 } from "../lib/activity-details";
 import { agentLabel } from "../lib/agent-labels";
+import { isAllowedChatAttachment, profileSupportsAgentMode } from "../lib/agent-mode-ui";
 import type { LiveRun, SessionUsage } from "../lib/chat-types";
 import { clipboardImages, namedClipboardImage } from "../lib/clipboard-images";
 import type { DraftAttachment } from "../lib/composer-drafts";
+import { shouldOpenPastePreview } from "../lib/composer-input";
 import { composerMarkdown } from "../lib/composer-markdown";
 import { revealPanelItem } from "../lib/floating-panel";
 import { formatCount, formatDuration, formatPath } from "../lib/format";
@@ -111,17 +124,22 @@ import { ExtensionPicker } from "./ExtensionPicker";
 import { MarkdownLite } from "./MarkdownLite";
 import { ModelPicker } from "./ModelPicker";
 import { QuestionNavigator } from "./QuestionNavigator";
+import { QueuedPromptTray } from "./QueuedPromptTray";
 import { RenameSessionDialog } from "./RenameSessionDialog";
 import { ToolCallDetails } from "./ToolCallDetails";
 import { useUiPreferences } from "./UiPreferences";
 
 interface ChatViewProps {
   notificationDraft?: { sessionId: string; text: string; error: string; id: string } | null;
+  compact?: boolean;
+  agentMode: AgentMode;
   session: SessionView | null;
   providers: ProviderView[];
   agentProfiles: AgentProfileView[];
   extensions: ExtensionView[];
   selectedExtensionIds: string[];
+  builtinCapabilities?: SessionBuiltinCapabilityView[];
+  queuedPrompts?: QueuedPromptView[];
   messages: SessionMessage[];
   live: LiveRun | null;
   allLive: Record<string, LiveRun>;
@@ -141,11 +159,27 @@ interface ChatViewProps {
     draftRevision: string,
   ) => Promise<void>;
   onRewriteMessage: (messageId: string, text: string) => Promise<void>;
+  onModePreparationChange: (sessionId: string, preparing: boolean) => void;
   onStop: () => Promise<void>;
   onFork: (sessionId: string) => Promise<void>;
   onCompact: (sessionId: string) => Promise<unknown>;
   onPatch: (input: SessionUpdateInput) => Promise<SessionView>;
   onToggleExtension: (extensionId: string, enabled: boolean) => Promise<void>;
+  onToggleBuiltinCapability?: (capabilityId: string, selected: boolean) => Promise<void>;
+  onAddQueuedPrompt?: (
+    text: string,
+    attachments: ChatAttachmentInput[],
+  ) => Promise<QueuedPromptView>;
+  onUpdateQueuedPrompt?: (itemId: string, text: string) => Promise<QueuedPromptView>;
+  onBeginQueuedPromptEdit?: (itemId: string) => Promise<string>;
+  onEndQueuedPromptEdit?: (editId: string, abandon?: boolean) => Promise<void>;
+  onRemoveQueuedPrompt?: (itemId: string) => Promise<void>;
+  onReplaceQueuedPromptAttachments?: (
+    itemId: string,
+    text: string,
+    attachments: ChatAttachmentInput[],
+  ) => Promise<QueuedPromptView>;
+  onResumeQueuedPrompt?: (itemId: string) => Promise<QueuedPromptContinueResult>;
   onImportExtensions: () => Promise<ExtensionImportResult | null>;
   onOpenSettings: (section?: "permissions" | "context" | "extensions" | "mcp" | "project") => void;
   onOpenWorkspace: () => void;
@@ -183,6 +217,26 @@ function readFileAsDataUrl(file: File): Promise<string> {
       reject(reader.error ?? new Error(tr("\u65E0\u6CD5\u8BFB\u53D6 {0}", [file.name])));
     reader.readAsDataURL(file);
   });
+}
+
+async function prepareChatAttachment(
+  file: File,
+  kind: AttachmentKind,
+  allowLocalPath: boolean,
+  dataUrl?: string,
+  path?: string,
+): Promise<ChatAttachmentInput> {
+  const resolvedDataUrl = dataUrl ?? (await readFileAsDataUrl(file));
+  const fileWithPath = file as File & { path?: string };
+  const localPath = allowLocalPath ? (path ?? fileWithPath.path) : undefined;
+  return {
+    name: file.name,
+    mimeType: file.type || "application/octet-stream",
+    size: file.size,
+    kind,
+    dataUrl: resolvedDataUrl,
+    ...(localPath ? { path: localPath } : {}),
+  };
 }
 
 function formatBytes(size: number): string {
@@ -237,11 +291,15 @@ function OrbitMessageMeta({
 
 export function ChatView({
   notificationDraft,
+  compact = false,
+  agentMode,
   session,
   providers,
   agentProfiles,
   extensions,
   selectedExtensionIds,
+  builtinCapabilities = [],
+  queuedPrompts = [],
   messages,
   live,
   runState,
@@ -254,11 +312,20 @@ export function ChatView({
   onSelectSession,
   onSend,
   onRewriteMessage,
+  onModePreparationChange,
   onStop,
   onFork,
   onCompact,
   onPatch,
   onToggleExtension,
+  onToggleBuiltinCapability = async () => undefined,
+  onAddQueuedPrompt,
+  onUpdateQueuedPrompt,
+  onBeginQueuedPromptEdit,
+  onEndQueuedPromptEdit,
+  onRemoveQueuedPrompt,
+  onReplaceQueuedPromptAttachments,
+  onResumeQueuedPrompt,
   onImportExtensions,
   onOpenSettings,
   onOpenWorkspace,
@@ -271,6 +338,8 @@ export function ChatView({
   const { activeStyle, preferences } = useUiPreferences();
   const orbit = activeStyle === "orbit";
   const sessionId = session?.id ?? null;
+  const chatMode = agentMode === "chat" || session?.agentMode === "chat";
+  const workStarters = orbit && !compact && !chatMode && agentMode === "work";
   const draftState = useComposerDraft(sessionId);
   const draft = draftState.value.text;
   const attachments = draftState.value.attachments;
@@ -309,7 +378,9 @@ export function ChatView({
     },
     [sessionId],
   );
-  const pastedTextRef = useRef(false);
+  // A paste only opens preview when the matching input event arrives immediately after it.
+  // Consuming the flag here prevents a stale paste from moving later typing into preview.
+  const pasteWaitingRef = useRef(false);
   const previewRef = useRef<HTMLElement>(null);
   const previewRequested =
     preferences.composerRichPaste && Boolean(draft) && formattedDraft === draft;
@@ -329,6 +400,7 @@ export function ChatView({
   const closeEditMenu = useCallback(() => setEditMenu(null), []);
   const [dragActive, setDragActive] = useState(false);
   const [sending, setSending] = useState(false);
+  const [queueing, setQueueing] = useState(false);
   const [sendingStartedAt, setSendingStartedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [memoryResult, setMemoryResult] = useState<string | null>(null);
@@ -345,7 +417,9 @@ export function ChatView({
   const [renameOpen, setRenameOpen] = useState(false);
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const choices =
-    formatted || slashDismissed === draft ? null : slashItems(draft, commands, extensions);
+    chatMode || formatted || slashDismissed === draft
+      ? null
+      : slashItems(draft, commands, extensions);
   const scrollRef = useRef<HTMLElement>(null);
   const followOutputRef = useRef(true);
   const scrollFrameRef = useRef<number | null>(null);
@@ -397,10 +471,28 @@ export function ChatView({
         canExtractAttachment(attachment.file.name, attachment.file.type)
       ),
   );
+  const effectiveSessionAgentMode =
+    session?.agentMode === "work" || agentMode === "work" ? "work" : "code";
+  const availableAgentProfiles = agentProfiles.filter(
+    (profile) => profile.enabled && profileSupportsAgentMode(profile, effectiveSessionAgentMode),
+  );
   const selectedExtensions = selectedExtensionIds
     .map((id) => extensions.find((extension) => extension.id === id))
-    .filter((extension): extension is ExtensionView => Boolean(extension?.enabled));
-  const mentionMatch = /(?:^|\s)@([^\s]*)$/.exec(draft);
+    .filter((extension): extension is ExtensionView => Boolean(extension?.enabled) && !chatMode);
+  const selectedBuiltinCapabilities = chatMode
+    ? []
+    : builtinCapabilities.filter((capability) => capability.selected);
+  const queuedPromptActionsAvailable = Boolean(
+    session &&
+      !session.parentSessionId &&
+      onUpdateQueuedPrompt &&
+      onBeginQueuedPromptEdit &&
+      onEndQueuedPromptEdit &&
+      onRemoveQueuedPrompt &&
+      onReplaceQueuedPromptAttachments &&
+      onResumeQueuedPrompt,
+  );
+  const mentionMatch = chatMode ? null : /(?:^|\s)@([^\s]*)$/.exec(draft);
   const mentionQuery = formatted ? null : (mentionMatch?.[1]?.toLocaleLowerCase("zh-CN") ?? null);
   const commandPosition = useFloatingPanel(Boolean(choices), textareaRef, slashMenuRef, {
     maxHeight: 360,
@@ -623,7 +715,7 @@ export function ChatView({
 
   useEffect(() => {
     let cancelled = false;
-    if (!session?.id) {
+    if (!session?.id || chatMode) {
       setCommands([]);
       return;
     }
@@ -642,7 +734,7 @@ export function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [session?.id, session?.workspacePath]);
+  }, [chatMode, session?.id, session?.workspacePath]);
 
   useEffect(() => {
     if (approvalId) {
@@ -681,6 +773,18 @@ export function ChatView({
       if (!sessionId || !composerDrafts.state(sessionId).ready || files.length === 0) {
         return;
       }
+      if (chatMode) {
+        const unsupported = files.filter((file) => !isAllowedChatAttachment(file));
+        if (unsupported.length > 0) {
+          setError(
+            tr(
+              "ChatAgent 仅支持 PNG/JPEG/WebP/GIF/BMP/TIFF/AVIF 图片，以及 PDF、DOC/DOCX、XLS/XLSX、PPTX：{0}",
+              [unsupported.map((file) => file.name).join("、")],
+            ),
+          );
+          return;
+        }
+      }
       const oversized = files.find((file) => file.size > 25 * 1024 * 1024);
       if (oversized) {
         setError(
@@ -711,7 +815,7 @@ export function ChatView({
           setError(cause instanceof Error ? cause.message : String(cause)),
         );
     },
-    [sessionId, setAttachments],
+    [chatMode, sessionId, setAttachments],
   );
 
   useEffect(() => {
@@ -781,17 +885,22 @@ export function ChatView({
 
   if (!session) {
     return (
-      <main className="chat-view chat-view--empty">
+      <main
+        className={`chat-view chat-view--empty${chatMode ? " chat-view--conversation" : ""}${compact ? " chat-view--quick" : ""}`}
+        data-agent-mode={agentMode}
+      >
         <div className="empty-work">
-          <h1>{tr("\u5F00\u59CB\u4E00\u9879\u5DE5\u4F5C")}</h1>
+          <h1>{tr(chatMode ? "开始一段对话" : "\u5F00\u59CB\u4E00\u9879\u5DE5\u4F5C")}</h1>
           <p>
             {tr(
-              "\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u8BA9 Mingshen \u8FDB\u5165\u4E00\u4E2A\u672C\u5730\u5DE5\u4F5C\u76EE\u5F55\u3002",
+              chatMode
+                ? "选择已有对话，或新建一段独立对话。可以上传资料做只读问答，也可以联网搜索公开信息。"
+                : "\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u8BA9 Mingshen \u8FDB\u5165\u4E00\u4E2A\u672C\u5730\u5DE5\u4F5C\u76EE\u5F55\u3002",
             )}
           </p>
           <button className="btn btn--primary" type="button" onClick={onNewSession}>
             <Plus aria-hidden="true" size={16} />
-            {tr("\u65B0\u5EFA\u4F1A\u8BDD")}
+            {tr(chatMode ? "新建对话" : "\u65B0\u5EFA\u4F1A\u8BDD")}
           </button>
         </div>
       </main>
@@ -805,7 +914,7 @@ export function ChatView({
     if ((!text && submitted.attachments.length === 0) || sending || running) {
       return;
     }
-    const builtin = parseBuiltinCommand(text);
+    const builtin = chatMode ? null : parseBuiltinCommand(text);
     if (builtin) {
       if (attachments.length) {
         setError(tr("请先移除附件，再执行聊天命令。"));
@@ -831,22 +940,19 @@ export function ChatView({
     setSending(true);
     setSendingStartedAt(Date.now());
     setError(null);
+    onModePreparationChange(session.id, true);
     try {
       await composerDrafts.flush(session.id);
       const preparedAttachments = await Promise.all(
-        submitted.attachments.map(async (attachment): Promise<ChatAttachmentInput> => {
-          const dataUrl = attachment.dataUrl ?? (await readFileAsDataUrl(attachment.file));
-          const fileWithPath = attachment.file as File & { path?: string };
-          const path = attachment.path ?? fileWithPath.path;
-          return {
-            name: attachment.file.name,
-            mimeType: attachment.file.type || "application/octet-stream",
-            size: attachment.file.size,
-            kind: attachment.kind,
-            dataUrl,
-            ...(path ? { path } : {}),
-          };
-        }),
+        submitted.attachments.map((attachment) =>
+          prepareChatAttachment(
+            attachment.file,
+            attachment.kind,
+            !chatMode,
+            attachment.dataUrl,
+            attachment.path,
+          ),
+        ),
       );
       await onSend(text, preparedAttachments, submitted.revision);
       await composerDrafts.accepted(session.id, submitted.revision);
@@ -856,9 +962,101 @@ export function ChatView({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      onModePreparationChange(session.id, false);
       setSending(false);
       setSendingStartedAt(null);
     }
+  };
+
+  const queueCurrentDraft = async () => {
+    if (
+      !onAddQueuedPrompt ||
+      session.parentSessionId ||
+      !draftState.ready ||
+      queueing ||
+      sending ||
+      !running ||
+      queuedPrompts.length >= MAX_QUEUED_PROMPTS
+    ) {
+      return;
+    }
+    const submitted = composerDrafts.state(session.id).value;
+    const text = submitted.text.trim();
+    if (!text && submitted.attachments.length === 0) return;
+    if (!selectedModel) {
+      setError(tr("请先为当前会话选择模型。"));
+      return;
+    }
+    if (incompatibleAttachments.length > 0) {
+      setError(
+        tr("当前模型不支持以下附件类型：{0}", [
+          incompatibleAttachments.map((attachment) => attachment.file.name).join("、"),
+        ]),
+      );
+      return;
+    }
+    if (!chatMode && parseBuiltinCommand(text)) {
+      setError(tr("聊天命令不能加入下一轮队列。"));
+      return;
+    }
+
+    setQueueing(true);
+    setError(null);
+    try {
+      await composerDrafts.flush(session.id);
+      const preparedAttachments = await Promise.all(
+        submitted.attachments.map((attachment) =>
+          prepareChatAttachment(
+            attachment.file,
+            attachment.kind,
+            !chatMode,
+            attachment.dataUrl,
+            attachment.path,
+          ),
+        ),
+      );
+      await onAddQueuedPrompt(text, preparedAttachments);
+      await composerDrafts.clearIfCurrent(session.id, submitted.revision);
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+      textareaRef.current?.focus();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setQueueing(false);
+    }
+  };
+
+  const replaceQueuedAttachments = async (itemId: string, text: string, files: File[]) => {
+    if (!onReplaceQueuedPromptAttachments || !files.length) return;
+    if (!selectedModel) {
+      throw new Error(tr("请先为当前会话选择模型。"));
+    }
+    const oversized = files.find((file) => file.size > 25 * 1024 * 1024);
+    if (oversized) {
+      throw new Error(tr("附件「{0}」超过单文件 25 MiB 限制。", [oversized.name]));
+    }
+    if (chatMode) {
+      const unsupported = files.find(
+        (file) => !isAllowedChatAttachment({ name: file.name, type: file.type }),
+      );
+      if (unsupported) {
+        throw new Error(tr("ChatAgent 不支持附件「{0}」。", [unsupported.name]));
+      }
+    }
+    const unsupported = files.find((file) => {
+      const kind = attachmentKindFromFile(file);
+      return (
+        !selectedModel.inputModalities.includes(attachmentKindModality(kind)) &&
+        !(kind === "file" && canExtractAttachment(file.name, file.type))
+      );
+    });
+    if (unsupported) {
+      throw new Error(tr("当前模型不支持以下附件类型：{0}", [unsupported.name]));
+    }
+    const prepared = await Promise.all(
+      files.map((file) => prepareChatAttachment(file, attachmentKindFromFile(file), !chatMode)),
+    );
+    await onReplaceQueuedPromptAttachments(itemId, text, prepared);
   };
 
   const executeBuiltin = async (command: BuiltinCommand, argument = "") => {
@@ -1333,7 +1531,10 @@ export function ChatView({
 
   return (
     <main
-      className={`chat-view${dragActive ? " chat-view--drag-active" : ""}${question ? " chat-view--question" : ""}`}
+      className={`chat-view${compact ? " chat-view--quick" : ""}${dragActive ? " chat-view--drag-active" : ""}${question ? " chat-view--question" : ""}`}
+      data-testid="chat-view"
+      data-agent-mode={agentMode}
+      data-compact={compact ? "true" : "false"}
       data-run-state={
         approval ? "approval" : question ? "question" : running || sending ? "running" : "idle"
       }
@@ -1367,16 +1568,24 @@ export function ChatView({
         >
           <div className="conversation">
             {messages.length === 0 && !live && !sending ? (
-              <div className="conversation-empty">
+              <div className={`conversation-empty${chatMode ? " conversation-empty--chat" : ""}`}>
                 <BrandMark className="conversation-empty__mark" size={46} />
                 <h1>
-                  {session.title === "新会话"
-                    ? tr("\u4ECE\u4E00\u53E5\u76EE\u6807\u5F00\u59CB")
+                  {session.title === "新会话" || session.title === "新对话"
+                    ? chatMode
+                      ? tr("有什么可以帮你？")
+                      : workStarters
+                        ? tr("从工作目标开始")
+                        : tr("\u4ECE\u4E00\u53E5\u76EE\u6807\u5F00\u59CB")
                     : session.title}
                 </h1>
                 <p>
-                  {tr("\u5F53\u524D\u4F1A\u8BDD\u4F7F\u7528")}{" "}
-                  {selectedModel?.displayName ?? tr("\u5C1A\u672A\u914D\u7F6E\u7684\u6A21\u578B")}
+                  {chatMode
+                    ? tr("可以回答问题、分析资料，也可以联网查找最新信息。")
+                    : tr("\u5F53\u524D\u4F1A\u8BDD\u4F7F\u7528") +
+                      " " +
+                      (selectedModel?.displayName ??
+                        tr("\u5C1A\u672A\u914D\u7F6E\u7684\u6A21\u578B"))}
                 </p>
                 <fieldset
                   className="conversation-empty__starters"
@@ -1385,41 +1594,83 @@ export function ChatView({
                 >
                   <button
                     type="button"
+                    data-starter-kind={workStarters ? "document" : undefined}
                     onClick={() =>
                       applyStarterPrompt(
                         tr(
-                          "\u5206\u6790\u5F53\u524D\u9879\u76EE\u7684\u7ED3\u6784\u3001\u98CE\u9669\u548C\u6700\u503C\u5F97\u4F18\u5148\u5904\u7406\u7684\u95EE\u9898\u3002",
+                          chatMode
+                            ? "帮我梳理一下这个问题，先给出清晰结论，再说明依据。"
+                            : workStarters
+                              ? "请根据我提供的材料和目标，梳理受众、提纲和关键信息，起草结构清晰、排版得体的 Word 文档。"
+                              : "\u5206\u6790\u5F53\u524D\u9879\u76EE\u7684\u7ED3\u6784\u3001\u98CE\u9669\u548C\u6700\u503C\u5F97\u4F18\u5148\u5904\u7406\u7684\u95EE\u9898\u3002",
                         ),
                       )
                     }
                   >
-                    {tr("\u5206\u6790\u5F53\u524D\u9879\u76EE")}
+                    {chatMode ? (
+                      tr("梳理问题")
+                    ) : workStarters ? (
+                      <span className="orbit-work-starter-label">
+                        <FileText size={15} aria-hidden="true" />
+                        {tr("起草 Word 文档")}
+                      </span>
+                    ) : (
+                      tr("\u5206\u6790\u5F53\u524D\u9879\u76EE")
+                    )}
                     <ArrowUpRight className="orbit-starter-arrow" size={16} aria-hidden="true" />
                   </button>
                   <button
                     type="button"
+                    data-starter-kind={workStarters ? "spreadsheet" : undefined}
                     onClick={() =>
                       applyStarterPrompt(
                         tr(
-                          "\u68C0\u67E5\u5F53\u524D\u5DE5\u4F5C\u533A\u4E2D\u7684\u9519\u8BEF\uFF0C\u5B9A\u4F4D\u539F\u56E0\u5E76\u5B8C\u6210\u4FEE\u590D\u3002",
+                          chatMode
+                            ? "搜索并概括这个主题的最新公开信息，注明来源和发布时间。"
+                            : workStarters
+                              ? "请根据我提供的数据，整理 Excel 表格结构，检查关键公式，并清晰呈现分析结果。"
+                              : "\u68C0\u67E5\u5F53\u524D\u5DE5\u4F5C\u533A\u4E2D\u7684\u9519\u8BEF\uFF0C\u5B9A\u4F4D\u539F\u56E0\u5E76\u5B8C\u6210\u4FEE\u590D\u3002",
                         ),
                       )
                     }
                   >
-                    {tr("\u5B9A\u4F4D\u5E76\u4FEE\u590D\u95EE\u9898")}
+                    {chatMode ? (
+                      tr("联网研究")
+                    ) : workStarters ? (
+                      <span className="orbit-work-starter-label">
+                        <Table2 size={15} aria-hidden="true" />
+                        {tr("分析 Excel 表格")}
+                      </span>
+                    ) : (
+                      tr("\u5B9A\u4F4D\u5E76\u4FEE\u590D\u95EE\u9898")
+                    )}
                     <ArrowUpRight className="orbit-starter-arrow" size={16} aria-hidden="true" />
                   </button>
                   <button
                     type="button"
+                    data-starter-kind={workStarters ? "presentation" : undefined}
                     onClick={() =>
                       applyStarterPrompt(
                         tr(
-                          "\u68B3\u7406\u8FD9\u6B21\u9700\u6C42\u7684\u5B9E\u73B0\u8303\u56F4\uFF0C\u7ED9\u51FA\u8BA1\u5212\u540E\u5F00\u59CB\u6267\u884C\u3002",
+                          chatMode
+                            ? "把这个想法整理成结构清楚、可以直接使用的说明。"
+                            : workStarters
+                              ? "请根据我提供的主题和材料，先规划叙事与页面结构，再制作重点清晰、版式统一的 PPT 演示文稿。"
+                              : "\u68B3\u7406\u8FD9\u6B21\u9700\u6C42\u7684\u5B9E\u73B0\u8303\u56F4\uFF0C\u7ED9\u51FA\u8BA1\u5212\u540E\u5F00\u59CB\u6267\u884C\u3002",
                         ),
                       )
                     }
                   >
-                    {tr("\u8BA1\u5212\u5E76\u6267\u884C\u4EFB\u52A1")}
+                    {chatMode ? (
+                      tr("整理内容")
+                    ) : workStarters ? (
+                      <span className="orbit-work-starter-label">
+                        <Presentation size={15} aria-hidden="true" />
+                        {tr("制作 PPT 演示")}
+                      </span>
+                    ) : (
+                      tr("\u8BA1\u5212\u5E76\u6267\u884C\u4EFB\u52A1")
+                    )}
                     <ArrowUpRight className="orbit-starter-arrow" size={16} aria-hidden="true" />
                   </button>
                 </fieldset>
@@ -1444,6 +1695,7 @@ export function ChatView({
                   workspacePath={session.workspacePath}
                   onOpenError={setError}
                   onOpenFile={onOpenFile}
+                  allowLocalFiles={!chatMode}
                   showAssistantHeader={entry.execution ? false : entry.showAssistantHeader}
                 />
               ));
@@ -1540,6 +1792,7 @@ export function ChatView({
                       workspacePath={session.workspacePath}
                       onOpenError={setError}
                       onOpenFile={onOpenFile}
+                      allowLocalFiles={!chatMode}
                     />
 
                     <span className="stream-caret" aria-hidden="true" />
@@ -1760,7 +2013,11 @@ export function ChatView({
             </div>
           </section>
         ) : null}
-        <div className={`composer${orbit ? " composer--orbit" : ""}`}>
+        <div
+          className={`composer${orbit ? " composer--orbit" : ""}`}
+          data-testid="chat-composer"
+          data-busy={running || sending ? "true" : "false"}
+        >
           <div className={`composer__context${orbit ? " orbit-composer-top" : ""}`}>
             <span className="composer-run-state" role="status">
               {statusLabel}
@@ -1777,39 +2034,68 @@ export function ChatView({
               onChange={(selection, model) => void changeModel(selection, model)}
               disabled={running}
             />
-            <label className="composer-agent">
-              <Bot size={14} aria-hidden="true" />
-              <select
-                aria-label={tr("当前 Agent")}
-                value={session.agentProfileId}
-                disabled={running}
-                onChange={(event) =>
-                  void onPatch({ sessionId: session.id, agentProfileId: event.target.value })
-                }
-              >
-                {agentProfiles
-                  .filter((profile) => profile.enabled)
-                  .map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {agentLabel(profile)}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            <button
-              className="workspace-button"
-              type="button"
-              onClick={() => void chooseWorkspace()}
-              title={formatPath(session.workspacePath)}
-            >
-              <FolderOpen aria-hidden="true" size={14} />
-              <span>
-                {session.workspacePath?.split(/[\\/]/).filter(Boolean).at(-1) ?? formatPath(null)}
-              </span>
-            </button>
+            {!chatMode ? (
+              <>
+                <label className="composer-agent">
+                  <Bot size={14} aria-hidden="true" />
+                  <select
+                    aria-label={tr("当前 Agent")}
+                    value={session.agentProfileId}
+                    disabled={running}
+                    onChange={(event) =>
+                      void onPatch({ sessionId: session.id, agentProfileId: event.target.value })
+                    }
+                  >
+                    {availableAgentProfiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {agentLabel(profile)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="workspace-button"
+                  type="button"
+                  onClick={() => void chooseWorkspace()}
+                  title={formatPath(session.workspacePath)}
+                >
+                  <FolderOpen aria-hidden="true" size={14} />
+                  <span>
+                    {session.workspacePath?.split(/[\\/]/).filter(Boolean).at(-1) ??
+                      formatPath(null)}
+                  </span>
+                </button>
+              </>
+            ) : null}
 
-            {!orbit ? permissionControls : null}
+            {!orbit && !chatMode ? permissionControls : null}
           </div>
+
+          {!compact && queuedPromptActionsAvailable ? (
+            <QueuedPromptTray
+              items={queuedPrompts}
+              onResume={async (itemId) => {
+                if (!onResumeQueuedPrompt) throw new Error(tr("队列操作不可用。"));
+                return await onResumeQueuedPrompt(itemId);
+              }}
+              onUpdate={async (itemId, text) => {
+                await onUpdateQueuedPrompt?.(itemId, text);
+              }}
+              onBeginEdit={async (itemId) => {
+                if (!onBeginQueuedPromptEdit) throw new Error(tr("队列操作不可用。"));
+                return await onBeginQueuedPromptEdit(itemId);
+              }}
+              onEndEdit={async (editId, abandon) => {
+                if (!onEndQueuedPromptEdit) throw new Error(tr("队列操作不可用。"));
+                await onEndQueuedPromptEdit(editId, abandon);
+              }}
+              onRemove={async (itemId) => {
+                if (!onRemoveQueuedPrompt) throw new Error(tr("队列操作不可用。"));
+                await onRemoveQueuedPrompt(itemId);
+              }}
+              onReplaceAttachments={replaceQueuedAttachments}
+            />
+          ) : null}
 
           {attachments.length > 0 ? (
             <fieldset
@@ -1860,6 +2146,7 @@ export function ChatView({
 
           <textarea
             ref={textareaRef}
+            data-testid="chat-composer-input"
             hidden={formatted}
             value={draft}
             rows={3}
@@ -1871,35 +2158,52 @@ export function ChatView({
             }
             placeholder={
               draftState.ready
-                ? tr("\u63CF\u8FF0\u76EE\u6807\u3001\u7EA6\u675F\u548C\u5B8C\u6210\u6807\u51C6")
+                ? tr(
+                    chatMode
+                      ? "输入问题，或上传图片、PDF、Word、Excel、PPTX 做只读问答"
+                      : "\u63CF\u8FF0\u76EE\u6807\u3001\u7EA6\u675F\u548C\u5B8C\u6210\u6807\u51C6",
+                  )
                 : tr("正在恢复草稿…")
             }
             onChange={(event) => {
               const text = event.target.value;
-              const pasted =
-                pastedTextRef.current ||
-                (event.nativeEvent as InputEvent).inputType === "insertFromPaste";
-              pastedTextRef.current = false;
+              const inputType = (event.nativeEvent as InputEvent).inputType;
+              const pasted = shouldOpenPastePreview({
+                inputType,
+                pastePending: pasteWaitingRef.current,
+                richPasteEnabled: preferences.composerRichPaste,
+              });
+              pasteWaitingRef.current = false;
               setDraft(text);
-              previewFocusRequested.current = pasted && preferences.composerRichPaste;
-              setFormattedDraft(pasted && preferences.composerRichPaste ? text : null);
+              if (pasted) {
+                previewFocusRequested.current = true;
+                setFormattedDraft(text);
+              }
               setSlashIndex(0);
               setSlashDismissed(null);
               event.target.style.height = "auto";
               event.target.style.height = `${Math.min(240, event.target.scrollHeight)}px`;
             }}
-            onKeyDown={onComposerKeyDown}
+            onKeyDown={(event) => {
+              pasteWaitingRef.current = false;
+              onComposerKeyDown(event);
+            }}
+            onCompositionStart={() => {
+              pasteWaitingRef.current = false;
+            }}
             onPaste={(event) => {
+              pasteWaitingRef.current = false;
               const images = clipboardImages(event.clipboardData);
               if (images.length) {
                 event.preventDefault();
-                pastedTextRef.current = false;
                 addFiles(images.map(namedClipboardImage));
               } else {
-                pastedTextRef.current = Boolean(event.clipboardData.getData("text/plain"));
-                requestAnimationFrame(() => {
-                  pastedTextRef.current = false;
-                });
+                pasteWaitingRef.current = Boolean(event.clipboardData.getData("text/plain"));
+                // Bounded expiry protects against a paste that never produces an input event.
+                // Keydown and composition start also clear it immediately.
+                setTimeout(() => {
+                  pasteWaitingRef.current = false;
+                }, 1000);
               }
             }}
             onContextMenu={(event) => {
@@ -1928,11 +2232,11 @@ export function ChatView({
                   event.preventDefault();
                   addFiles(images.map(namedClipboardImage));
                 } else {
-                  pastedTextRef.current = Boolean(event.clipboardData.getData("text/plain"));
+                  pasteWaitingRef.current = Boolean(event.clipboardData.getData("text/plain"));
+                  setTimeout(() => {
+                    pasteWaitingRef.current = false;
+                  }, 1000);
                   editDraft();
-                  requestAnimationFrame(() => {
-                    pastedTextRef.current = false;
-                  });
                 }
               }}
               onContextMenu={(event) => {
@@ -2070,19 +2374,52 @@ export function ChatView({
               )
             : null}
 
-          {selectedExtensions.length > 0 ? (
+          {selectedBuiltinCapabilities.length + selectedExtensions.length > 0 ? (
             <fieldset
               className="composer__references"
-              aria-label={tr("\u5F53\u524D\u4F1A\u8BDD\u5F15\u7528\u7684\u6269\u5C55")}
+              aria-label={tr("\u5F53\u524D\u4F1A\u8BDD\u5F15\u7528\u7684\u80FD\u529B")}
             >
+              {selectedBuiltinCapabilities.map((capability) => (
+                <button
+                  className="reference-chip reference-chip--builtin"
+                  type="button"
+                  key={capability.id}
+                  data-testid="capability-chip"
+                  data-capability-id={capability.id}
+                  data-capability-type={capability.type}
+                  data-capability-source="builtin"
+                  disabled={sending || running}
+                  title={tr("\u53D6\u6D88\u5F15\u7528 {0}", [capability.name])}
+                  onClick={() => void onToggleBuiltinCapability(capability.id, false)}
+                >
+                  {capability.type === "plugin" ? (
+                    <Puzzle className="reference-chip__type-icon" aria-hidden="true" size={12} />
+                  ) : (
+                    <Sparkles className="reference-chip__type-icon" aria-hidden="true" size={12} />
+                  )}
+                  <span>{capability.type === "skill" ? "SKILL" : "PLUGIN"}</span>
+                  <strong>{capability.name}</strong>
+                  <XCircle aria-hidden="true" size={12} />
+                </button>
+              ))}
               {selectedExtensions.map((extension) => (
                 <button
                   className="reference-chip"
                   type="button"
                   key={extension.id}
+                  data-testid="capability-chip"
+                  data-capability-id={extension.id}
+                  data-capability-type={extension.type}
+                  data-capability-source="installed"
+                  disabled={sending || running}
                   title={tr("\u53D6\u6D88\u5F15\u7528 {0}", [extension.name])}
                   onClick={() => void onToggleExtension(extension.id, false)}
                 >
+                  {extension.type === "plugin" ? (
+                    <Puzzle className="reference-chip__type-icon" aria-hidden="true" size={12} />
+                  ) : (
+                    <Sparkles className="reference-chip__type-icon" aria-hidden="true" size={12} />
+                  )}
                   <span>{extension.type === "skill" ? "SKILL" : "PLUGIN"}</span>
                   <strong>{extension.name}</strong>
                   <XCircle aria-hidden="true" size={12} />
@@ -2123,14 +2460,43 @@ export function ChatView({
                 </fieldset>
               ) : null}
               <ExtensionPicker
+                builtinCapabilities={builtinCapabilities}
                 extensions={extensions}
                 selectedIds={selectedExtensionIds}
-                disabled={sending}
+                disabled={sending || running}
+                attachmentsOnly={chatMode}
                 onToggle={onToggleExtension}
+                onToggleBuiltin={onToggleBuiltinCapability}
                 onImport={onImportExtensions}
                 onAttachFiles={addFiles}
               />
-              {orbit ? (
+              {!compact && !session.parentSessionId && running && !sending && onAddQueuedPrompt ? (
+                <button
+                  className="btn btn--secondary queue-next-button"
+                  type="button"
+                  title={tr("加入下一轮队列")}
+                  aria-label={tr("加入下一轮队列")}
+                  data-testid="chat-queue-add"
+                  onClick={() => void queueCurrentDraft()}
+                  disabled={
+                    queueing ||
+                    !draftState.ready ||
+                    (!draft.trim() && attachments.length === 0) ||
+                    !selectedModel ||
+                    incompatibleAttachments.length > 0 ||
+                    queuedPrompts.length >= MAX_QUEUED_PROMPTS ||
+                    Boolean(!chatMode && draft.trim() && parseBuiltinCommand(draft.trim()))
+                  }
+                >
+                  {queueing ? (
+                    <LoaderCircle className="spin" aria-hidden="true" size={14} />
+                  ) : (
+                    <ListPlus aria-hidden="true" size={14} />
+                  )}
+                  {tr("加入下一轮")}
+                </button>
+              ) : null}
+              {orbit && !chatMode ? (
                 <div className="orbit-composer-permissions">{permissionControls}</div>
               ) : null}
 
@@ -2173,6 +2539,8 @@ export function ChatView({
                   <button
                     className="btn btn--secondary"
                     type="button"
+                    aria-label={tr("\u505C\u6B62")}
+                    data-testid="chat-composer-stop"
                     onClick={() => void onStop()}
                   >
                     <Square aria-hidden="true" size={14} />
@@ -2183,6 +2551,7 @@ export function ChatView({
                     className="send-button"
                     type="button"
                     aria-label={tr("\u53D1\u9001\u6D88\u606F")}
+                    data-testid="chat-composer-send"
                     title={tr("\u53D1\u9001\u6D88\u606F")}
                     onClick={() => void send()}
                     disabled={
@@ -2219,19 +2588,60 @@ export function ChatView({
           </div>
         ) : null}
         {draftState.error ? (
-          <div className="composer-error" role="alert">
-            <ExpandableText
-              text={tr("草稿保存或恢复失败：{0}", [runtimeText(draftState.error)])}
-              tone="error"
-            />
-            <button
-              className="btn btn--secondary"
-              type="button"
-              onClick={() => void composerDrafts.flush(session.id).catch(() => undefined)}
-            >
-              <RotateCcw size={14} aria-hidden="true" />
-              {tr("重试")}
-            </button>
+          <div
+            className={
+              draftState.conflict
+                ? "composer-error composer-error--draft-conflict"
+                : "composer-error"
+            }
+            role="alert"
+          >
+            {draftState.conflict ? (
+              <p className="composer-draft-conflict__message">
+                {tr("另一个窗口已更新此草稿。当前窗口的内容已保留，请选择如何处理。")}
+              </p>
+            ) : (
+              <ExpandableText
+                text={tr("草稿保存或恢复失败：{0}", [runtimeText(draftState.error)])}
+                tone="error"
+              />
+            )}
+            {draftState.conflict ? (
+              <>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  disabled={draftState.saving}
+                  onClick={() =>
+                    void composerDrafts
+                      .resolveConflict(session.id, "overwrite")
+                      .catch(() => undefined)
+                  }
+                >
+                  {tr("用本地内容覆盖")}
+                </button>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  disabled={draftState.saving}
+                  onClick={() =>
+                    void composerDrafts.resolveConflict(session.id, "reload").catch(() => undefined)
+                  }
+                >
+                  <RotateCcw size={14} aria-hidden="true" />
+                  {tr("载入最新草稿")}
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn btn--secondary"
+                type="button"
+                onClick={() => void composerDrafts.flush(session.id).catch(() => undefined)}
+              >
+                <RotateCcw size={14} aria-hidden="true" />
+                {tr("重试")}
+              </button>
+            )}
           </div>
         ) : null}
         {error ? <ExpandableText className="composer-error" text={error} tone="error" /> : null}
@@ -2650,9 +3060,11 @@ function attachmentIcon(kind: AttachmentKind) {
 function MessageAttachments({
   attachments,
   onOpenFile,
+  allowLocalFiles,
 }: {
   attachments: ChatAttachmentInput[];
   onOpenFile: (path: string) => void;
+  allowLocalFiles: boolean;
 }) {
   return (
     <fieldset className="message-attachments" aria-label={tr("\u6D88\u606F\u9644\u4EF6")}>
@@ -2674,7 +3086,7 @@ function MessageAttachments({
           </>
         );
 
-        return attachment.path ? (
+        return attachment.path && allowLocalFiles ? (
           <button
             className="message-attachment"
             type="button"
@@ -2715,6 +3127,7 @@ const MessageRow = memo(function MessageRow({
   workspacePath,
   onOpenError,
   onOpenFile,
+  allowLocalFiles,
   showAssistantHeader,
 }: {
   message: SessionMessage;
@@ -2729,6 +3142,7 @@ const MessageRow = memo(function MessageRow({
   workspacePath: string | null;
   onOpenError: (message: string) => void;
   onOpenFile: (path: string) => void;
+  allowLocalFiles: boolean;
   showAssistantHeader: boolean;
 }) {
   useLocale();
@@ -2905,11 +3319,16 @@ const MessageRow = memo(function MessageRow({
                   workspacePath={workspacePath}
                   onOpenError={onOpenError}
                   onOpenFile={onOpenFile}
+                  allowLocalFiles={allowLocalFiles}
                 />
               </div>
             ) : null}
             {attachments.length > 0 ? (
-              <MessageAttachments attachments={attachments} onOpenFile={onOpenFile} />
+              <MessageAttachments
+                attachments={attachments}
+                onOpenFile={onOpenFile}
+                allowLocalFiles={allowLocalFiles}
+              />
             ) : null}
             <fieldset className="message-actions" aria-label={tr("\u6D88\u606F\u64CD\u4F5C")}>
               <button
@@ -2989,6 +3408,7 @@ const MessageRow = memo(function MessageRow({
             workspacePath={workspacePath}
             onOpenError={onOpenError}
             onOpenFile={onOpenFile}
+            allowLocalFiles={allowLocalFiles}
           />
         </div>
       ) : null}

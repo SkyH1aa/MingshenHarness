@@ -9,6 +9,7 @@ export const READ_EVIDENCE_TOOLS = new Set([
   "glob_files",
   "code_index",
   "lsp",
+  "office_document",
 ]);
 export const LOCAL_EDIT_TOOLS = new Set([
   "write_file",

@@ -1,4 +1,4 @@
-import type { SessionView } from "./domain";
+import type { AgentMode, SessionView } from "./domain";
 
 export type SessionBatchTarget = Pick<
   SessionView,
@@ -7,6 +7,8 @@ export type SessionBatchTarget = Pick<
 
 export interface SessionPageInput {
   query?: string;
+  agentMode?: AgentMode | "workspace";
+  chatGroupId?: string | null;
   workspacePath?: string | null;
   parentId?: string | null;
   limit?: number;

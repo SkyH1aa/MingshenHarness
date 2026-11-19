@@ -34,6 +34,34 @@ vi.mock("electron", () => ({
 }));
 afterEach(() => vi.useRealTimers());
 describe("Desktop consent and tray lifecycle", () => {
+  it("toggles a focused main window to tray and restores a hidden or background window", () => {
+    const window = Object.assign(new EventEmitter(), {
+      webContents: { send: mock.send },
+      hide: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn(),
+      restore: vi.fn(),
+      isVisible: vi.fn(() => true),
+      isFocused: vi.fn(() => true),
+      isMinimized: vi.fn(() => false),
+    });
+    const repository = { getSetting: () => null, listSessions: () => [] } as unknown as Repository;
+    const controller = new DesktopController(
+      repository,
+      window as unknown as BrowserWindow,
+      "docs",
+      "icon.png",
+    );
+    controller.toggle();
+    expect(window.hide).toHaveBeenCalledOnce();
+    window.isFocused.mockReturnValue(false);
+    controller.toggle();
+    expect(window.show).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
+    window.isMinimized.mockReturnValue(true);
+    controller.toggle();
+    expect(window.restore).toHaveBeenCalledOnce();
+  });
   it("requires five seconds after policy opening and persists close preference", async () => {
     vi.useFakeTimers();
     const settings = new Map<string, unknown>();

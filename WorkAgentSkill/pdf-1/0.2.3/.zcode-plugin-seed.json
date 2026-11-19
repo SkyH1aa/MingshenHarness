@@ -1,0 +1,7 @@
+{
+  "marketplace": "zcode-plugins-official",
+  "plugin": "pdf",
+  "pluginVersion": "0.2.3",
+  "source": "filesystem",
+  "version": 1
+}

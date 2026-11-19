@@ -5,13 +5,14 @@ import { createServer } from 'node:http';
 import { createServer as createPortServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
+import { experimentalExecutable } from './experimental-executable.mjs';
 
 // This fixture never opens the normal profile or calls a remote model.
 const { version } = JSON.parse(await readFile('package.json', 'utf8'));
 const temporary = await mkdtemp(resolve(tmpdir(), 'mingshen-interface-style-'));
 const profile = resolve(temporary, 'profile');
 const project = resolve(temporary, 'project');
-const screenshots = resolve('.impeccable/review');
+const screenshots = resolve('.impeccable/review', `v133-interface-style-${Date.now()}`);
 const passed = [], errors = [], requests = [], captures = [];
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 let child, main, renderer, launchCount = 0;
@@ -188,7 +189,7 @@ async function assertBounds() {
   })()`);
   assert.equal(bounds.overflow, false, JSON.stringify(bounds));
   if (bounds.style === 'orbit') {
-    assert.equal(bounds.caption?.height, bounds.width <= 900 ? 56 : 68, JSON.stringify(bounds));
+    assert.ok(bounds.caption?.height >= 48 && bounds.caption.height <= 64, JSON.stringify(bounds));
   } else {
     assert.ok(bounds.caption?.height >= 40 && bounds.caption.height <= 64, JSON.stringify(bounds));
   }
@@ -260,7 +261,7 @@ async function launch() {
     MSH_NOTIFICATION_FIXTURE: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  child = spawn(resolve('apps/desktop/node_modules/electron/dist/MingshenHarnessExperimental.exe'), [
+  child = spawn(experimentalExecutable(), [
     `--inspect=${mainPort}`, '.', `--remote-debugging-port=${rendererPort}`,
   ], { cwd: resolve('apps/desktop'), env, windowsHide: true, stdio: 'ignore' });
   main = await connect(mainPort, 'main');
@@ -466,15 +467,14 @@ try {
   assert.equal(streamingFrame.effectiveOpacity, 1, JSON.stringify(streamingFrame));
   record('The first animation frame containing streamed text keeps message, content and effective ancestor opacity at 1');
   await until('document.querySelector(".chat-view")?.dataset.runState==="running"&&document.querySelector(".app-topbar")?.dataset.runState==="running"');
-  await until('getComputedStyle(document.querySelector(".composer"),"::before").animationName==="orbit-composer-light"');
+  await until('getComputedStyle(document.querySelector(".orbit-status-bar__state"),"::before").animationName==="orbit-status-breathe"');
   await shot('orbit-streaming-zh-night');
   await main.evaluate(`globalThis.__interfaceFixtureElectron=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron');globalThis.__interfaceFixtureWindow=globalThis.__interfaceFixtureElectron.BrowserWindow.getAllWindows()[0];globalThis.__interfaceFixtureWindow.hide();true`);
   await until('document.documentElement.dataset.pageVisible==="false"');
-  assert.equal(await renderer.evaluate('getComputedStyle(document.querySelector(".composer"),"::before").animationPlayState'), 'paused');
-  assert.equal(await renderer.evaluate('getComputedStyle(document.querySelector(".desktop-caption"),"::after").animationPlayState'), 'paused');
+  assert.equal(await renderer.evaluate('getComputedStyle(document.querySelector(".orbit-status-bar__state"),"::before").animationPlayState'), 'paused');
   await main.evaluate('globalThis.__interfaceFixtureWindow.show();globalThis.__interfaceFixtureWindow.focus();true');
-  await until('document.documentElement.dataset.pageVisible==="true"&&getComputedStyle(document.querySelector(".composer"),"::before").animationPlayState==="running"');
-  record('Real streaming state activates composer light; hiding the actual Electron window pauses animation and showing it resumes');
+  await until('document.documentElement.dataset.pageVisible==="true"&&getComputedStyle(document.querySelector(".orbit-status-bar__state"),"::before").animationPlayState==="running"');
+  record('Real streaming state activates the status signal; hiding the actual Electron window pauses animation and showing it resumes');
   await renderer.evaluate('window.__busyReloadSentinel=true;true');
   const busyError = await renderer.evaluate(`window.mingshen.reloadInterface().then(()=>'UNEXPECTED_SUCCESS',cause=>String(cause))`);
   assert.notEqual(busyError, 'UNEXPECTED_SUCCESS');

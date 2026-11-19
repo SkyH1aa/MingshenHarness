@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interactive chart explainer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --surface: #f7f9f8;
+      --panel: #ffffff;
+      --text: #17211f;
+      --muted: #5d6c68;
+      --grid: #dce5e2;
+      --accent: #087f73;
+      --focus: #0b5fff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 280px;
+      background: var(--surface);
+      color: var(--text);
+      font: 16px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    main { width: min(960px, 100%); margin: 0 auto; padding: 32px 20px; }
+    h1 { margin: 0 0 8px; font-size: 28px; line-height: 1.2; }
+    .lede { max-width: 68ch; margin: 0 0 24px; color: var(--muted); }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
+    label { font-weight: 600; }
+    select, button {
+      min-height: 40px;
+      border: 1px solid #aebbb7;
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    select { padding: 6px 32px 6px 10px; }
+    button { padding: 6px 14px; cursor: pointer; }
+    select:focus-visible, button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    figure { margin: 0; padding: 20px; background: var(--panel); border: 1px solid var(--grid); border-radius: 8px; }
+    svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .axis, .axis text, .value-label { fill: var(--muted); font-size: 12px; }
+    .axis line, .grid line { stroke: var(--grid); shape-rendering: crispEdges; }
+    .bar { fill: var(--accent); }
+    .value-label { fill: var(--text); font-weight: 600; }
+    figcaption { margin-top: 12px; color: var(--muted); font-size: 14px; }
+    #summary { margin-top: 14px; font-weight: 600; }
+    @media (max-width: 520px) {
+      main { padding: 20px 14px; }
+      h1 { font-size: 23px; }
+      figure { padding: 14px 8px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Replace with a supported assertion</h1>
+    <p class="lede">Replace this sentence with the decision, comparison, or change the chart helps the reader understand.</p>
+    <div class="controls">
+      <label for="period">Period</label>
+      <select id="period">
+        <option value="first">First period</option>
+        <option value="second">Second period</option>
+      </select>
+      <button id="reverse" type="button">Reverse order</button>
+    </div>
+    <figure>
+      <svg id="chart" viewBox="0 0 800 360" role="img" aria-labelledby="chart-title chart-desc">
+        <title id="chart-title">Category comparison</title>
+        <desc id="chart-desc">A bar chart updated from embedded sample data.</desc>
+      </svg>
+      <figcaption id="source">Replace with source, period, and units.</figcaption>
+    </figure>
+    <p id="summary" aria-live="polite"></p>
+  </main>
+  <script>
+    const data = {
+      first: [
+        { label: "Alpha", value: 42 },
+        { label: "Bravo", value: 67 },
+        { label: "Charlie", value: 54 }
+      ],
+      second: [
+        { label: "Alpha", value: 48 },
+        { label: "Bravo", value: 72 },
+        { label: "Charlie", value: 58 }
+      ]
+    };
+    const chart = document.getElementById("chart");
+    const period = document.getElementById("period");
+    const summary = document.getElementById("summary");
+    let reversed = false;
+
+    function render() {
+      const width = 800, height = 360, margin = { top: 24, right: 32, bottom: 60, left: 76 };
+      const values = [...data[period.value]].sort((a, b) => reversed ? a.value - b.value : b.value - a.value);
+      const max = Math.ceil(Math.max(...values.map(item => item.value)) / 10) * 10;
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const band = plotHeight / values.length;
+      const parts = [
+        '<g class="grid">',
+        ...Array.from({ length: 5 }, (_, index) => {
+          const x = margin.left + plotWidth * index / 4;
+          const value = max * index / 4;
+          return `<line x1="${x}" y1="${margin.top}" x2="${x}" y2="${margin.top + plotHeight}"></line>` +
+            `<text class="axis" x="${x}" y="${height - 28}" text-anchor="middle">${value}</text>`;
+        }),
+        '</g>',
+        '<g class="axis">',
+        `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + plotHeight}"></line>`,
+        '</g>'
+      ];
+      values.forEach((item, index) => {
+        const y = margin.top + index * band + band * 0.18;
+        const barHeight = band * 0.64;
+        const barWidth = plotWidth * item.value / max;
+        parts.push(`<text class="axis" x="${margin.left - 12}" y="${y + barHeight * 0.68}" text-anchor="end">${item.label}</text>`);
+        parts.push(`<rect class="bar" x="${margin.left}" y="${y}" width="${barWidth}" height="${barHeight}" rx="2"></rect>`);
+        parts.push(`<text class="value-label" x="${margin.left + barWidth + 8}" y="${y + barHeight * 0.68}">${item.value}</text>`);
+      });
+      chart.innerHTML = parts.join("");
+      summary.textContent = `Showing ${period.options[period.selectedIndex].text}. Highest value: ${values.reduce((best, item) => item.value > best.value ? item : best).label} at ${Math.max(...values.map(item => item.value))}.`;
+    }
+
+    period.addEventListener("change", render);
+    document.getElementById("reverse").addEventListener("click", () => {
+      reversed = !reversed;
+      render();
+    });
+    render();
+  </script>
+</body>
+</html>

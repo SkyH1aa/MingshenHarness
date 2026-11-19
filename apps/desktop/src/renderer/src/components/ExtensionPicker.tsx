@@ -8,43 +8,55 @@ import {
   Plus,
   Puzzle,
   Search,
+  Sparkles,
   Upload,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ExtensionImportResult, ExtensionType, ExtensionView } from "../../../shared/domain";
+import type {
+  ExtensionImportResult,
+  ExtensionView,
+  SessionBuiltinCapabilityView,
+} from "../../../shared/domain";
+import { MAX_SESSION_BUILTIN_CAPABILITIES } from "../../../shared/session-builtin-capabilities";
 import { tr } from "../i18n/index";
+import {
+  builtinCapabilityMeta,
+  builtinCapabilitySourceDetail,
+  CAPABILITY_GROUPS,
+  capabilityMatchesQuery,
+  capabilitySelectionCounts,
+} from "../lib/capability-picker";
 import { useFloatingPanel } from "../lib/use-floating-panel";
 
 interface ExtensionPickerProps {
+  builtinCapabilities: SessionBuiltinCapabilityView[];
   extensions: ExtensionView[];
   selectedIds: string[];
   disabled?: boolean;
+  attachmentsOnly?: boolean;
   onToggle: (extensionId: string, enabled: boolean) => Promise<void>;
+  onToggleBuiltin: (capabilityId: string, selected: boolean) => Promise<void>;
   onImport: () => Promise<ExtensionImportResult | null>;
   onAttachFiles: (files: File[]) => void;
 }
 
-const GROUPS: Array<{
-  type: ExtensionType;
-  label: string;
-  icon: typeof BookOpen;
-}> = [
-  { type: "skill", label: "Skills", icon: BookOpen },
-  { type: "plugin", label: "Plugins", icon: Puzzle },
-];
-
 export function ExtensionPicker({
+  builtinCapabilities,
   extensions,
   selectedIds,
   disabled = false,
+  attachmentsOnly = false,
   onToggle,
+  onToggleBuiltin,
   onImport,
   onAttachFiles,
 }: ExtensionPickerProps) {
   const [open, setOpen] = useState(false);
-  const [expanded, setExpanded] = useState<Set<ExtensionType>>(new Set(["skill", "plugin"]));
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(CAPABILITY_GROUPS.map((group) => group.key)),
+  );
   const [busyId, setBusyId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -60,15 +72,15 @@ export function ExtensionPicker({
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedSet = new Set(selectedIds);
-  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
-  const visibleExtensions = extensions.filter((extension) => {
-    if (!normalizedQuery) {
-      return true;
-    }
-    return `${extension.name} ${extension.description}`
-      .toLocaleLowerCase("zh-CN")
-      .includes(normalizedQuery);
-  });
+  const normalizedQuery = query.trim();
+  const visibleExtensions = extensions.filter((extension) =>
+    capabilityMatchesQuery(extension, normalizedQuery),
+  );
+  const visibleBuiltinCapabilities = builtinCapabilities.filter((capability) =>
+    capabilityMatchesQuery(capability, normalizedQuery),
+  );
+  const selectionCounts = capabilitySelectionCounts(builtinCapabilities, selectedIds);
+  const builtinLimitReached = selectionCounts.builtin >= MAX_SESSION_BUILTIN_CAPABILITIES;
 
   useEffect(() => {
     if (!open) {
@@ -94,6 +106,10 @@ export function ExtensionPicker({
     };
   }, [open]);
 
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   const toggleOpen = () => {
     if (disabled) {
       return;
@@ -105,23 +121,54 @@ export function ExtensionPicker({
     setOpen((current) => !current);
   };
 
-  const toggleGroup = (type: ExtensionType) => {
+  const toggleGroup = (key: string) => {
     setExpanded((current) => {
       const next = new Set(current);
-      if (next.has(type)) {
-        next.delete(type);
+      if (next.has(key)) {
+        next.delete(key);
       } else {
-        next.add(type);
+        next.add(key);
       }
       return next;
     });
   };
 
+  if (attachmentsOnly) {
+    return (
+      <>
+        <button
+          className="extension-trigger extension-trigger--attachment"
+          type="button"
+          disabled={disabled}
+          onClick={() => fileInputRef.current?.click()}
+          title={tr("上传附件")}
+          data-testid="chat-attachments"
+        >
+          <Paperclip aria-hidden="true" size={15} />
+          <span>{tr("附件")}</span>
+        </button>
+        <input
+          ref={fileInputRef}
+          className="visually-hidden"
+          type="file"
+          multiple
+          accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.pptx"
+          disabled={disabled}
+          onChange={(event) => {
+            onAttachFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
+          data-testid="chat-attachment-input"
+        />
+      </>
+    );
+  }
+
   const toggleExtension = async (extension: ExtensionView) => {
     if (busyId) {
       return;
     }
-    setBusyId(extension.id);
+    setBusyId(`installed:${extension.id}`);
     setError(null);
     try {
       await onToggle(extension.id, !selectedSet.has(extension.id));
@@ -132,8 +179,24 @@ export function ExtensionPicker({
     }
   };
 
+  const toggleBuiltinCapability = async (capability: SessionBuiltinCapabilityView) => {
+    if (busyId) {
+      return;
+    }
+    const busyKey = `builtin:${capability.id}`;
+    setBusyId(busyKey);
+    setError(null);
+    try {
+      await onToggleBuiltin(capability.id, !capability.selected);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const importLocal = async () => {
-    if (importing) {
+    if (disabled || importing) {
       return;
     }
     setImporting(true);
@@ -169,10 +232,12 @@ export function ExtensionPicker({
         disabled={disabled}
         onClick={toggleOpen}
         title={tr("\u5F15\u7528 Skills \u4E0E Plugins")}
+        aria-label={tr("\u5F15\u7528 Skills \u4E0E Plugins")}
+        data-testid="capability-picker-trigger"
       >
         <Plus aria-hidden="true" size={15} />
         <span>{tr("\u5F15\u7528")}</span>
-        {selectedIds.length > 0 ? <code>{selectedIds.length}</code> : null}
+        {selectionCounts.total > 0 ? <code>{selectionCounts.total}</code> : null}
       </button>
 
       {open
@@ -182,12 +247,13 @@ export function ExtensionPicker({
               className="extension-panel"
               role="dialog"
               aria-label={tr("\u5F15\u7528 Skills \u4E0E Plugins")}
+              data-testid="capability-picker-panel"
               style={{ ...position, zIndex: 82 }}
             >
               <header className="extension-panel__header">
                 <div>
-                  <strong>{tr("\u4F1A\u8BDD\u6269\u5C55")}</strong>
-                  <small>{tr("\u53EA\u5BF9\u5F53\u524D\u4F1A\u8BDD\u751F\u6548")}</small>
+                  <strong>{tr("\u672C\u5730\u4E0E\u5185\u7F6E\u80FD\u529B")}</strong>
+                  <small>{tr("勾选项优先，其他启用项可自动发现")}</small>
                 </div>
                 <button
                   className="icon-button icon-button--small"
@@ -205,8 +271,11 @@ export function ExtensionPicker({
                   type="search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder={tr("\u641C\u7D22\u5DF2\u5B89\u88C5\u7684 Skills \u4E0E Plugins")}
-                  aria-label={tr("\u641C\u7D22\u6269\u5C55")}
+                  placeholder={tr(
+                    "\u641C\u7D22\u5185\u7F6E\u548C\u5DF2\u5B89\u88C5\u7684 Skills \u4E0E Plugins",
+                  )}
+                  aria-label={tr("\u641C\u7D22\u672C\u5730\u4E0E\u5185\u7F6E\u80FD\u529B")}
+                  data-testid="capability-picker-search"
                 />
               </label>
 
@@ -243,19 +312,52 @@ export function ExtensionPicker({
                   }}
                 />
 
-                {GROUPS.map((group) => {
-                  const GroupIcon = group.icon;
-                  const items = visibleExtensions.filter(
-                    (extension) => extension.type === group.type && extension.enabled,
-                  );
-                  const isExpanded = Boolean(normalizedQuery) || expanded.has(group.type);
+                {CAPABILITY_GROUPS.map((group) => {
+                  const builtinItems =
+                    group.source === "builtin"
+                      ? visibleBuiltinCapabilities
+                          .filter((capability) => capability.type === group.type)
+                          .sort(
+                            (left, right) =>
+                              Number(right.selected) - Number(left.selected) ||
+                              left.name.localeCompare(right.name, "zh-CN"),
+                          )
+                      : [];
+                  const installedItems =
+                    group.source === "installed"
+                      ? visibleExtensions
+                          .filter((extension) => extension.type === group.type && extension.enabled)
+                          .sort(
+                            (left, right) =>
+                              Number(selectedSet.has(right.id)) -
+                                Number(selectedSet.has(left.id)) ||
+                              left.name.localeCompare(right.name, "zh-CN"),
+                          )
+                      : [];
+                  const itemCount =
+                    group.source === "builtin" ? builtinItems.length : installedItems.length;
+                  const selectedCount =
+                    group.source === "builtin"
+                      ? builtinItems.filter((capability) => capability.selected).length
+                      : installedItems.filter((extension) => selectedSet.has(extension.id)).length;
+                  const isExpanded = Boolean(normalizedQuery) || expanded.has(group.key);
+                  const GroupIcon =
+                    group.type === "plugin"
+                      ? Puzzle
+                      : group.source === "builtin"
+                        ? Sparkles
+                        : BookOpen;
                   return (
-                    <section className="extension-group" key={group.type}>
+                    <section
+                      className="extension-group"
+                      data-testid={`capability-group-${group.key}`}
+                      key={group.key}
+                    >
                       <button
                         className="extension-group__toggle"
                         type="button"
                         aria-expanded={isExpanded}
-                        onClick={() => toggleGroup(group.type)}
+                        onClick={() => toggleGroup(group.key)}
                       >
                         {isExpanded ? (
                           <ChevronDown aria-hidden="true" size={13} />
@@ -264,21 +366,99 @@ export function ExtensionPicker({
                         )}
                         <GroupIcon aria-hidden="true" size={14} />
                         <span>{tr(group.label)}</span>
-                        <code>{items.length}</code>
+                        <code>
+                          {selectedCount}/{itemCount}
+                        </code>
                       </button>
                       {isExpanded ? (
                         <div className="extension-group__items">
-                          {items.length === 0 ? (
+                          {itemCount === 0 ? (
                             <p>
                               {normalizedQuery
-                                ? tr("\u6CA1\u6709\u5339\u914D\u7684 {0}", [group.label])
-                                : tr("\u5C1A\u672A\u6DFB\u52A0\u53EF\u7528\u7684 {0}", [
-                                    group.label,
-                                  ])}
+                                ? tr("\u6CA1\u6709\u5339\u914D\u7684 {0}", [tr(group.label)])
+                                : group.source === "builtin"
+                                  ? tr(
+                                      "\u5F53\u524D\u6A21\u5F0F\u6CA1\u6709\u53EF\u7528\u7684 {0}",
+                                      [tr(group.label)],
+                                    )
+                                  : tr("\u5C1A\u672A\u6DFB\u52A0\u53EF\u7528\u7684 {0}", [
+                                      tr(group.label),
+                                    ])}
                             </p>
+                          ) : group.source === "builtin" ? (
+                            builtinItems.map((capability) => {
+                              const selected = capability.selected;
+                              const busyKey = `builtin:${capability.id}`;
+                              const meta = builtinCapabilityMeta(capability);
+                              const sourceDetail = builtinCapabilitySourceDetail(capability);
+                              const sourceTitle = [
+                                capability.sourcePath
+                                  ? `${tr("来源路径")}：${capability.sourcePath}`
+                                  : null,
+                                capability.sourceSha256
+                                  ? `SHA-256：${capability.sourceSha256}`
+                                  : null,
+                              ]
+                                .filter(Boolean)
+                                .join("\n");
+                              return (
+                                <button
+                                  className={
+                                    selected
+                                      ? "extension-item extension-item--builtin extension-item--selected"
+                                      : "extension-item extension-item--builtin"
+                                  }
+                                  type="button"
+                                  aria-pressed={selected}
+                                  data-testid="builtin-capability-item"
+                                  data-capability-id={capability.id}
+                                  data-capability-type={capability.type}
+                                  key={capability.id}
+                                  title={[
+                                    capability.name,
+                                    capability.description,
+                                    meta,
+                                    sourceTitle,
+                                    !selected && builtinLimitReached
+                                      ? tr(
+                                          "\u6700\u591A\u5F15\u7528 {0} \u4E2A\u5185\u7F6E\u80FD\u529B",
+                                          [MAX_SESSION_BUILTIN_CAPABILITIES],
+                                        )
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                  onClick={() => void toggleBuiltinCapability(capability)}
+                                  disabled={
+                                    disabled ||
+                                    Boolean(busyId) ||
+                                    (!selected && builtinLimitReached)
+                                  }
+                                >
+                                  <span className="extension-item__check">
+                                    {busyId === busyKey ? (
+                                      <LoaderCircle className="spin" aria-hidden="true" size={13} />
+                                    ) : selected ? (
+                                      <Check aria-hidden="true" size={13} />
+                                    ) : null}
+                                  </span>
+                                  <span className="extension-item__copy">
+                                    <strong>{capability.name}</strong>
+                                    <small>{capability.description}</small>
+                                    {sourceDetail ? (
+                                      <span className="extension-item__source" title={sourceTitle}>
+                                        {sourceDetail}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  {meta ? <code>{meta}</code> : null}
+                                </button>
+                              );
+                            })
                           ) : (
-                            items.map((extension) => {
+                            installedItems.map((extension) => {
                               const selected = selectedSet.has(extension.id);
+                              const busyKey = `installed:${extension.id}`;
                               return (
                                 <button
                                   className={
@@ -288,12 +468,15 @@ export function ExtensionPicker({
                                   }
                                   type="button"
                                   aria-pressed={selected}
+                                  data-testid="installed-capability-item"
+                                  data-capability-id={extension.id}
+                                  data-capability-type={extension.type}
                                   key={extension.id}
                                   onClick={() => void toggleExtension(extension)}
-                                  disabled={Boolean(busyId)}
+                                  disabled={disabled || Boolean(busyId)}
                                 >
                                   <span className="extension-item__check">
-                                    {busyId === extension.id ? (
+                                    {busyId === busyKey ? (
                                       <LoaderCircle className="spin" aria-hidden="true" size={13} />
                                     ) : selected ? (
                                       <Check aria-hidden="true" size={13} />
@@ -329,8 +512,9 @@ export function ExtensionPicker({
                 <button
                   className="btn btn--secondary"
                   type="button"
+                  data-testid="capability-import"
                   onClick={() => void importLocal()}
-                  disabled={importing}
+                  disabled={disabled || importing}
                 >
                   {importing ? (
                     <LoaderCircle className="spin" aria-hidden="true" size={14} />

@@ -49,6 +49,7 @@ import type {
   QuestionState,
   ScheduledTaskCreateInput,
   ScheduledTaskView,
+  SessionBuiltinCapabilityView,
   SessionCreateInput,
   SessionMessage,
   SessionRetentionSettings,
@@ -67,6 +68,12 @@ import type {
   WorkspaceGitStatus,
 } from "./domain";
 import type {
+  LocalPluginInstallResult,
+  LocalPluginMarketSource,
+  LocalPluginMarketView,
+  LocalPluginValidation,
+} from "./local-plugins";
+import type {
   ModelCatalogPreferences,
   MoveCatalogProviderInput,
   SetCatalogModelStarInput,
@@ -79,6 +86,21 @@ import type {
   ProjectMemorySelection,
   ProjectMemoryView,
 } from "./project-memory";
+import type {
+  QueuedPromptAddInput,
+  QueuedPromptContinueResult,
+  QueuedPromptReorderInput,
+  QueuedPromptUpdateInput,
+  QueuedPromptView,
+} from "./queued-prompt";
+import type {
+  DesktopShortcutSettings,
+  DesktopShortcutState,
+  DesktopShortcutStatus,
+  DesktopShortcutUpdateResult,
+  QuickChatAction,
+  QuickChatState,
+} from "./quick-chat";
 import type { RendererErrorReport, RuntimeLogStatus } from "./runtime-log";
 import type { SessionBatchTarget } from "./session-catalog";
 import type { TokenSaverSettings, TokenSaverSnapshot } from "./token-saver";
@@ -107,6 +129,12 @@ export const IPC_CHANNELS = {
   desktopState: "desktop:state",
   desktopAction: "desktop:action",
   desktopEvent: "desktop:event",
+  desktopShortcutsGet: "desktop:shortcuts-get",
+  desktopShortcutsSet: "desktop:shortcuts-set",
+  desktopShortcutRecording: "desktop:shortcut-recording",
+  quickChatState: "quick-chat:state",
+  quickChatAction: "quick-chat:action",
+  quickChatEvent: "quick-chat:event",
   completionState: "notifications:state",
   completionConfigure: "notifications:configure",
   completionActiveSession: "notifications:active-session",
@@ -157,10 +185,19 @@ export const IPC_CHANNELS = {
   composerDraftGet: "composer:draft-get",
   composerDraftSave: "composer:draft-save",
   composerDraftClear: "composer:draft-clear",
+  composerDraftChanged: "composer:draft-changed",
   composerDraftFlushRequest: "composer:draft-flush-request",
   composerDraftFlushAck: "composer:draft-flush-ack",
   chatRewrite: "chat:rewrite",
   chatStop: "chat:stop",
+  queuedPromptList: "chat:queue-list",
+  queuedPromptAdd: "chat:queue-add",
+  queuedPromptUpdate: "chat:queue-update",
+  queuedPromptReorder: "chat:queue-reorder",
+  queuedPromptRemove: "chat:queue-remove",
+  queuedPromptContinue: "chat:queue-continue",
+  queuedPromptBeginEdit: "chat:queue-begin-edit",
+  queuedPromptEndEdit: "chat:queue-end-edit",
   chatCompact: "chat:compact",
   approvalDecide: "approval:decide",
   approvalState: "approval:state",
@@ -193,6 +230,8 @@ export const IPC_CHANNELS = {
   extensionsRemove: "extensions:remove",
   sessionExtensionsList: "session-extensions:list",
   sessionExtensionsSet: "session-extensions:set",
+  sessionBuiltinCapabilitiesList: "session-builtin-capabilities:list",
+  sessionBuiltinCapabilitySet: "session-builtin-capability:set",
   scheduledTasksList: "scheduled-tasks:list",
   scheduledTasksCreate: "scheduled-tasks:create",
   scheduledTasksSetEnabled: "scheduled-tasks:set-enabled",
@@ -200,6 +239,14 @@ export const IPC_CHANNELS = {
   scheduledTasksRunNow: "scheduled-tasks:run-now",
   marketplaceList: "marketplace:list",
   marketplaceInstall: "marketplace:install",
+  localPluginValidate: "local-plugins:validate",
+  localPluginMarketsList: "local-plugins:markets-list",
+  localPluginMarketAdd: "local-plugins:market-add",
+  localPluginMarketGet: "local-plugins:market-get",
+  localPluginMarketRefresh: "local-plugins:market-refresh",
+  localPluginMarketRemove: "local-plugins:market-remove",
+  localPluginInstall: "local-plugins:install",
+  localPluginUpdate: "local-plugins:update",
   mcpList: "mcp:list",
   mcpSave: "mcp:save",
   mcpRemove: "mcp:remove",
@@ -231,6 +278,10 @@ export const IPC_CHANNELS = {
   sessionDelta: "session:delta",
   sessionGet: "session:get",
   sessionGroups: "session:groups",
+  chatGroupsList: "chat-groups:list",
+  chatGroupCreate: "chat-groups:create",
+  chatGroupRename: "chat-groups:rename",
+  chatGroupRemove: "chat-groups:remove",
   toolingStatus: "tooling:status",
   customToolsList: "tools:custom-list",
   agentRuntimeSettingsGet: "agents:runtime-settings-get",
@@ -329,7 +380,17 @@ export interface MingshenDesktopApi {
     closeAction: "ask" | "tray" | "quit";
     githubClientId: string;
     maximized: boolean;
+    shortcuts?: DesktopShortcutStatus;
+    shortcutBindings?: DesktopShortcutSettings;
   }>;
+  getDesktopShortcutSettings(): Promise<DesktopShortcutState>;
+  setDesktopShortcutSettings(
+    settings: DesktopShortcutSettings,
+  ): Promise<DesktopShortcutUpdateResult>;
+  setDesktopShortcutRecording(recording: boolean): Promise<void>;
+  getQuickChatState(): Promise<QuickChatState>;
+  quickChatAction(action: QuickChatAction): Promise<QuickChatState | null>;
+  onQuickChatState(listener: (state: QuickChatState) => void): () => void;
   desktopAction(
     action:
       | "minimize"
@@ -352,7 +413,9 @@ export interface MingshenDesktopApi {
         | "close-request"
         | "select-session"
         | "window-state"
+        | "shortcuts-changed"
         | "open-manual"
+        | "open-provider-settings"
         | "composer-draft-error"
         | "notification-reply-failed";
       sessionId?: string;
@@ -377,6 +440,10 @@ export interface MingshenDesktopApi {
   ): Promise<import("./session-catalog").SessionCatalogDelta>;
   getSession(sessionId: string): Promise<SessionView | null>;
   listSessionGroups(): Promise<import("./session-catalog").SessionWorkspaceGroup[]>;
+  listChatGroups(): Promise<import("./domain").ChatGroupView[]>;
+  createChatGroup(name: string): Promise<import("./domain").ChatGroupView>;
+  renameChatGroup(id: string, name: string): Promise<import("./domain").ChatGroupView>;
+  removeChatGroup(id: string): Promise<void>;
   chooseWorkspace(): Promise<string | null>;
   getModelCatalogPreferences(): Promise<ModelCatalogPreferences>;
   moveCatalogProvider(input: MoveCatalogProviderInput): Promise<ModelCatalogPreferences>;
@@ -398,7 +465,10 @@ export interface MingshenDesktopApi {
   updateModel(input: ModelUpdateInput): Promise<ProviderView>;
   removeModel(modelConfigId: string): Promise<ProviderView>;
   createSession(input: SessionCreateInput): Promise<SessionView>;
-  createSessionInWorkspace(workspacePath: string | null): Promise<SessionView>;
+  createSessionInWorkspace(
+    workspacePath: string | null,
+    agentMode?: "code" | "work",
+  ): Promise<SessionView>;
   forkSession(sessionId: string, messageId?: string): Promise<SessionView>;
   openSessionWorkspace(sessionId: string): Promise<void>;
   updateSession(input: SessionUpdateInput, expected?: SessionBatchTarget[]): Promise<SessionView>;
@@ -416,8 +486,19 @@ export interface MingshenDesktopApi {
     listener: (requestId: string, purpose: ComposerDraftFlushPurpose) => void,
   ): () => void;
   acknowledgeComposerDraftFlush(requestId: string, error?: string): void;
+  onComposerDraftChanged(
+    listener: (change: { sessionId: string; revision: string | null }) => void,
+  ): () => void;
   rewriteAndSendChat(input: ChatRewriteInput): Promise<{ runId: string }>;
   stopChat(sessionId: string): Promise<void>;
+  listQueuedPrompts(sessionId: string): Promise<QueuedPromptView[]>;
+  addQueuedPrompt(input: QueuedPromptAddInput): Promise<QueuedPromptView>;
+  updateQueuedPrompt(input: QueuedPromptUpdateInput): Promise<QueuedPromptView>;
+  reorderQueuedPrompts(input: QueuedPromptReorderInput): Promise<QueuedPromptView[]>;
+  removeQueuedPrompt(sessionId: string, itemId: string): Promise<void>;
+  continueQueuedPrompt(sessionId: string, itemId: string): Promise<QueuedPromptContinueResult>;
+  beginQueuedPromptEdit(sessionId: string, itemId: string): Promise<string>;
+  endQueuedPromptEdit(sessionId: string, editId: string, abandon?: boolean): Promise<void>;
   compactChat(sessionId: string): Promise<{ runId: string }>;
   decideApproval(input: ApprovalDecision): Promise<void>;
   getApprovalState(): Promise<ApprovalState>;
@@ -450,6 +531,12 @@ export interface MingshenDesktopApi {
   removeExtension(extensionId: string): Promise<void>;
   listSessionExtensions(sessionId: string): Promise<string[]>;
   setSessionExtension(sessionId: string, extensionId: string, enabled: boolean): Promise<void>;
+  listSessionBuiltinCapabilities(sessionId: string): Promise<SessionBuiltinCapabilityView[]>;
+  setSessionBuiltinCapability(
+    sessionId: string,
+    capabilityId: string,
+    selected: boolean,
+  ): Promise<void>;
   listScheduledTasks(): Promise<ScheduledTaskView[]>;
   createScheduledTask(input: ScheduledTaskCreateInput): Promise<ScheduledTaskView>;
   setScheduledTaskEnabled(taskId: string, enabled: boolean): Promise<ScheduledTaskView>;
@@ -463,6 +550,14 @@ export interface MingshenDesktopApi {
     source: MarketplaceSkill["source"],
     path: string,
   ): Promise<MarketplaceInstallResult>;
+  validateLocalPlugin(rootPath: string): Promise<LocalPluginValidation>;
+  listLocalPluginMarkets(): Promise<LocalPluginMarketSource[]>;
+  addLocalPluginMarket(path: string): Promise<LocalPluginMarketView>;
+  getLocalPluginMarket(id: string): Promise<LocalPluginMarketView>;
+  refreshLocalPluginMarket(id: string): Promise<LocalPluginMarketView>;
+  removeLocalPluginMarket(id: string): Promise<void>;
+  installLocalPlugin(marketId: string, pluginName: string): Promise<LocalPluginInstallResult>;
+  updateLocalPlugin(marketId: string, pluginName: string): Promise<LocalPluginInstallResult>;
   listMcpServers(): Promise<McpServerView[]>;
   saveMcpServer(input: McpServerSaveInput): Promise<McpServerView>;
   removeMcpServer(id: string): Promise<void>;

@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Check,
+  CircleAlert,
   Download,
   Languages,
   LoaderCircle,
@@ -16,6 +17,10 @@ import type {
   PolicyDocument,
   UpdateStatus,
 } from "../../../shared/desktop";
+import {
+  DEFAULT_DESKTOP_SHORTCUTS,
+  formatDesktopShortcut,
+} from "../../../shared/desktop-shortcuts";
 import { setLocale, useLocale } from "../i18n";
 import { tr } from "../i18n/index";
 import { MarkdownLite } from "./MarkdownLite";
@@ -152,6 +157,12 @@ export function DesktopShell({ children }: { children: ReactNode }) {
           setState((current) =>
             current ? { ...current, maximized: event.maximized ?? false } : current,
           );
+        if (event.type === "shortcuts-changed") {
+          void window.mingshen
+            .getDesktopState()
+            .then(setState)
+            .catch((cause) => setError(String(cause)));
+        }
       }),
     [],
   );
@@ -257,6 +268,24 @@ export function DesktopShell({ children }: { children: ReactNode }) {
       setBusy(false);
     }
   };
+  const unavailableShortcuts = state?.shortcuts
+    ? [
+        ...(!state.shortcuts.quickChat
+          ? [
+              formatDesktopShortcut(
+                state.shortcutBindings?.quickChat ?? DEFAULT_DESKTOP_SHORTCUTS.quickChat,
+              ),
+            ]
+          : []),
+        ...(!state.shortcuts.toggleMain
+          ? [
+              formatDesktopShortcut(
+                state.shortcutBindings?.toggleMain ?? DEFAULT_DESKTOP_SHORTCUTS.toggleMain,
+              ),
+            ]
+          : []),
+      ]
+    : [];
   return (
     <div className="desktop-shell">
       <header className="desktop-caption">
@@ -264,6 +293,21 @@ export function DesktopShell({ children }: { children: ReactNode }) {
           <span className="desktop-caption__name">Mingshen Harness</span>
         </div>
         <div className="desktop-caption__actions">
+          {unavailableShortcuts.length ? (
+            <span
+              className="desktop-caption__shortcut-warning"
+              data-testid="desktop-shortcut-warning"
+              role="status"
+              title={tr("全局快捷键未注册：{0}。可能已被其他应用占用，可从托盘打开。", [
+                unavailableShortcuts.join("、"),
+              ])}
+              aria-label={tr("全局快捷键未注册：{0}。可能已被其他应用占用，可从托盘打开。", [
+                unavailableShortcuts.join("、"),
+              ])}
+            >
+              <CircleAlert size={15} strokeWidth={1.8} aria-hidden="true" />
+            </span>
+          ) : null}
           {update?.release && !["idle", "current", "checking"].includes(update.state) ? (
             <button
               type="button"

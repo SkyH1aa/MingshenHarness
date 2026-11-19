@@ -186,6 +186,13 @@ export function WorkspacePanel({
   const reviewFiles = [...changes.values()];
   const selectedReviewChange =
     reviewFiles.find((change) => change.path === reviewPath) ?? reviewFiles[0] ?? null;
+  const selectedReviewPath = selectedReviewChange
+    ? ((root ? workspaceRelativePath(root, selectedReviewChange.path) : null) ??
+      selectedReviewChange.path)
+    : "";
+  const selectedReviewSegments = selectedReviewPath.replaceAll("\\", "/").split("/");
+  const selectedReviewName = selectedReviewSegments.pop() || selectedReviewPath;
+  const selectedReviewDirectory = selectedReviewSegments.join("/");
 
   useEffect(() => {
     if (!preferencesReady || initializedStyle.current) return;
@@ -366,6 +373,7 @@ export function WorkspacePanel({
             role="tab"
             aria-selected={tab === "review"}
             data-workspace-tab="review"
+            title={en ? "Review" : "审查"}
             onClick={() => setTab("review")}
           >
             <GitBranch size={14} aria-hidden="true" />
@@ -380,6 +388,7 @@ export function WorkspacePanel({
             role="tab"
             aria-selected={tab === "files"}
             data-workspace-tab="files"
+            title={tr("文件")}
             onClick={() => setTab("files")}
           >
             <Files aria-hidden="true" size={14} />
@@ -404,6 +413,7 @@ export function WorkspacePanel({
             role="tab"
             aria-selected={tab === "terminal"}
             data-workspace-tab="terminal"
+            title={tr("终端")}
             onClick={() => setTab("terminal")}
           >
             <SquareTerminal aria-hidden="true" size={14} />
@@ -471,24 +481,41 @@ export function WorkspacePanel({
           ) : orbit ? (
             <>
               <div className="orbit-review-files">
-                {reviewFiles.map((change) => (
-                  <button
-                    className={`orbit-review-file${selectedReviewChange?.path === change.path ? " orbit-review-file--selected" : ""}`}
-                    type="button"
-                    key={change.path}
-                    data-review-file={change.path}
-                    aria-pressed={selectedReviewChange?.path === change.path}
-                    title={change.path}
-                    onClick={() => setReviewPath(change.path)}
-                  >
-                    <FileCode2 aria-hidden="true" size={15} />
-                    <span className="orbit-review-file__name">
-                      {change.path.split(/[\\/]/).at(-1)}
-                    </span>
-                    <span className="run-summary__added">+{change.additions}</span>
-                    <span className="run-summary__deleted">-{change.deletions}</span>
-                  </button>
-                ))}
+                {reviewFiles.map((change) => {
+                  const displayPath =
+                    (root ? workspaceRelativePath(root, change.path) : null) ?? change.path;
+                  const segments = displayPath.replaceAll("\\", "/").split("/");
+                  const name = segments.pop() || displayPath;
+                  const directory = segments.join("/");
+                  return (
+                    <button
+                      className={`orbit-review-file${selectedReviewChange?.path === change.path ? " orbit-review-file--selected" : ""}`}
+                      type="button"
+                      key={change.path}
+                      data-review-file={change.path}
+                      aria-pressed={selectedReviewChange?.path === change.path}
+                      title={change.path}
+                      aria-label={
+                        en
+                          ? `${displayPath}, ${change.additions} additions, ${change.deletions} deletions`
+                          : `${displayPath}，新增 ${change.additions} 行，删除 ${change.deletions} 行`
+                      }
+                      onClick={() => setReviewPath(change.path)}
+                    >
+                      <FileCode2 aria-hidden="true" size={15} />
+                      <span className="orbit-review-file__copy">
+                        <span className="orbit-review-file__name">{name}</span>
+                        {directory ? (
+                          <span className="orbit-review-file__path" dir="rtl">
+                            <bdi dir="ltr">{directory}</bdi>
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="run-summary__added">+{change.additions}</span>
+                      <span className="run-summary__deleted">-{change.deletions}</span>
+                    </button>
+                  );
+                })}
               </div>
               {selectedReviewChange ? (
                 <section className="orbit-review-preview">
@@ -496,6 +523,7 @@ export function WorkspacePanel({
                     <button
                       type="button"
                       title={selectedReviewChange.path}
+                      aria-label={selectedReviewPath}
                       onClick={() => {
                         const relative = root
                           ? workspaceRelativePath(root, selectedReviewChange.path)
@@ -504,7 +532,12 @@ export function WorkspacePanel({
                         else void openAbsoluteFile(selectedReviewChange.path);
                       }}
                     >
-                      <code>{selectedReviewChange.path.split(/[\\/]/).at(-1)}</code>
+                      <code className="orbit-review-file__name">{selectedReviewName}</code>
+                      {selectedReviewDirectory ? (
+                        <span className="orbit-review-file__path" dir="rtl">
+                          <bdi dir="ltr">{selectedReviewDirectory}</bdi>
+                        </span>
+                      ) : null}
                     </button>
                     {selectedReviewChange.diff ? (
                       <CopyButton

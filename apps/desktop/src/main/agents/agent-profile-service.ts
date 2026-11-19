@@ -179,6 +179,30 @@ function normalizePermissions(value: unknown): AgentPermissionMap {
   return output;
 }
 
+function normalizeApplicableModes(value: unknown): Array<"code" | "work"> {
+  if (value === undefined) return ["code", "work"];
+  if (typeof value === "string") {
+    const configured = value.split(/[,\s]+/).filter(Boolean);
+    if (!configured.length || configured.some((item) => item !== "code" && item !== "work"))
+      throw new Error("Agent 适用模式只能包含 code 和 work。");
+    return [...new Set(configured)] as Array<"code" | "work">;
+  }
+  if (!Array.isArray(value) || value.some((item) => item !== "code" && item !== "work"))
+    throw new Error("Agent 适用模式只能包含 code 和 work。");
+  const modes = [...new Set(value)] as Array<"code" | "work">;
+  if (!modes.length) throw new Error("Agent 至少需要适用于 CodeAgent 或 WorkAgent。");
+  return modes;
+}
+
+function syncedApplicableModes(
+  value: unknown,
+  existing: AgentProfileView | null,
+): Array<"code" | "work"> {
+  return value === undefined
+    ? (existing?.applicableModes ?? ["code", "work"])
+    : normalizeApplicableModes(value);
+}
+
 function normalize(input: AgentProfileSaveInput): AgentProfileSaveInput {
   const name = input.name.trim();
   const description = input.description.trim();
@@ -203,6 +227,7 @@ function normalize(input: AgentProfileSaveInput): AgentProfileSaveInput {
     description,
     instructions,
     modelId: input.modelId?.trim() || null,
+    applicableModes: normalizeApplicableModes(input.applicableModes),
   };
 }
 
@@ -261,6 +286,10 @@ export class AgentProfileService {
       );
       const hash = createHash("sha256").update(content).digest("hex");
       const existing = this.repository.findAgentProfileBySource(file);
+      const applicableModes = syncedApplicableModes(
+        metadata.applicable_modes ?? metadata.applicableModes,
+        existing,
+      );
       this.repository.saveAgentProfile({
         ...(existing ? { id: existing.id } : {}),
         name:
@@ -288,6 +317,7 @@ export class AgentProfileService {
         topP: typeof metadata.top_p === "number" ? metadata.top_p : null,
         maxSteps: typeof metadata.steps === "number" ? metadata.steps : null,
         color: typeof metadata.color === "string" ? metadata.color : null,
+        applicableModes,
       });
     }
 
@@ -354,6 +384,10 @@ export class AgentProfileService {
             ? this.repository.getAgentProfile("primary")
             : this.repository.getAgentProfile(name);
         const existing = this.repository.findAgentProfileBySource(sourcePath) ?? builtin;
+        const applicableModes = syncedApplicableModes(
+          entry.applicable_modes ?? entry.applicableModes,
+          existing,
+        );
         this.repository.saveAgentProfile({
           ...(existing ? { id: existing.id } : {}),
           name,
@@ -380,6 +414,7 @@ export class AgentProfileService {
                 ? entry.maxSteps
                 : null,
           color: typeof entry.color === "string" ? entry.color : null,
+          applicableModes,
         });
       }
     }

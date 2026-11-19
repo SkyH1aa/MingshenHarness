@@ -14,6 +14,7 @@ const ELIGIBLE = new Set([
   "apply_patch",
   "delete_file",
   "create_document",
+  "office_document",
   "run_command",
 ]);
 const chainSchema = z

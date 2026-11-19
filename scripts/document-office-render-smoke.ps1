@@ -46,7 +46,7 @@ try {
   $word.Visible = $false
   $word.DisplayAlerts = 0
   $word.AutomationSecurity = 3
-  foreach ($name in @('native-math.docx', 'filled-template.docx', 'table-math.docx')) {
+  foreach ($name in @('native-math.docx', 'filled-template.docx', 'table-math.docx', 'old-draft.docx', 'revised-draft.docx')) {
     $source = Join-Path $evidence $name
     $document = $null
     try {
@@ -56,6 +56,8 @@ try {
         'native-math.docx' { 8 }
         'filled-template.docx' { 3 }
         'table-math.docx' { 10 }
+        'old-draft.docx' { 1 }
+        'revised-draft.docx' { 2 }
       }
       if ($equations -lt $minimum) {
         throw "Word recognized $equations equations in $name, expected at least $minimum."
@@ -83,6 +85,56 @@ try {
       if ($name -eq 'native-math.docx' -and $document.Content.Text -notmatch 'Bold and italic with ') {
         throw 'Word did not preserve Markdown whitespace across formatted runs.'
       }
+      $draftLayout = $null
+      if ($name -in @('old-draft.docx', 'revised-draft.docx')) {
+        if ($document.Sections.Item(1).Headers.Item(1).Range.Text -notmatch 'DRAFT_HEADER_KEEP_133' -or
+            $document.Sections.Item(1).Footers.Item(1).Range.Text -notmatch 'DRAFT_FOOTER_KEEP_133') {
+          throw "Word lost the original draft header/footer in $name."
+        }
+        if ($document.InlineShapes.Count -ne 1) { throw "Word lost the original image in $name." }
+        $expectedNotes = if ($name -eq 'old-draft.docx') { 1 } else { 2 }
+        if ($document.Footnotes.Count -ne $expectedNotes) { throw "Word lost draft notes in $name." }
+      }
+      if ($name -eq 'revised-draft.docx') {
+        $bodyText = [string]$document.Content.Text
+        if ($bodyText -notmatch 'Before revised draft after\.' -or $bodyText -notmatch 'Cell updated' -or
+            $bodyText -match 'Replace this section|Remove this paragraph') {
+          throw 'Word did not recognize the revised draft text.'
+        }
+        $range = $null
+        $paragraph = $null
+        $format = $null
+        try {
+          $range = $document.Content.Duplicate
+          if (-not $range.Find.Execute('Keep final paragraph')) { throw 'Revised layout paragraph missing.' }
+          $paragraph = $range.Paragraphs.Item(1)
+          $format = $paragraph.Format
+          $firstWidth = [double]$document.Tables.Item(1).Columns.Item(1).Width
+          $secondWidth = [double]$document.Tables.Item(1).Columns.Item(2).Width
+          $draftLayout = [pscustomobject]@{
+            firstLineIndentPoints = [double]$format.FirstLineIndent
+            spaceAfterPoints = [double]$format.SpaceAfter
+            lineSpacingPoints = [double]$format.LineSpacing
+            lineSpacingRule = [int]$format.LineSpacingRule
+            alignment = [int]$format.Alignment
+            keepTogether = [bool]$format.KeepTogether
+            tableColumnRatio = $secondWidth / $firstWidth
+            equationJustification = [int]$document.OMaths.Item(1).Justification
+          }
+          if ([Math]::Abs($draftLayout.firstLineIndentPoints - 18) -gt 0.2 -or
+              [Math]::Abs($draftLayout.spaceAfterPoints - 8) -gt 0.2 -or
+              $draftLayout.lineSpacingPoints -lt 15 -or
+              $draftLayout.alignment -ne 3 -or -not $draftLayout.keepTogether -or
+              [Math]::Abs($draftLayout.tableColumnRatio - 3) -gt 0.1 -or
+              $draftLayout.equationJustification -ne 3) {
+            throw "Word paragraph/table layout mismatch: $($draftLayout | ConvertTo-Json -Compress)"
+          }
+        } finally {
+          foreach ($com in @($format, $paragraph, $range)) {
+            if ($null -ne $com) { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) | Out-Null }
+          }
+        }
+      }
       $document.Fields.Update() | Out-Null
       $document.Repaginate()
       $pdf = Join-Path $output ($name -replace '\.docx$', '.pdf')
@@ -95,6 +147,7 @@ try {
         tableColumns = $tableColumns
         pages = $document.ComputeStatistics(2)
         footnotes = $document.Footnotes.Count
+        draftLayout = $draftLayout
         pdf = $pdf
       }
     } finally {
@@ -199,6 +252,7 @@ $report = [pscustomobject]@{
   nativeEquationEditSaveReopen = $true
   tableCellNativeEquationEditSaveReopen = $true
   markdownWhitespacePreserved = $true
+  oldDraftTextAndLayoutPreserved = $true
   boundary = 'Generated fixtures only. Word rendering is not a full Windows/Office compatibility matrix.'
 }
 $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'result.json') -Encoding UTF8

@@ -29,7 +29,7 @@ interface MarketCache {
 }
 
 const CACHE_TTL_MS = 6 * 60 * 60_000;
-const MAX_SKILL_FILES = 1_000;
+const MAX_SKILL_FILES = 20_000;
 const MAX_SKILL_BYTES = 64 * 1024 * 1024;
 
 type MarketplaceSource = MarketplaceSkill["source"];
@@ -194,7 +194,7 @@ export class SkillMarketplaceService {
       throw new Error("该技能目录没有任何可安装文件。");
     }
     if (files.length > MAX_SKILL_FILES) {
-      throw new Error("技能文件数量过多，已停止安装。");
+      throw new Error(`技能文件数量超过 ${MAX_SKILL_FILES} 个，已停止安装。`);
     }
     const totalBytes = files.reduce(
       (total, entry) => total + (typeof entry.size === "number" ? entry.size : 0),

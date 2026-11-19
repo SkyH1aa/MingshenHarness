@@ -1,6 +1,6 @@
 # Mingshen Harness Disclaimer
 
-Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.2.
+Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.3.
 
 Read this disclaimer together with the Terms of Service and Privacy Policy. Ming
 and 新哲文院算法社 are referred to as the Provider. This document describes the

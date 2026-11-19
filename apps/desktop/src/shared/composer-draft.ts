@@ -15,6 +15,7 @@ export interface ComposerDraft {
 
 export interface SaveComposerDraftInput {
   sessionId: string;
+  baseRevision?: string | null;
   revision: string;
   text: string;
   formatted: boolean;
@@ -23,10 +24,13 @@ export interface SaveComposerDraftInput {
   notificationDraftIds: string[];
 }
 
+export const COMPOSER_DRAFT_CONFLICT_CODE = "COMPOSER_DRAFT_CONFLICT";
+export const COMPOSER_DRAFT_CONFLICT_MESSAGE = `${COMPOSER_DRAFT_CONFLICT_CODE}: 草稿已在其他窗口更新。本地内容仍保留，请明确选择覆盖最新草稿或载入最新版本。`;
+
 export const MAX_COMPOSER_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_COMPOSER_NOTIFICATION_IDS = 128;
 
-function validAttachmentBytes(dataUrl: string, size: number): boolean {
+export function validAttachmentBytes(dataUrl: string, size: number): boolean {
   const comma = dataUrl.indexOf(",");
   if (comma < 0 || comma > 1024 || !/^data:[^,\s]*;base64$/i.test(dataUrl.slice(0, comma)))
     return false;
@@ -70,6 +74,8 @@ export function validateComposerDraftId(value: unknown): asserts value is string
 export function validateComposerDraftInput(input: SaveComposerDraftInput): void {
   if (!input || typeof input !== "object") throw new Error("Invalid composer draft.");
   validateComposerDraftId(input.sessionId);
+  if (input.baseRevision !== undefined && input.baseRevision !== null)
+    validateComposerDraftId(input.baseRevision);
   validateComposerDraftId(input.revision);
   if (typeof input.text !== "string" || typeof input.formatted !== "boolean")
     throw new Error("Invalid composer draft content.");
@@ -82,6 +88,11 @@ export function validateComposerDraftInput(input: SaveComposerDraftInput): void 
     throw new Error("Too many composer notification references.");
   if (input.addedAttachments !== undefined && !Array.isArray(input.addedAttachments))
     throw new Error("Invalid composer draft attachments.");
+}
+
+export function isComposerDraftConflict(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return message.includes(`${COMPOSER_DRAFT_CONFLICT_CODE}:`);
 }
 
 export function validateComposerDraftAttachment(

@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { spawn as spawnPortable } from "cross-spawn";
 import type {
   McpOAuthStartResult,
@@ -14,6 +14,11 @@ import type {
 import { APP_VERSION } from "../../shared/release";
 import type { McpServerConfig } from "../agents/project-config-service";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
+import {
+  expandPluginRootTokens,
+  loadLocalPluginJsonDeclaration,
+  PLUGIN_ROOT_TOKENS,
+} from "../extensions/local-plugin-manifest";
 import type { StreamToolDefinition } from "../providers/model-stream";
 import { redactSecrets } from "../security/redact";
 import type { Repository } from "../storage/repository";
@@ -54,6 +59,10 @@ interface StdioConnection {
 interface HttpConnection {
   sessionId: string | null;
   nextId: number;
+}
+
+interface PluginMcpSaveInput extends McpServerSaveInput {
+  id: string;
 }
 
 export interface McpToolDefinition extends StreamToolDefinition {
@@ -148,18 +157,65 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function pluginSecretValues(value: unknown, extensionPath: string): Record<string, string> {
+function containsPluginRootToken(value: string): boolean {
+  return PLUGIN_ROOT_TOKENS.some((token) => value.includes(token));
+}
+
+function assertPluginPathWithinRoot(pluginRoot: string, target: string): string {
+  const root = resolve(pluginRoot);
+  const resolvedTarget = resolve(target);
+  const local = relative(root, resolvedTarget);
+  if (local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) {
+    throw new Error("Plugin root token resolved outside the installed plugin directory.");
+  }
+  return resolvedTarget;
+}
+
+function expandPluginPathValue(value: string, pluginRoot: string): string {
+  if (!containsPluginRootToken(value)) return value;
+  let cursor = 0;
+  while (cursor < value.length) {
+    const matches = PLUGIN_ROOT_TOKENS.map((token) => ({
+      token,
+      index: value.indexOf(token, cursor),
+    })).filter((entry) => entry.index >= 0);
+    if (!matches.length) break;
+    const match = matches.sort((left, right) => left.index - right.index)[0];
+    if (!match) break;
+    const tail = value.slice(match.index + match.token.length).split(/[\s"'`,;]/u, 1)[0] ?? "";
+    assertPluginPathWithinRoot(pluginRoot, resolve(pluginRoot, `.${tail || sep}`));
+    cursor = match.index + match.token.length;
+  }
+  return expandPluginRootTokens(value, resolve(pluginRoot));
+}
+
+function pluginRuntimeValues(value: unknown, extensionPath: string): Record<string, string> {
   return Object.fromEntries(
     Object.entries(asRecord(value))
       .filter((entry): entry is [string, string] => typeof entry[1] === "string")
       .map(([key, entry]) => [
         key,
-        entry
+        expandPluginPathValue(entry, extensionPath)
           .replace(/\$\{([A-Z0-9_]+)\}/gi, (_match, name: string) => process.env[name] ?? "")
           .replace(/^\.\//, `${resolve(extensionPath)}\\`),
       ])
       .filter(([, entry]) => Boolean(entry)),
   );
+}
+
+function mergePreservedPluginSecrets(
+  current: Record<string, string>,
+  declared: Record<string, string>,
+): Record<string, string> {
+  const merged = { ...current };
+  const keys = new Set(Object.keys(current).map((key) => key.toLocaleLowerCase("en-US")));
+  for (const [key, value] of Object.entries(declared)) {
+    const normalized = key.toLocaleLowerCase("en-US");
+    if (keys.has(normalized)) continue;
+    merged[key] = value;
+    keys.add(normalized);
+  }
+  return merged;
 }
 
 function parseSecretConfig(value: string): SecretConfig {
@@ -290,6 +346,7 @@ export class McpService {
       const secrets = this.secretConfig(server.id);
       const oauth = secrets.oauth;
       const oauthAuthenticated = Boolean(oauth?.accessToken || oauth?.refreshToken);
+      const pluginAvailable = this.isPluginServerAvailable(server.id);
       const hasConnection =
         server.transport === "stdio" ? Boolean(server.command) : Boolean(server.url);
       const secretsConfigured =
@@ -297,6 +354,7 @@ export class McpService {
         server.envKeys.every((key) => Boolean(secrets.env[key]));
       return {
         ...server,
+        enabled: server.enabled && pluginAvailable,
         oauthEnabled: oauth?.enabled ?? false,
         oauthAuthenticated,
         configured:
@@ -304,6 +362,18 @@ export class McpService {
           (secretsConfigured || (server.transport === "http" && Boolean(oauth?.enabled))),
       };
     });
+  }
+
+  private isPluginServerAvailable(serverId: string): boolean {
+    if (!serverId.startsWith("plugin-")) return true;
+    return this.repository
+      .listExtensions()
+      .some(
+        (extension) =>
+          extension.type === "plugin" &&
+          extension.enabled &&
+          serverId.startsWith(`plugin-${extension.id.slice(0, 8)}-`),
+      );
   }
 
   private diagnosticSecrets(serverId: string): string[] {
@@ -330,25 +400,62 @@ export class McpService {
       return;
     }
     const paths = asRecord(manifest.paths);
-    const declared = paths.mcpServers ?? manifest.mcpServers;
-    for (const [name, raw] of Object.entries(asRecord(declared))) {
+    const declared = await loadLocalPluginJsonDeclaration(
+      extension.installedPath,
+      paths.mcpServers ?? manifest.mcpServers,
+      "mcpServers",
+    );
+    const desired = Object.entries(declared);
+    const desiredIds = new Set<string>();
+    const saves: PluginMcpSaveInput[] = [];
+    for (const [name, raw] of desired) {
+      const id = `plugin-${extension.id.slice(0, 8)}-${normalizeMcpName(name)}`;
+      if (desiredIds.has(id)) {
+        throw new Error(`Plugin MCP declarations collapse to the same server id: ${name}`);
+      }
+      desiredIds.add(id);
       const config = asRecord(raw);
-      const url =
+      const rawUrl =
         typeof config.url === "string"
           ? config.url
           : typeof config.serverUrl === "string"
             ? config.serverUrl
             : "";
-      const commandValue = typeof config.command === "string" ? config.command : "";
+      const url = expandPluginPathValue(rawUrl, extension.installedPath);
+      const rawCommand = typeof config.command === "string" ? config.command : "";
+      let commandValue = expandPluginPathValue(rawCommand, extension.installedPath);
       if (!url && !commandValue) {
-        continue;
+        throw new Error(`Plugin MCP server ${name} must declare command or url.`);
       }
-      const command = commandValue.startsWith("./")
-        ? resolve(extension.installedPath, commandValue)
-        : commandValue;
-      const id = `plugin-${extension.id.slice(0, 8)}-${normalizeMcpName(name)}`;
+      if (commandValue.startsWith("./") || commandValue.startsWith(".\\")) {
+        commandValue = assertPluginPathWithinRoot(
+          extension.installedPath,
+          resolve(extension.installedPath, commandValue),
+        );
+      }
+      const command = commandValue;
       const existing = this.repository.getMcpServer(id);
-      await this.save({
+      const currentSecrets = existing ? this.secretConfig(existing.id) : { headers: {}, env: {} };
+      const declaredHeaders = pluginRuntimeValues(config.headers, extension.installedPath);
+      const declaredEnv = pluginRuntimeValues(config.env, extension.installedPath);
+      const headers = mergePreservedPluginSecrets(currentSecrets.headers, declaredHeaders);
+      const env = mergePreservedPluginSecrets(currentSecrets.env, declaredEnv);
+      const rawCwd = typeof config.cwd === "string" ? config.cwd : "";
+      const cwd = rawCwd
+        ? assertPluginPathWithinRoot(
+            extension.installedPath,
+            resolve(
+              extension.installedPath,
+              expandPluginPathValue(rawCwd, extension.installedPath),
+            ),
+          )
+        : extension.installedPath;
+      const args = Array.isArray(config.args)
+        ? config.args
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => expandPluginPathValue(entry, extension.installedPath))
+        : [];
+      saves.push({
         id,
         name: `${extension.name} · ${name}`,
         description:
@@ -358,18 +465,20 @@ export class McpService {
         transport: url ? "http" : "stdio",
         enabled: existing?.enabled ?? config.enabled !== false,
         command,
-        args: Array.isArray(config.args)
-          ? config.args.filter((entry): entry is string => typeof entry === "string")
-          : [],
+        args,
         url,
-        cwd:
-          typeof config.cwd === "string"
-            ? resolve(extension.installedPath, config.cwd)
-            : extension.installedPath,
+        cwd,
         timeoutMs: typeof config.timeout === "number" ? config.timeout : 30_000,
-        headers: pluginSecretValues(config.headers, extension.installedPath),
-        env: pluginSecretValues(config.env, extension.installedPath),
+        headers,
+        env,
       });
+    }
+
+    for (const input of saves) await this.save(input);
+
+    const prefix = `plugin-${extension.id.slice(0, 8)}-`;
+    for (const server of this.list().filter((item) => item.id.startsWith(prefix))) {
+      if (!desiredIds.has(server.id)) await this.remove(server.id);
     }
   }
 
@@ -838,6 +947,12 @@ export class McpService {
     signal?: AbortSignal,
   ): Promise<{ output: string; isError: boolean }> {
     const server = this.requireServer(serverId);
+    if (!server.enabled || !this.isPluginServerAvailable(server.id)) {
+      return {
+        output: `MCP_SERVER_DISABLED: ${server.name} is disabled or its owning plugin is disabled.`,
+        isError: true,
+      };
+    }
     try {
       signal?.throwIfAborted();
       const result =

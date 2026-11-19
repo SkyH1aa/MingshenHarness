@@ -72,6 +72,19 @@ const api: MingshenDesktopApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeProgress, handler);
   },
   getDesktopState: () => ipcRenderer.invoke(IPC_CHANNELS.desktopState),
+  getDesktopShortcutSettings: () => ipcRenderer.invoke(IPC_CHANNELS.desktopShortcutsGet),
+  setDesktopShortcutSettings: (settings) =>
+    ipcRenderer.invoke(IPC_CHANNELS.desktopShortcutsSet, settings),
+  setDesktopShortcutRecording: (recording) =>
+    ipcRenderer.invoke(IPC_CHANNELS.desktopShortcutRecording, recording),
+  getQuickChatState: () => ipcRenderer.invoke(IPC_CHANNELS.quickChatState),
+  quickChatAction: (action) => ipcRenderer.invoke(IPC_CHANNELS.quickChatAction, action),
+  onQuickChatState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
+      listener(state);
+    ipcRenderer.on(IPC_CHANNELS.quickChatEvent, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.quickChatEvent, handler);
+  },
   desktopAction: (action, value, remember) =>
     ipcRenderer.invoke(IPC_CHANNELS.desktopAction, action, value, remember),
   readPolicy: (document, locale) => ipcRenderer.invoke(IPC_CHANNELS.policyRead, document, locale),
@@ -88,6 +101,10 @@ const api: MingshenDesktopApi = {
   getSessionDelta: (after, ids) => ipcRenderer.invoke(IPC_CHANNELS.sessionDelta, after, ids),
   getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.sessionGet, id),
   listSessionGroups: () => ipcRenderer.invoke(IPC_CHANNELS.sessionGroups),
+  listChatGroups: () => ipcRenderer.invoke(IPC_CHANNELS.chatGroupsList),
+  createChatGroup: (name) => ipcRenderer.invoke(IPC_CHANNELS.chatGroupCreate, name),
+  renameChatGroup: (id, name) => ipcRenderer.invoke(IPC_CHANNELS.chatGroupRename, id, name),
+  removeChatGroup: (id) => ipcRenderer.invoke(IPC_CHANNELS.chatGroupRemove, id),
   chooseWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.workspaceChoose),
   getModelCatalogPreferences: () => ipcRenderer.invoke(IPC_CHANNELS.modelCatalogGet),
   moveCatalogProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.modelCatalogProviderMove, input),
@@ -111,8 +128,8 @@ const api: MingshenDesktopApi = {
   updateModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.modelUpdate, input),
   removeModel: (modelConfigId) => ipcRenderer.invoke(IPC_CHANNELS.modelRemove, modelConfigId),
   createSession: (input) => ipcRenderer.invoke(IPC_CHANNELS.sessionCreate, input),
-  createSessionInWorkspace: (workspacePath) =>
-    ipcRenderer.invoke(IPC_CHANNELS.sessionCreateInWorkspace, workspacePath),
+  createSessionInWorkspace: (workspacePath, agentMode) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sessionCreateInWorkspace, workspacePath, agentMode),
   forkSession: (sessionId, messageId) =>
     ipcRenderer.invoke(IPC_CHANNELS.sessionFork, sessionId, messageId),
   openSessionWorkspace: (sessionId) =>
@@ -139,8 +156,29 @@ const api: MingshenDesktopApi = {
   },
   acknowledgeComposerDraftFlush: (requestId, error) =>
     ipcRenderer.send(IPC_CHANNELS.composerDraftFlushAck, requestId, error),
+  onComposerDraftChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, sessionId: unknown, revision: unknown) => {
+      if (typeof sessionId !== "string" || (revision !== null && typeof revision !== "string"))
+        return;
+      listener({ sessionId, revision });
+    };
+    ipcRenderer.on(IPC_CHANNELS.composerDraftChanged, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.composerDraftChanged, handler);
+  },
   rewriteAndSendChat: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatRewrite, input),
   stopChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.chatStop, sessionId),
+  listQueuedPrompts: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptList, sessionId),
+  addQueuedPrompt: (input) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptAdd, input),
+  updateQueuedPrompt: (input) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptUpdate, input),
+  reorderQueuedPrompts: (input) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptReorder, input),
+  removeQueuedPrompt: (sessionId, itemId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.queuedPromptRemove, sessionId, itemId),
+  continueQueuedPrompt: (sessionId, itemId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.queuedPromptContinue, sessionId, itemId),
+  beginQueuedPromptEdit: (sessionId, itemId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.queuedPromptBeginEdit, sessionId, itemId),
+  endQueuedPromptEdit: (sessionId, editId, abandon) =>
+    ipcRenderer.invoke(IPC_CHANNELS.queuedPromptEndEdit, sessionId, editId, abandon),
   compactChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.chatCompact, sessionId),
   getContextUsage: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.contextUsage, sessionId),
   decideApproval: (input) => ipcRenderer.invoke(IPC_CHANNELS.approvalDecide, input),
@@ -193,6 +231,10 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.sessionExtensionsList, sessionId),
   setSessionExtension: (sessionId, extensionId, enabled) =>
     ipcRenderer.invoke(IPC_CHANNELS.sessionExtensionsSet, sessionId, extensionId, enabled),
+  listSessionBuiltinCapabilities: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sessionBuiltinCapabilitiesList, sessionId),
+  setSessionBuiltinCapability: (sessionId, capabilityId, selected) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sessionBuiltinCapabilitySet, sessionId, capabilityId, selected),
   listScheduledTasks: () => ipcRenderer.invoke(IPC_CHANNELS.scheduledTasksList),
   createScheduledTask: (input) => ipcRenderer.invoke(IPC_CHANNELS.scheduledTasksCreate, input),
   setScheduledTaskEnabled: (taskId, enabled) =>
@@ -203,6 +245,16 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.marketplaceList, source, forceRefresh),
   installMarketplaceSkill: (source, path) =>
     ipcRenderer.invoke(IPC_CHANNELS.marketplaceInstall, source, path),
+  validateLocalPlugin: (rootPath) => ipcRenderer.invoke(IPC_CHANNELS.localPluginValidate, rootPath),
+  listLocalPluginMarkets: () => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketsList),
+  addLocalPluginMarket: (path) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketAdd, path),
+  getLocalPluginMarket: (id) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketGet, id),
+  refreshLocalPluginMarket: (id) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketRefresh, id),
+  removeLocalPluginMarket: (id) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketRemove, id),
+  installLocalPlugin: (marketId, pluginName) =>
+    ipcRenderer.invoke(IPC_CHANNELS.localPluginInstall, marketId, pluginName),
+  updateLocalPlugin: (marketId, pluginName) =>
+    ipcRenderer.invoke(IPC_CHANNELS.localPluginUpdate, marketId, pluginName),
   listMcpServers: () => ipcRenderer.invoke(IPC_CHANNELS.mcpList),
   saveMcpServer: (input) => ipcRenderer.invoke(IPC_CHANNELS.mcpSave, input),
   removeMcpServer: (id) => ipcRenderer.invoke(IPC_CHANNELS.mcpRemove, id),

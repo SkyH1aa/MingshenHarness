@@ -12,6 +12,7 @@ const emptyState = {
   ready: false,
   saving: false,
   error: null,
+  conflict: false,
   value: {
     revision: "",
     text: "",
@@ -60,12 +61,32 @@ export function useComposerDraft(sessionId: string | null) {
   );
   const state = useSyncExternalStore(subscribe, snapshot);
   useEffect(() => {
-    if (sessionId) void composerDrafts.load(sessionId).catch(() => undefined);
+    if (!sessionId) return;
+    const returningToLoadedSession = composerDrafts.state(sessionId).ready;
+    void composerDrafts.load(sessionId).then(
+      () => {
+        if (returningToLoadedSession)
+          void composerDrafts.refreshIfClean(sessionId).catch(() => undefined);
+      },
+      () => undefined,
+    );
+  }, [sessionId]);
+  useEffect(() => {
+    if (!sessionId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible")
+        void composerDrafts.refreshIfClean(sessionId).catch(() => undefined);
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, [sessionId]);
   return state;
 }
 
 export function registerComposerDraftLifecycle(): () => void {
+  const unsubscribeChanges = window.mingshen.onComposerDraftChanged(({ sessionId, revision }) => {
+    void composerDrafts.refreshIfClean(sessionId, revision).catch(() => undefined);
+  });
   const unsubscribe = window.mingshen.onComposerDraftFlush((requestId, purpose) => {
     if (purpose === "shutdown") interfaceReloadIntent = null;
     void composerDrafts.flushAll().then(
@@ -106,6 +127,7 @@ export function registerComposerDraftLifecycle(): () => void {
   };
   window.addEventListener("beforeunload", beforeUnload);
   return () => {
+    unsubscribeChanges();
     unsubscribe();
     window.removeEventListener("beforeunload", beforeUnload);
     interfaceReloadIntent = null;

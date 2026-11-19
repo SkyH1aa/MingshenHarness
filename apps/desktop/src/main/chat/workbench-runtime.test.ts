@@ -914,9 +914,13 @@ describe("workbench runtime boundaries", () => {
         expect(blocked.isError).toBe(true);
         expect(blocked.output).toContain("不允许调用子 Agent");
       }
-      const delegate = vi
-        .spyOn(f.internal, "runSubagent")
-        .mockResolvedValue({ output: "Read-only evidence", isError: false });
+      let finishChild!: (result: { output: string; isError: boolean }) => void;
+      const delegate = vi.spyOn(f.internal, "runSubagent").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishChild = resolve;
+          }),
+      );
       const allowed = await f.internal.executeToolCall({
         session: { ...f.session, agentProfileId: "creative" },
         runId: "run",
@@ -929,7 +933,23 @@ describe("workbench runtime boundaries", () => {
         },
       });
       expect(allowed.isError).toBe(false);
+      expect(allowed.output).toContain("任务已安排");
       expect(delegate).toHaveBeenCalledOnce();
+      finishChild({ output: "Read-only evidence", isError: false });
+      await vi.waitFor(() =>
+        expect(f.events).toContainEqual(
+          expect.objectContaining({
+            type: "activity",
+            activity: expect.objectContaining({
+              sessionId: f.session.id,
+              toolName: "subagent",
+              kind: "subagent",
+              status: "completed",
+              title: "后台子 Agent 已完成",
+            }),
+          }),
+        ),
+      );
     } finally {
       f.db.close();
     }

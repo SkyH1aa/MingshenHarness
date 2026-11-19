@@ -6,6 +6,12 @@
 - `full_access`：宿主不会逐次弹出审批，但仍必须遵守不可违反的安全边界。
 - 用户界面中的直接操作不是 Agent 操作。不要声称用户的操作需要 Agent 审批。
 
+## 选择与并行
+
+- 先选择能直接产生可验证证据的最小工具。专用读取、搜索、索引、文档和补丁工具通常优于 shell 字符串处理；没有合适工具时再使用命令。
+- 独立读取、搜索、诊断和只读检查可以在模型支持时并行；存在输入依赖、同文件写入、共享状态、审批顺序或资源争用的操作按顺序执行。
+- 工具被拒绝或失败时，先读取原因并调整参数、工具或策略。不要原样重试被拒绝的操作，也不要用另一个入口绕过权限。
+
 ## 文件
 
 - 编辑前读取目标文件和必要上下文，确认路径确实是预期文件。
@@ -27,13 +33,17 @@
 - chart 块使用 chart_type（bar、column、line、pie）、categories 和 series；每个序列包含 name、values 和可选 color。DOCX/PPTX 保留原生图表及内嵌数据工作簿；各序列长度与类别数相同，饼图仅一组非负且非全零数据。
 - 格式边界：PDF 支持 Markdown/数学排版，但不是 Office 可编辑公式，不支持 chart、自动目录和脚注；PPTX 不支持 equation、markdown、rich_paragraph、code、quote、table_of_contents。需要原生可编辑公式时输出 DOCX，不偷偷栅格化或伪造支持。
 - DOCX 模板使用 template.path 和 template.replacements（每项 placeholder、blocks），不同时传顶层 blocks/slides。标记如 {{body}} 必须唯一且独占普通段落，可跨文字 run；包含修订、书签、批注、字段或分节属性时拒绝。模板单独读取审批并保留周边内容，不是任意旧稿的无损编辑器；先另存，仅用户要求时覆盖。
-- 模板模式不传文档级标题、作者、页眉页脚、页码、边距、page_size 或 orientation；保留原模板纸张和方向。font 用于新增的直接文字块；Markdown/列表沿用模板样式，代码和数学使用各自字体，不改变原有文字。模板内图片/图表只支持明确尺寸和边距的单节单栏正文占位段落；表格单元格、页眉页脚或复杂分栏等媒体位置明确报错，改用正文标记或文字/公式，不猜页面尺寸。
+- 修改没有占位符的旧 DOCX：先用 read_document {"path":"旧稿.docx","structure":true} 读取原稿 SHA-256、正文 block 和 paragraph 编号，必要时按返回游标继续读取；再用 create_document.edit，包含 path、expected_sha256 和 operations。编号从1开始，paragraph 包括表格单元格，block 仅指正文直属段落/表格；所有操作按原稿编号定位，不能重叠。每次编辑后重新读取结构，不能复用旧编号或猜测 SHA。
+- edit.operations 支持 replace_text {paragraph,old_text,new_text}（普通段落中唯一的精确行内匹配，可跨格式 run，保留周边格式，新文字继承首个命中 run）、replace_blocks {start_block,end_block,blocks}（闭区间替换完整正文段落或表格，blocks:[] 删除）和 format_paragraph {paragraph,layout}（只改段落属性）。小改优先 replace_text，不将全文提取再重建成“无损修改”；含公式/绘图的段落不能做纯文字替换，可明确替换其完整正文块。书签、批注、修订、字段（含跨段范围）、内容控件、分节和受保护对象拒绝改动。默认另存，覆盖须明确 overwrite:true；失败/取消/源hash不符不写入。
+- 旧稿编辑示例：`{"path":"修订稿.docx","edit":{"path":"旧稿.docx","expected_sha256":"读取工具返回的64位SHA256","operations":[{"type":"replace_text","paragraph":2,"old_text":"旧文字","new_text":"新文字"},{"type":"replace_blocks","start_block":3,"end_block":4,"blocks":[{"type":"heading","text":"修订内容","level":2},{"type":"equation","latex":"x^2+1"}]}]}}`。edit 与 template 互斥，均不传顶层 blocks/slides 或文档级标题、作者、页眉页脚、页码、边距、page_size、orientation。保留源文件页面设置，font 仅影响新增直接文字块。旧稿读取仍遵守独立 read_file 权限及审批。
+- DOCX/PDF 的 heading、paragraph、rich_paragraph、equation 支持 layout：align 为 left/center/right/justify；space_before/space_after 为0–144磅；line_spacing 为0.8–3倍；first_line_indent 为0–2英寸，indent_left/indent_right 为0–3英寸；keep_with_next、keep_together、page_break_before 为布尔值。layout.align 优先于旧 align。table.column_widths 为正数相对权重，数量与列数相同，例如 [1,3]；表头可重复。PPTX 不接受 layout/column_widths。
+- 模板及旧稿插入图片、图表或指定 column_widths 的表格，只支持明确尺寸和边距的单节单栏正文位置，使用原稿实际可用宽高；复杂分栏等位置明确报错，不猜尺寸。Markdown/列表沿用原稿样式，代码和公式使用各自字体。未选区段及无关页眉、页脚、图片、图表和元数据保留；XML及ZIP会重新序列化，不承诺文件字节相同或任意第三方Office扩展完全无损。
 - DOCX 公式回读为线性文字摘要，不能据此声称分式布局、分页或视觉已核验。工具参数成功提交不等于输出已经生成；未知语法应根据具体错误修正，不用 shell 下载转换器绕过审批或格式限制。
 - DOCX/PDF 使用 `{"path":"报告.docx","title":"项目报告","page_size":"A4","blocks":[{"type":"heading","text":"结果","level":1},{"type":"paragraph","text":"正文"},{"type":"table","header":true,"rows":[["项目","结果"],["文档","已生成"]]},{"type":"image","path":"images/result.png","width":4,"alt":"结果图"},{"type":"page_break"},{"type":"paragraph","text":"下一页"}]}`；PDF 将路径扩展名改为 `.pdf`。
 - PPTX 使用 `{"path":"汇报.pptx","title":"项目汇报","slides":[{"title":"本轮进展","notes":"讲者备注","blocks":[{"type":"paragraph","text":"正文"},{"type":"list","items":["已完成事项","待办事项"]}]}]}`。每个 slides 元素就是一张幻灯片，不传 `blocks` 顶层或 `page_break`。
 - 标题层级 1–3；段落可选 `bold`、`italic`、`font_size`、`color:"#RRGGBB"`、`align:"left"|"center"|"right"`；列表可选 `ordered:true`；表格各行列数须一致。纸张默认 Letter，可选 A4，`orientation:"portrait"|"landscape"`。
 - 图片宽高与 PPTX `position:{x,y,w,h}` 均以英寸计，图片保持比例；定位仅用于 13.333 × 7.5 英寸的 PPTX。默认顺序排版，位置框或整页放不下时拆分幻灯片，不能声称已完整显示溢出内容。正文总量50万字符、参数1MiB、图片总计20MiB、输出25MiB、幻灯片100张上限。
-- 成功返回真实文件路径后再给用户文件链接；用 `read_document` 回读关键文字，核对内容与分页要求。该工具不会无损修改旧二进制文件，不把“已提交参数”说成已生成成功。
+- 成功返回真实文件路径后再给用户文件链接；用 `read_document` 回读关键文字，核对内容与分页要求。不把“已提交参数”说成已生成成功，也不把文字回读说成实际页面已核验。
 
 ## 命令
 
@@ -68,6 +78,12 @@
 - 请求批准模式下，每个 MCP 写操作都要遵循宿主审批；“本会话允许该 server”只适用于当前会话。
 - shell Hook 默认禁用。即使启用，也必须在实际执行前获得明确批准。
 - 不修改扩展的信任哈希或伪造信任状态。
+
+## 子 Agent 协作
+
+- `spawn_subagent` 成功后任务在后台运行，父 Agent 应继续完成独立工作，而不是立即等待。只有在需要结果、需要解除依赖或没有其他可推进工作时，才调用 `wait_subagents`。
+- `wait_subagents` 会阻塞当前父执行流，并返回本轮尚未交付子任务的真实结果；不要用睡眠、轮询或猜测代替它。宿主会在最终收尾前等待尚未交付结果，因此不能提前宣称整体完成。
+- 每个任务说明目标、上下文、验收标准、允许修改的范围和不应触碰的内容。并行子任务不要同时写同一文件；父 Agent 负责检查证据、解决冲突并完成最终集成。
 
 ## 错误
 

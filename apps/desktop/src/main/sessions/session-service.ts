@@ -1,10 +1,18 @@
-import type { SessionCreateInput, SessionUpdateInput, SessionView } from "../../shared/domain";
+import type {
+  AgentMode,
+  AgentProfileView,
+  ChatGroupView,
+  SessionCreateInput,
+  SessionUpdateInput,
+  SessionView,
+} from "../../shared/domain";
 import {
   canonicalProjectMemoryRoot,
   commitProjectMemoryBackend,
   projectMemorySelection,
   validateProjectMemoryBackend,
 } from "../agents/project-memory-config";
+import type { SessionBuiltinCapabilityService } from "../agents/session-builtin-capability-service";
 import { validateCompactionChoice } from "../chat/compaction-config";
 import { projectPermission, setApprovalMode } from "../permissions/project-permissions";
 import type { Repository } from "../storage/repository";
@@ -20,8 +28,39 @@ function validateTitle(value: string | undefined): string | undefined {
   return normalized;
 }
 
+function normalizeAgentMode(value: unknown): AgentMode {
+  if (value === undefined) return "code";
+  if (value === "code" || value === "work" || value === "chat") return value;
+  throw new Error("无效的 Agent 模式。");
+}
+
+function profileSupportsMode(profile: AgentProfileView, mode: AgentMode): boolean {
+  if (mode === "chat") return profile.id === "primary";
+  return (profile.applicableModes ?? ["code", "work"]).includes(mode);
+}
+
+function compatibleWorkspaceProfile(
+  repository: Repository,
+  requestedId: string,
+  mode: Exclude<AgentMode, "chat">,
+): string {
+  const requested = repository.getAgentProfile(requestedId);
+  if (requested?.enabled && profileSupportsMode(requested, mode)) return requested.id;
+  const primary = repository.getAgentProfile("primary");
+  if (primary?.enabled && profileSupportsMode(primary, mode)) return primary.id;
+  const fallback = repository
+    .listAgentProfiles()
+    .find((profile) => profile.enabled && profileSupportsMode(profile, mode));
+  if (!fallback)
+    throw new Error(`没有适用于 ${mode === "work" ? "WorkAgent" : "CodeAgent"} 的 Agent 配置。`);
+  return fallback.id;
+}
+
 export class SessionService {
-  constructor(private readonly repository: Repository) {}
+  constructor(
+    private readonly repository: Repository,
+    private readonly builtinCapabilities?: SessionBuiltinCapabilityService,
+  ) {}
 
   list(): SessionView[] {
     return this.repository.listSessions();
@@ -33,7 +72,7 @@ export class SessionService {
     return projectMemorySelection(this.repository, workspacePath);
   }
 
-  createInWorkspace(workspacePath: string | null): SessionView {
+  createInWorkspace(workspacePath: string | null, requestedMode?: "code" | "work"): SessionView {
     if (workspacePath !== null && typeof workspacePath !== "string") {
       throw new Error("工作目录无效。");
     }
@@ -44,6 +83,7 @@ export class SessionService {
         (session) =>
           !session.archived &&
           !session.parentSessionId &&
+          session.agentMode !== "chat" &&
           key(session.workspacePath) === key(workspacePath),
       )
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
@@ -60,11 +100,14 @@ export class SessionService {
       throw new Error("上一会话的供应商或模型已被删除，请先重新配置该会话。");
     }
 
+    const mode: Exclude<AgentMode, "chat"> =
+      requestedMode ?? (source.agentMode === "work" ? "work" : "code");
     const extensionIds = this.repository.listSessionExtensionIds(source.id);
     const session = this.create({
       providerId: source.providerId,
       modelId: sourceModel.id,
-      agentProfileId: source.agentProfileId,
+      agentProfileId: compatibleWorkspaceProfile(this.repository, source.agentProfileId, mode),
+      agentMode: mode,
       workspacePath: source.workspacePath,
       systemPrompt: source.systemPrompt,
       reasoningLevel: source.reasoningLevel,
@@ -83,6 +126,7 @@ export class SessionService {
       for (const extensionId of extensionIds) {
         this.repository.setSessionExtension(session.id, extensionId, true);
       }
+      this.builtinCapabilities?.copy(source.id, session.id);
     } catch (error) {
       this.repository.removeSession(session.id);
       throw error;
@@ -105,23 +149,40 @@ export class SessionService {
       throw new Error("所选思考等级不被该模型支持。");
     }
 
-    const agentProfileId = input.agentProfileId?.trim() || "primary";
-    const profile = this.repository.getAgentProfile(agentProfileId);
-    if (!profile?.enabled) {
-      throw new Error("所选 Agent 配置不存在或已禁用。");
+    const mode = normalizeAgentMode(input.agentMode);
+    const requestedProfileId = input.agentProfileId?.trim() || "primary";
+    const agentProfileId = mode === "chat" ? "primary" : requestedProfileId;
+    if (mode !== "chat") {
+      const profile = this.repository.getAgentProfile(agentProfileId);
+      if (!profile?.enabled || !profileSupportsMode(profile, mode))
+        throw new Error("所选 Agent 配置不存在、已禁用或不适用于当前模式。");
     }
 
     const compactionModel = input.compactionModel
       ? validateCompactionChoice(this.repository, input.compactionModel)
       : null;
     const workspacePath = input.workspacePath?.trim() || null;
-    const memoryBackend = validateProjectMemoryBackend(
-      this.repository,
-      workspacePath,
-      input.memoryBackend,
-    );
+    const chatGroupId = input.chatGroupId?.trim() || null;
+    if (mode === "chat") {
+      if (workspacePath !== null)
+        throw new Error("ChatAgent 不使用工作目录，不能创建或继承本地文件上下文。");
+      if (requestedProfileId !== "primary") throw new Error("ChatAgent 不使用自定义 Agent 配置。");
+      if (input.executionMode && input.executionMode !== "host")
+        throw new Error("ChatAgent 仅支持宿主聊天，不能启用 worktree 或 Docker。");
+      if (input.patchOnly) throw new Error("ChatAgent 不提供文件修改或 Patch 模式。");
+      if (chatGroupId && !this.repository.getChatGroup(chatGroupId))
+        throw new Error("聊天分组不存在。");
+    } else if (chatGroupId) {
+      throw new Error("聊天分组仅适用于 ChatAgent。");
+    }
+    const memoryBackend =
+      mode === "chat"
+        ? null
+        : validateProjectMemoryBackend(this.repository, workspacePath, input.memoryBackend);
     const session = this.repository.insertSession({
       title: validateTitle(input.title) ?? "新会话",
+      agentMode: mode,
+      chatGroupId,
       providerId: input.providerId,
       modelId: input.modelId,
       agentProfileId,
@@ -129,16 +190,18 @@ export class SessionService {
       systemPrompt: input.systemPrompt?.trim() ?? "",
       reasoningLevel: input.reasoningLevel,
       permissionMode:
-        projectPermission(this.repository, input.workspacePath) ?? input.permissionMode,
-      executionMode: input.executionMode ?? "host",
-      patchOnly: input.patchOnly ?? false,
+        mode === "chat"
+          ? "request_approval"
+          : (projectPermission(this.repository, input.workspacePath) ?? input.permissionMode),
+      executionMode: mode === "chat" ? "host" : (input.executionMode ?? "host"),
+      patchOnly: mode === "chat" ? false : (input.patchOnly ?? false),
     });
     try {
-      if (input.approvalMode === "automatic")
+      if (mode !== "chat" && input.approvalMode === "automatic")
         setApprovalMode(this.repository, session.id, "automatic");
       if (compactionModel)
         this.repository.setSetting(`context.model.${session.id}`, compactionModel);
-      commitProjectMemoryBackend(this.repository, workspacePath, memoryBackend);
+      if (memoryBackend) commitProjectMemoryBackend(this.repository, workspacePath, memoryBackend);
     } catch (error) {
       this.repository.removeSession(session.id);
       throw error;
@@ -151,10 +214,40 @@ export class SessionService {
     if (!current) {
       throw new Error("会话不存在。");
     }
+    const currentMode = normalizeAgentMode(current.agentMode);
+    const mode = input.agentMode === undefined ? currentMode : normalizeAgentMode(input.agentMode);
+    if (mode !== currentMode && (mode === "chat" || currentMode === "chat"))
+      throw new Error("ChatAgent 与 CodeAgent/WorkAgent 不能直接互换，请使用对应的会话页面。");
+    const modeChanging = mode !== currentMode;
+    if (
+      modeChanging &&
+      [current, ...this.descendants(current.id)].some((session) =>
+        ["running", "waiting_approval"].includes(session.status),
+      )
+    )
+      throw new Error("请先停止会话及其子任务，再切换 CodeAgent/WorkAgent 模式。");
     const workspacePath =
       input.workspacePath === undefined
         ? current.workspacePath
         : input.workspacePath?.trim() || null;
+    const chatGroupId =
+      input.chatGroupId === undefined
+        ? (current.chatGroupId ?? null)
+        : input.chatGroupId?.trim() || null;
+    if (mode === "chat") {
+      if (workspacePath !== null) throw new Error("ChatAgent 不使用工作目录。");
+      if (input.agentProfileId && input.agentProfileId !== "primary")
+        throw new Error("ChatAgent 不使用自定义 Agent 配置。");
+      if (input.executionMode && input.executionMode !== "host")
+        throw new Error("ChatAgent 仅支持宿主聊天。");
+      if (input.patchOnly === true) throw new Error("ChatAgent 不提供文件修改模式。");
+      if (input.permissionMode && input.permissionMode !== "request_approval")
+        throw new Error("ChatAgent 固定使用受限聊天权限。");
+      if (chatGroupId && !this.repository.getChatGroup(chatGroupId))
+        throw new Error("聊天分组不存在。");
+    } else if (chatGroupId) {
+      throw new Error("聊天分组仅适用于 ChatAgent。");
+    }
     const moving =
       input.workspacePath !== undefined &&
       (workspacePath ? canonicalProjectMemoryRoot(workspacePath) : "") !==
@@ -193,11 +286,12 @@ export class SessionService {
       }
     }
 
-    if (input.agentProfileId) {
-      const profile = this.repository.getAgentProfile(input.agentProfileId);
-      if (!profile?.enabled) {
-        throw new Error("所选 Agent 配置不存在或已禁用。");
-      }
+    const agentProfileId =
+      mode === "chat" ? "primary" : (input.agentProfileId ?? current.agentProfileId);
+    if (mode !== "chat" && (input.agentProfileId || modeChanging)) {
+      const profile = this.repository.getAgentProfile(agentProfileId);
+      if (!profile?.enabled || !profileSupportsMode(profile, mode))
+        throw new Error("所选 Agent 配置不存在、已禁用或不适用于当前模式。");
     }
 
     if (
@@ -229,15 +323,17 @@ export class SessionService {
       this.repository.setSetting(`context.model.${input.sessionId}`, compactionModel);
     const session = this.repository.updateSession(input.sessionId, {
       title,
+      agentMode: mode,
+      chatGroupId,
       providerId: input.providerId,
       modelId: input.modelId,
-      agentProfileId: input.agentProfileId,
+      agentProfileId: mode === "chat" ? "primary" : input.agentProfileId,
       workspacePath: input.workspacePath === undefined ? undefined : workspacePath,
       systemPrompt: input.systemPrompt,
       reasoningLevel: input.reasoningLevel,
-      permissionMode: input.permissionMode,
-      executionMode: input.executionMode,
-      patchOnly: input.patchOnly,
+      permissionMode: mode === "chat" ? "request_approval" : input.permissionMode,
+      executionMode: mode === "chat" ? "host" : input.executionMode,
+      patchOnly: mode === "chat" ? false : input.patchOnly,
       archived: input.archived,
       pinned: input.pinned,
     });
@@ -248,6 +344,22 @@ export class SessionService {
     return this.repository
       .listChildSessions(sessionId)
       .flatMap((child) => [child, ...this.descendants(child.id)]);
+  }
+
+  listChatGroups(): ChatGroupView[] {
+    return this.repository.listChatGroups();
+  }
+
+  createChatGroup(name: string): ChatGroupView {
+    return this.repository.createChatGroup(name);
+  }
+
+  renameChatGroup(id: string, name: string): ChatGroupView {
+    return this.repository.renameChatGroup(id, name);
+  }
+
+  removeChatGroup(id: string): void {
+    this.repository.removeChatGroup(id);
   }
 
   remove(sessionId: string): void {

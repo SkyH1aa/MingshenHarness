@@ -59,6 +59,8 @@ export type AgentProfileRole = "primary" | "plan" | "subagent" | "all";
 
 export type SessionExecutionMode = "host" | "worktree" | "docker";
 
+export type AgentMode = "code" | "work" | "chat";
+
 export type AgentPermissionAction = "allow" | "ask" | "deny";
 
 export type AgentPermissionMap = Record<string, AgentPermissionAction>;
@@ -137,6 +139,9 @@ export interface SessionView {
   childCount?: number;
   title: string;
   parentSessionId: string | null;
+  /** Older callers may omit this synthetic field; persisted records always map to code by default. */
+  agentMode?: AgentMode;
+  chatGroupId?: string | null;
   providerId: string | null;
   modelId: string | null;
   agentProfileId: string;
@@ -154,6 +159,20 @@ export interface SessionView {
   createdAt: string;
   updatedAt: string;
   lastOpenedAt: string;
+}
+
+export interface SessionBuiltinCapabilityView {
+  id: string;
+  type: "skill" | "plugin";
+  name: string;
+  description: string;
+  source: "builtin";
+  family: string | null;
+  version: string | null;
+  compatibility: string | null;
+  sourcePath?: string | null;
+  sourceSha256?: string | null;
+  selected: boolean;
 }
 
 /**
@@ -342,6 +361,7 @@ export interface AgentProfileView {
   topP: number | null;
   maxSteps: number | null;
   color: string | null;
+  applicableModes?: Array<Exclude<AgentMode, "chat">>;
   createdAt: string;
   updatedAt: string;
 }
@@ -363,6 +383,7 @@ export interface AgentProfileSaveInput {
   topP?: number | null;
   maxSteps?: number | null;
   color?: string | null;
+  applicableModes?: Array<Exclude<AgentMode, "chat">>;
 }
 
 export interface ProjectInstructionView {
@@ -522,6 +543,7 @@ export interface BootstrapData {
   };
   providers: ProviderView[];
   sessions: SessionView[];
+  chatGroups?: ChatGroupView[];
   sessionRuns: SessionRunState[];
   agentProfiles: AgentProfileView[];
   extensions: ExtensionView[];
@@ -592,6 +614,8 @@ export interface SessionCreateInput {
   providerId: string;
   modelId: string;
   agentProfileId?: string;
+  agentMode?: AgentMode;
+  chatGroupId?: string | null;
   workspacePath: string | null;
   systemPrompt?: string;
   reasoningLevel: string | null;
@@ -609,6 +633,8 @@ export interface SessionUpdateInput {
   providerId?: string;
   modelId?: string;
   agentProfileId?: string;
+  agentMode?: AgentMode;
+  chatGroupId?: string | null;
   workspacePath?: string | null;
   systemPrompt?: string;
   reasoningLevel?: string | null;
@@ -619,6 +645,13 @@ export interface SessionUpdateInput {
   patchOnly?: boolean;
   archived?: boolean;
   pinned?: boolean;
+}
+
+export interface ChatGroupView {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ChatSendInput {
@@ -638,6 +671,7 @@ export interface ChatRewriteInput {
 export type ChatStreamEvent =
   | { type: "model_attempt_reset"; sessionId: string; runId: string }
   | { type: "composer_draft_consumed"; sessionId: string; revision: string }
+  | { type: "queued_prompts_updated"; sessionId: string }
   | { type: "workbench_updated"; sessionId: string; state: import("./workbench").WorkbenchState }
   | { type: "context_updated"; context: ContextUsageView }
   | { type: "approval_state"; state: ApprovalState }

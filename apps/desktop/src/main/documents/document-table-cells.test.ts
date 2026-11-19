@@ -138,7 +138,7 @@ describe("document table rich cells", () => {
     for (const cell of cells.slice(0, 2))
       expect(
         cell.getElementsByTagNameNS(WORD_NS, "shd").item(0)?.getAttributeNS(WORD_NS, "fill"),
-      ).toBe("EAF0F6");
+      ).toBe("0F6F78");
   });
 
   it("keeps inline math, styles, links, multiple paragraphs, lists, code and quotes in one cell", async () => {

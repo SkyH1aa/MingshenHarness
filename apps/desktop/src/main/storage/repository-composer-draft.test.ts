@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComposerDraftAttachment, SaveComposerDraftInput } from "../../shared/composer-draft";
-import { MAX_COMPOSER_ATTACHMENT_BYTES } from "../../shared/composer-draft";
+import {
+  COMPOSER_DRAFT_CONFLICT_CODE,
+  MAX_COMPOSER_ATTACHMENT_BYTES,
+} from "../../shared/composer-draft";
 import { openDatabase } from "./database";
 import { Repository } from "./repository";
 
@@ -106,7 +109,7 @@ describe("SQLite composer drafts", () => {
         });
         expect(repo.getSetting(`composer.draft.${first.id}`)).not.toHaveProperty("attachments");
         expect(repo.getSetting("fixture.unrelated")).toEqual({ keep: true });
-        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(8);
+        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(9);
         expect(disk.prepare("pragma integrity_check").get()?.integrity_check).toBe("ok");
       }
     } finally {
@@ -135,6 +138,68 @@ describe("SQLite composer drafts", () => {
     expect(repository.getComposerDraft(first.id)).toBeNull();
     expect(repository.getSetting(`composer.draft-attachment.${first.id}.${file.id}`)).toBeNull();
     expect(repository.getComposerDraft(second.id)?.attachments).toEqual([file]);
+  });
+
+  it("uses baseRevision inside the savepoint and leaves newer text and attachments untouched", () => {
+    const session = createSession(repository);
+    const current = attachment("current");
+    const stale = attachment("stale");
+    repository.saveComposerDraft(
+      draft(session.id, {
+        baseRevision: null,
+        revision: "revision-1",
+        text: "Base",
+      }),
+    );
+    repository.saveComposerDraft(
+      draft(session.id, {
+        baseRevision: "revision-1",
+        revision: "revision-2",
+        text: "Newer",
+        attachmentIds: [current.id],
+        addedAttachments: [current],
+      }),
+    );
+
+    expect(() =>
+      repository.saveComposerDraft(
+        draft(session.id, {
+          baseRevision: "revision-1",
+          revision: "stale-revision",
+          text: "Stale",
+          attachmentIds: [stale.id],
+          addedAttachments: [stale],
+        }),
+      ),
+    ).toThrow(COMPOSER_DRAFT_CONFLICT_CODE);
+
+    expect(repository.getComposerDraft(session.id)).toMatchObject({
+      revision: "revision-2",
+      text: "Newer",
+      attachments: [current],
+    });
+    expect(repository.getSetting(`composer.draft-attachment.${session.id}.${stale.id}`)).toBeNull();
+  });
+
+  it("keeps the legacy unconditional save path when baseRevision is omitted", () => {
+    const session = createSession(repository);
+    repository.saveComposerDraft(
+      draft(session.id, {
+        baseRevision: null,
+        revision: "revision-1",
+        text: "Base",
+      }),
+    );
+    repository.saveComposerDraft(
+      draft(session.id, {
+        revision: "revision-2",
+        text: "Legacy overwrite",
+      }),
+    );
+    expect(repository.getComposerDraft(session.id)).toMatchObject({
+      revision: "revision-2",
+      text: "Legacy overwrite",
+    });
   });
 
   it.each([
@@ -307,6 +372,24 @@ describe("SQLite composer drafts", () => {
     expect(repository.hasComposerDraft(session.id)).toBe(false);
     repository.removeSession(session.id);
     expect(repository.getSetting(`composer.draft.${session.id}`)).toBeNull();
+  });
+
+  it("clears only the deleted session's recoverable tool output namespace", () => {
+    const target = createSession(repository);
+    const other = createSession(repository);
+    repository.setSetting(`tool.output.${target.id}.call-1`, { output: "target" });
+    repository.setSetting(`tool.output.${target.id}.call-2`, { output: "target" });
+    repository.setSetting(`tool.output.${other.id}.call-1`, { output: "other" });
+    repository.setSetting(`fixture.tool.output.${target.id}.call-1`, { output: "unrelated" });
+
+    repository.removeSession(target.id);
+
+    expect(repository.getSetting(`tool.output.${target.id}.call-1`)).toBeNull();
+    expect(repository.getSetting(`tool.output.${target.id}.call-2`)).toBeNull();
+    expect(repository.getSetting(`tool.output.${other.id}.call-1`)).toEqual({ output: "other" });
+    expect(repository.getSetting(`fixture.tool.output.${target.id}.call-1`)).toEqual({
+      output: "unrelated",
+    });
   });
 
   it("preserves unreadable metadata for recovery and rejects writes for missing sessions", () => {

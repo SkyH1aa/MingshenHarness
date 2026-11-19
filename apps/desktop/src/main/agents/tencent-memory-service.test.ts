@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -10,7 +12,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TENCENT_MEMORY_DIRECTORY } from "./project-memory-config";
 import type {
@@ -20,6 +23,61 @@ import type {
   TencentMemoryModelRequest,
 } from "./tencent-memory-model";
 import { TencentMemoryService } from "./tencent-memory-service";
+
+const execFileAsync = promisify(execFile);
+const WINDOWS_JUNCTION_SCRIPT = [
+  'const { symlink } = require("node:fs/promises");',
+  "const [target, link] = process.argv.slice(1);",
+  'symlink(target, link, "junction").catch((error) => {',
+  "  console.error(error);",
+  "  process.exitCode = 1;",
+  "});",
+].join("\n");
+
+async function createDirectoryLink(target: string, link: string): Promise<void> {
+  if (process.platform !== "win32") {
+    await symlink(target, link, "dir");
+    return;
+  }
+  try {
+    await symlink(target, link, "dir");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EPERM" && code !== "EACCES") throw error;
+    await execFileAsync(process.execPath, ["-e", WINDOWS_JUNCTION_SCRIPT, target, link], {
+      timeout: 10_000,
+      windowsHide: true,
+    });
+  }
+}
+
+function directoryLinkPermissionCode(error: unknown): "EPERM" | "EACCES" | null {
+  const directCode = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (directCode === "EPERM" || directCode === "EACCES") return directCode;
+  const stderr = String((error as { stderr?: unknown } | undefined)?.stderr ?? "");
+  const stdout = String((error as { stdout?: unknown } | undefined)?.stdout ?? "");
+  const message = error instanceof Error ? error.message : String(error);
+  const match = /\b(EPERM|EACCES)\b/.exec(`${message}\n${stdout}\n${stderr}`);
+  return match?.[1] === "EPERM" || match?.[1] === "EACCES" ? match[1] : null;
+}
+
+async function removeDirectoryLink(root: string, link: string): Promise<void> {
+  const fixtureRoot = resolve(root);
+  const resolvedLink = resolve(link);
+  const local = relative(fixtureRoot, resolvedLink);
+  if (
+    !local ||
+    local === ".." ||
+    local.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+  )
+    throw new Error("Refusing to remove a directory link outside the test fixture.");
+  try {
+    if (!(await lstat(resolvedLink)).isSymbolicLink()) return;
+    await unlink(resolvedLink);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
 
 const officialPromptRoot = new URL(
   "../../../../../third_party/tencentdb-agent-memory/src/core/prompts/",
@@ -119,6 +177,7 @@ describe("Tencent Agent Memory semantic model adapter", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    await removeDirectoryLink(root, join(root, TENCENT_MEMORY_DIRECTORY));
     await rm(root, { recursive: true, force: true });
   });
 
@@ -704,24 +763,38 @@ describe("Tencent Agent Memory semantic model adapter", () => {
     expect(await readFile(lock, "utf8")).toBe("another writer");
   });
 
-  it("allows inactive backend files to coexist but refuses linked snapshots without touching targets", async () => {
+  it("allows inactive backend files to coexist without replacing them", async () => {
     const native = join(root, ".harness-memory");
     await mkdir(native);
     await writeFile(join(native, "memory.md"), "inactive native sentinel");
     await service.ensure(root);
     expect(await readFile(join(native, "memory.md"), "utf8")).toBe("inactive native sentinel");
+    expect(await readdir(join(root, TENCENT_MEMORY_DIRECTORY))).toEqual(["records.jsonl"]);
+  });
+
+  it("refuses linked snapshots without touching targets", async (context) => {
+    await service.ensure(root);
     await rm(join(root, TENCENT_MEMORY_DIRECTORY), { recursive: true });
     const outside = await mkdtemp(join(tmpdir(), "mingshen-tencent-memory-outside-"));
     try {
       await writeFile(join(outside, "records.jsonl"), "outside sentinel");
-      await symlink(outside, join(root, TENCENT_MEMORY_DIRECTORY), "junction");
+      try {
+        await createDirectoryLink(outside, join(root, TENCENT_MEMORY_DIRECTORY));
+      } catch (error) {
+        const permissionCode = directoryLinkPermissionCode(error);
+        if (permissionCode) {
+          context.skip(`This Windows environment denies directory links with ${permissionCode}.`);
+          return;
+        }
+        throw error;
+      }
       await expect(service.ensure(root)).rejects.toThrow();
       expect(await readFile(join(outside, "records.jsonl"), "utf8")).toBe("outside sentinel");
     } finally {
-      await unlink(join(root, TENCENT_MEMORY_DIRECTORY));
+      await removeDirectoryLink(root, join(root, TENCENT_MEMORY_DIRECTORY));
       await rm(outside, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("reads legacy work records as episodes without persisting business identity fields", async () => {
     await service.add(root, "memory", goal);

@@ -7,7 +7,7 @@ const serverUrl = (process.env.MINGSHEN_SERVER_URL || "http://127.0.0.1:4096").r
   "",
 );
 const token = process.env.MINGSHEN_SERVER_TOKEN || "";
-const version = process.env.MINGSHEN_VERSION || "1.3.2";
+const version = process.env.MINGSHEN_VERSION || "1.3.3";
 const sessions = new Map();
 const pendingPrompts = new Map();
 let providerCache = null;

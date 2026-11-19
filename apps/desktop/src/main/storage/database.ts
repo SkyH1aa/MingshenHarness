@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const MIGRATION_V1 = `
   create table if not exists secrets (
@@ -413,6 +413,27 @@ const MIGRATION_V8 = `
   alter table providers_v8 rename to providers;
 `;
 
+const MIGRATION_V9 = `
+  alter table sessions add column agent_mode text not null default 'code'
+    check (agent_mode in ('code', 'work', 'chat'));
+
+  create table if not exists chat_groups (
+    id text primary key,
+    name text not null,
+    created_at text not null,
+    updated_at text not null
+  );
+
+  alter table sessions add column chat_group_id text
+    references chat_groups(id) on delete set null;
+
+  create index if not exists sessions_agent_mode_catalog_idx
+    on sessions(agent_mode, archived, chat_group_id, pinned desc, updated_at desc);
+
+  alter table agent_profiles add column applicable_modes_json text not null
+    default '["code","work"]';
+`;
+
 // Keep every historical step in the application; upgrades may skip many releases.
 export const DATABASE_MIGRATIONS: readonly string[] = [
   MIGRATION_V1,
@@ -423,6 +444,7 @@ export const DATABASE_MIGRATIONS: readonly string[] = [
   MIGRATION_V6,
   MIGRATION_V7,
   MIGRATION_V8,
+  MIGRATION_V9,
 ];
 
 export function openDatabase(filePath: string): DatabaseSync {

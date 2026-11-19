@@ -1,6 +1,7 @@
 import { FolderOpen, LoaderCircle, X } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import type {
+  AgentMode,
   AgentProfileView,
   PermissionMode,
   ProviderView,
@@ -11,6 +12,7 @@ import type {
 import type { MemoryBackend, ProjectMemorySelection } from "../../../shared/project-memory";
 import { tr } from "../i18n/index";
 import { agentLabel } from "../lib/agent-labels";
+import { profileSupportsAgentMode } from "../lib/agent-mode-ui";
 import { formatPath } from "../lib/format";
 import { AgentGuide } from "./AgentGuide";
 import { useDialog } from "./DialogProvider";
@@ -19,6 +21,7 @@ import { ModelPicker, type ModelSelection } from "./ModelPicker";
 interface NewSessionDialogProps {
   providers: ProviderView[];
   agentProfiles: AgentProfileView[];
+  initialAgentMode: Exclude<AgentMode, "chat">;
   initialWorkspacePath?: string | null;
   onClose: () => void;
   onCreated: (session: SessionView) => void;
@@ -27,11 +30,19 @@ interface NewSessionDialogProps {
 export function NewSessionDialog({
   providers,
   agentProfiles,
+  initialAgentMode,
   initialWorkspacePath = null,
   onClose,
   onCreated,
 }: NewSessionDialogProps) {
   const { confirm } = useDialog();
+  const availableAgentProfiles = useMemo(
+    () =>
+      agentProfiles.filter(
+        (profile) => profile.enabled && profileSupportsAgentMode(profile, initialAgentMode),
+      ),
+    [agentProfiles, initialAgentMode],
+  );
   const firstProvider = providers.find((provider) => provider.models.length > 0);
   const [selection, setSelection] = useState<ModelSelection | null>(
     firstProvider?.models[0]
@@ -40,8 +51,8 @@ export function NewSessionDialog({
   );
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("request_approval");
   const [agentProfileId, setAgentProfileId] = useState(
-    agentProfiles.find((profile) => profile.enabled && profile.id === "primary")?.id ??
-      agentProfiles.find((profile) => profile.enabled)?.id ??
+    availableAgentProfiles.find((profile) => profile.id === "primary")?.id ??
+      availableAgentProfiles[0]?.id ??
       "primary",
   );
   const [executionMode, setExecutionMode] = useState<SessionExecutionMode>("host");
@@ -92,6 +103,15 @@ export function NewSessionDialog({
       memorySelection.path === workspacePath &&
       memorySelection.request === memoryRefresh,
   );
+
+  useEffect(() => {
+    if (availableAgentProfiles.some((profile) => profile.id === agentProfileId)) return;
+    setAgentProfileId(
+      availableAgentProfiles.find((profile) => profile.id === "primary")?.id ??
+        availableAgentProfiles[0]?.id ??
+        "primary",
+    );
+  }, [agentProfileId, availableAgentProfiles]);
 
   const chooseWorkspace = async () => {
     const selected = await window.mingshen.chooseWorkspace();
@@ -153,6 +173,7 @@ export function NewSessionDialog({
         providerId: selectedModel.providerId,
         modelId: selectedModel.id,
         agentProfileId,
+        agentMode: initialAgentMode,
         workspacePath,
         reasoningLevel,
         permissionMode,
@@ -179,7 +200,10 @@ export function NewSessionDialog({
       />
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-session-title">
         <header className="dialog__header">
-          <h2 id="new-session-title">{tr("\u65B0\u5EFA\u4F1A\u8BDD")}</h2>
+          <div>
+            <h2 id="new-session-title">{tr("\u65B0\u5EFA\u4F1A\u8BDD")}</h2>
+            <p>{initialAgentMode === "work" ? "WorkAgent" : "CodeAgent"}</p>
+          </div>
           <button
             className="icon-button"
             type="button"
@@ -262,13 +286,11 @@ export function NewSessionDialog({
                   value={agentProfileId}
                   onChange={(event) => setAgentProfileId(event.target.value)}
                 >
-                  {agentProfiles
-                    .filter((profile) => profile.enabled)
-                    .map((profile) => (
-                      <option value={profile.id} key={profile.id}>
-                        {agentLabel(profile)}
-                      </option>
-                    ))}
+                  {availableAgentProfiles.map((profile) => (
+                    <option value={profile.id} key={profile.id}>
+                      {agentLabel(profile)}
+                    </option>
+                  ))}
                 </select>
               </label>
 
@@ -299,7 +321,7 @@ export function NewSessionDialog({
               </label>
             </div>
 
-            <AgentGuide profiles={agentProfiles} />
+            <AgentGuide profiles={availableAgentProfiles} />
             <div className="form-grid form-grid--two">
               <label className="field">
                 <span>{tr("\u6267\u884C\u9694\u79BB")}</span>

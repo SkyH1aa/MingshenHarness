@@ -47,6 +47,7 @@ import { ContextSettings } from "./ContextSettings";
 import { useDialog } from "./DialogProvider";
 import { ExtensionSettings } from "./ExtensionSettings";
 import { GitHubPluginSettings } from "./GitHubPluginSettings";
+import { GlobalShortcutsSettings } from "./GlobalShortcutsSettings";
 import { InterfaceStylePicker } from "./InterfaceStylePicker";
 import { LayoutPicker } from "./LayoutPicker";
 import { McpSettings } from "./McpSettings";
@@ -80,7 +81,14 @@ type SettingsSection =
   | "about";
 
 interface SettingsDrawerProps {
-  initialSection?: "appearance" | "permissions" | "context" | "extensions" | "mcp" | "project";
+  initialSection?:
+    | "appearance"
+    | "providers"
+    | "permissions"
+    | "context"
+    | "extensions"
+    | "mcp"
+    | "project";
   providers: ProviderView[];
   agentProfiles: AgentProfileView[];
   extensions: ExtensionView[];
@@ -644,6 +652,7 @@ function AppearanceSettings({
           <p className="form-error">{notificationError || notifications?.lastError}</p>
         ) : null}
       </section>
+      <GlobalShortcutsSettings />
       <section className="settings-block">
         <label className="field">
           <span>{tr("关闭窗口时")}</span>

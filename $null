@@ -1,0 +1,2 @@
+rg: apps/desktop/src/main/**/*.test.ts: 文件名、目录名或卷标语法不正确。 (os error 123)
+rg: apps/desktop/src/renderer/src/**/*.test.ts: 文件名、目录名或卷标语法不正确。 (os error 123)

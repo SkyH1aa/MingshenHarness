@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
+  COMPOSER_DRAFT_CONFLICT_MESSAGE,
   type ComposerDraft,
   type SaveComposerDraftInput,
   validateComposerDraftAttachment,
@@ -8,11 +9,13 @@ import {
   validateComposerDraftInput,
 } from "../../shared/composer-draft";
 import type {
+  AgentMode,
   AgentPermissionAction,
   AgentPermissionMap,
   AgentProfileRole,
   AgentProfileView,
   AnthropicNoneBehavior,
+  ChatGroupView,
   ExtensionType,
   ExtensionView,
   InputModality,
@@ -42,6 +45,8 @@ import {
   type PromptCachingSettings,
   providerPromptCachingKey,
 } from "../../shared/prompt-caching";
+import { queuedPromptSettingKey } from "../../shared/queued-prompt";
+import { sessionBuiltinCapabilitiesSettingKey } from "../../shared/session-builtin-capabilities";
 import type {
   SessionCatalogDelta,
   SessionPage,
@@ -50,7 +55,10 @@ import type {
 import { forkHostContext, hostContextKey } from "../chat/host-context";
 
 type Row = Record<string, unknown>;
-type StoredComposerDraft = Omit<SaveComposerDraftInput, "sessionId" | "addedAttachments">;
+type StoredComposerDraft = Omit<
+  SaveComposerDraftInput,
+  "sessionId" | "baseRevision" | "addedAttachments"
+>;
 
 const composerDraftKey = (sessionId: string) => `composer.draft.${sessionId}`;
 const composerAttachmentPrefix = (sessionId: string) => `composer.draft-attachment.${sessionId}.`;
@@ -75,6 +83,8 @@ interface SessionRecordInput {
   title: string;
   parentSessionId?: string | null;
   forkedFromMessageId?: string | null;
+  agentMode?: AgentMode;
+  chatGroupId?: string | null;
   providerId: string | null;
   modelId: string | null;
   agentProfileId: string;
@@ -88,6 +98,8 @@ interface SessionRecordInput {
 
 interface SessionRecordUpdate {
   title?: string | undefined;
+  agentMode?: AgentMode | undefined;
+  chatGroupId?: string | null | undefined;
   providerId?: string | undefined;
   modelId?: string | undefined;
   agentProfileId?: string | undefined;
@@ -121,6 +133,26 @@ interface McpServerRecordInput {
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
+}
+
+function asAgentMode(value: unknown): AgentMode {
+  return value === "work" || value === "chat" ? value : "code";
+}
+
+function asApplicableAgentModes(value: unknown): Array<Exclude<AgentMode, "chat">> {
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      parsed = null;
+    }
+  }
+  if (!Array.isArray(parsed)) return ["code", "work"];
+  const modes = parsed.filter(
+    (item): item is "code" | "work" => item === "code" || item === "work",
+  );
+  return modes.length ? [...new Set(modes)] : ["code", "work"];
 }
 
 function asNullableString(value: unknown): string | null {
@@ -446,6 +478,19 @@ export class Repository {
     this.database.prepare("delete from app_settings where key = ?").run(key);
   }
 
+  private removeSettingsWithPrefix(prefix: string): void {
+    this.database
+      .prepare("delete from app_settings where substr(key, 1, ?) = ?")
+      .run(prefix.length, prefix);
+  }
+
+  private copyBuiltinCapabilitySelection(sourceSessionId: string, targetSessionId: string): void {
+    const sourceKey = sessionBuiltinCapabilitiesSettingKey(sourceSessionId);
+    const selected = this.getSetting(sourceKey);
+    if (selected === null) return;
+    this.setSetting(sessionBuiltinCapabilitiesSettingKey(targetSessionId), selected);
+  }
+
   private composerDraftMetadata(sessionId: string): StoredComposerDraft | null {
     const stored = this.getSetting(composerDraftKey(sessionId));
     if (stored === null) {
@@ -526,6 +571,8 @@ export class Repository {
     try {
       if (!this.getSession(input.sessionId)) throw new Error("会话不存在。");
       const previous = this.composerDraftMetadata(input.sessionId);
+      if (input.baseRevision !== undefined && input.baseRevision !== (previous?.revision ?? null))
+        throw new Error(COMPOSER_DRAFT_CONFLICT_MESSAGE);
       const exists = this.database.prepare("select 1 from app_settings where key = ?");
       for (const id of input.attachmentIds)
         if (!addedIds.has(id) && !exists.get(composerAttachmentKey(input.sessionId, id)))
@@ -560,6 +607,7 @@ export class Repository {
       if (matches && current)
         this.saveComposerDraft({
           sessionId,
+          baseRevision: revision,
           revision,
           text: "",
           formatted: false,
@@ -606,6 +654,7 @@ export class Repository {
     topP?: number | null;
     maxSteps?: number | null;
     color?: string | null;
+    applicableModes?: Array<Exclude<AgentMode, "chat">>;
     builtin?: boolean;
   }): AgentProfileView {
     const now = new Date().toISOString();
@@ -628,6 +677,7 @@ export class Repository {
       input.topP ?? null,
       input.maxSteps ?? null,
       input.color?.trim() || null,
+      JSON.stringify(input.applicableModes ?? ["code", "work"]),
       now,
     ] as const;
     if (existing?.builtin) {
@@ -637,7 +687,7 @@ export class Repository {
             name = ?, description = ?, role = ?, instructions = ?, model_id = ?,
             read_only = ?, enabled = ?, hidden = ?, source_path = ?, content_hash = ?,
             permissions_json = ?, tool_allowlist_json = ?, temperature = ?, top_p = ?,
-            max_steps = ?, color = ?, updated_at = ?
+            max_steps = ?, color = ?, applicable_modes_json = ?, updated_at = ?
            where id = ?`,
         )
         .run(...values, id);
@@ -647,8 +697,9 @@ export class Repository {
           `insert into agent_profiles (
             id, name, description, role, instructions, model_id, read_only,
             builtin, enabled, hidden, source_path, content_hash, permissions_json,
-            tool_allowlist_json, temperature, top_p, max_steps, color, created_at, updated_at
-          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tool_allowlist_json, temperature, top_p, max_steps, color,
+            applicable_modes_json, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           on conflict(id) do update set
             name = excluded.name,
             description = excluded.description,
@@ -666,6 +717,7 @@ export class Repository {
             top_p = excluded.top_p,
             max_steps = excluded.max_steps,
             color = excluded.color,
+            applicable_modes_json = excluded.applicable_modes_json,
             updated_at = excluded.updated_at`,
         )
         .run(id, ...values.slice(0, 6), input.builtin ? 1 : 0, ...values.slice(6), now);
@@ -1177,6 +1229,37 @@ export class Repository {
     return extension;
   }
 
+  updateExtensionInstall(input: {
+    id: string;
+    name: string;
+    description: string;
+    sourcePath: string;
+    installedPath: string;
+    manifestJson: string;
+    contentHash: string;
+  }): ExtensionView {
+    const result = this.database
+      .prepare(
+        `update agent_extensions
+         set name = ?, description = ?, source_path = ?, installed_path = ?,
+             manifest_json = ?, content_hash = ?
+         where id = ? and type = 'plugin'`,
+      )
+      .run(
+        input.name,
+        input.description,
+        input.sourcePath,
+        input.installedPath,
+        input.manifestJson,
+        input.contentHash,
+        input.id,
+      );
+    if (!result.changes) throw new Error("要更新的插件不存在。");
+    const extension = this.getExtension(input.id);
+    if (!extension) throw new Error("插件更新后无法读取记录。");
+    return extension;
+  }
+
   getExtension(extensionId: string): ExtensionView | null {
     const row = this.database
       .prepare("select * from agent_extensions where id = ?")
@@ -1353,6 +1436,15 @@ export class Repository {
     return rows.map((row) => this.mapSession(row));
   }
 
+  listWorkspaceSessions(): SessionView[] {
+    const rows = this.database
+      .prepare(
+        "select * from sessions where agent_mode in ('code', 'work') order by pinned desc, updated_at desc",
+      )
+      .all() as Row[];
+    return rows.map((row) => this.mapSession(row));
+  }
+
   sessionRevision(): number {
     return Number(
       this.database.prepare("select coalesce(max(seq),0) as revision from session_changes").get()
@@ -1376,6 +1468,11 @@ export class Repository {
       (input.parentId !== undefined &&
         input.parentId !== null &&
         typeof input.parentId !== "string") ||
+      (input.agentMode !== undefined &&
+        !["code", "work", "chat", "workspace"].includes(input.agentMode)) ||
+      (input.chatGroupId !== undefined &&
+        input.chatGroupId !== null &&
+        (typeof input.chatGroupId !== "string" || input.chatGroupId.length > 200)) ||
       (input.archived !== undefined && typeof input.archived !== "boolean")
     )
       throw new Error("Invalid session page request.");
@@ -1383,6 +1480,15 @@ export class Repository {
     const query = (input.query ?? "").trim().slice(0, 500);
     const filters = ["s.archived = ?"];
     const values: Array<string | number | null> = [input.archived ? 1 : 0];
+    if (input.agentMode === "workspace") filters.push("s.agent_mode in ('code', 'work')");
+    else if (input.agentMode) {
+      filters.push("s.agent_mode = ?");
+      values.push(input.agentMode);
+    } else filters.push("s.agent_mode <> 'chat'");
+    if (input.chatGroupId !== undefined) {
+      filters.push("s.chat_group_id is ?");
+      values.push(input.chatGroupId);
+    }
     if (input.parentId !== undefined) {
       filters.push("s.parent_session_id is ?");
       values.push(input.parentId);
@@ -1419,7 +1525,13 @@ export class Repository {
         revision?: number;
         anchor?: { pinned: number; time: string; id: string };
       };
-      const scope = JSON.stringify([input.workspacePath, input.parentId, Boolean(input.archived)]);
+      const scope = JSON.stringify([
+        input.workspacePath,
+        input.parentId,
+        Boolean(input.archived),
+        input.agentMode ?? null,
+        input.chatGroupId,
+      ]);
       if (
         decoded.query !== query ||
         decoded.scope !== scope ||
@@ -1462,7 +1574,13 @@ export class Repository {
             JSON.stringify({
               offset: offset + rows.length,
               query,
-              scope: JSON.stringify([input.workspacePath, input.parentId, Boolean(input.archived)]),
+              scope: JSON.stringify([
+                input.workspacePath,
+                input.parentId,
+                Boolean(input.archived),
+                input.agentMode ?? null,
+                input.chatGroupId,
+              ]),
               revision,
               anchor: rows.length
                 ? {
@@ -1520,7 +1638,9 @@ export class Repository {
   sessionWorkspacePaths(): string[] {
     return (
       this.database
-        .prepare("select distinct workspace_path from sessions where workspace_path is not null")
+        .prepare(
+          "select distinct workspace_path from sessions where workspace_path is not null and agent_mode in ('code', 'work')",
+        )
         .all() as Row[]
     ).map((row) => asString(row.workspace_path));
   }
@@ -1530,7 +1650,7 @@ export class Repository {
       this.database
         .prepare(`select workspace_path, count(*) as total, max(max(last_opened_at,updated_at,created_at)) as latest,
       (select count(*) from sessions children join sessions parents on children.parent_session_id=parents.id where parents.workspace_path is roots.workspace_path and children.archived=0) as children
-      from sessions roots where archived=0 and parent_session_id is null group by workspace_path order by latest desc`)
+      from sessions roots where archived=0 and parent_session_id is null and agent_mode in ('code', 'work') group by workspace_path order by latest desc`)
         .all() as Row[]
     ).map((row) => ({
       path: asNullableString(row.workspace_path),
@@ -1538,6 +1658,54 @@ export class Repository {
       latest: asString(row.latest),
       children: asNumber(row.children),
     }));
+  }
+
+  listChatGroups(): ChatGroupView[] {
+    const rows = this.database
+      .prepare("select * from chat_groups order by updated_at desc, name collate nocase asc")
+      .all() as Row[];
+    return rows.map((row) => this.mapChatGroup(row));
+  }
+
+  getChatGroup(id: string): ChatGroupView | null {
+    const row = this.database.prepare("select * from chat_groups where id = ?").get(id) as
+      | Row
+      | undefined;
+    return row ? this.mapChatGroup(row) : null;
+  }
+
+  createChatGroup(name: string): ChatGroupView {
+    const normalized = this.validateChatGroupName(name);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database
+      .prepare("insert into chat_groups (id, name, created_at, updated_at) values (?, ?, ?, ?)")
+      .run(id, normalized, now, now);
+    return this.getChatGroup(id) as ChatGroupView;
+  }
+
+  renameChatGroup(id: string, name: string): ChatGroupView {
+    if (!this.getChatGroup(id)) throw new Error("聊天分组不存在。");
+    const normalized = this.validateChatGroupName(name);
+    this.database
+      .prepare("update chat_groups set name = ?, updated_at = ? where id = ?")
+      .run(normalized, new Date().toISOString(), id);
+    return this.getChatGroup(id) as ChatGroupView;
+  }
+
+  removeChatGroup(id: string): void {
+    if (!this.getChatGroup(id)) return;
+    this.database.exec("savepoint remove_chat_group");
+    try {
+      this.database
+        .prepare("update sessions set chat_group_id = null, updated_at = ? where chat_group_id = ?")
+        .run(new Date().toISOString(), id);
+      this.database.prepare("delete from chat_groups where id = ?").run(id);
+      this.database.exec("release remove_chat_group");
+    } catch (error) {
+      this.database.exec("rollback to remove_chat_group; release remove_chat_group");
+      throw error;
+    }
   }
 
   getSession(sessionId: string): SessionView | null {
@@ -1606,6 +1774,7 @@ export class Repository {
       if (hostContext.length) this.setSetting(hostContextKey(fork.id), hostContext);
       for (const extensionId of this.listSessionExtensionIds(source.id))
         this.setSessionExtension(fork.id, extensionId, true);
+      this.copyBuiltinCapabilitySelection(source.id, fork.id);
       // Copy durable conversation state only. Pending approvals, grants and tasks are independent.
       if (source.approvalMode === "automatic")
         this.setSetting(`permissions.approval.${fork.id}`, "automatic");
@@ -1655,6 +1824,12 @@ export class Repository {
   }
 
   insertSession(input: SessionRecordInput): SessionView {
+    const parent = input.parentSessionId ? this.getSession(input.parentSessionId) : null;
+    if (input.parentSessionId && !parent) throw new Error("父会话不存在。");
+    if (parent?.agentMode === "chat") throw new Error("ChatAgent 不支持子 Agent。");
+    const agentMode = input.agentMode ?? parent?.agentMode ?? "code";
+    if (parent && agentMode !== parent.agentMode)
+      throw new Error("子 Agent 必须继承父会话的 CodeAgent/WorkAgent 模式。");
     const id = randomUUID();
     const now = new Date().toISOString();
 
@@ -1662,17 +1837,20 @@ export class Repository {
       .prepare(
         `insert into sessions (
           id, title, parent_session_id, forked_from_message_id,
+          agent_mode, chat_group_id,
           provider_id, model_id, agent_profile_id, workspace_path, system_prompt,
           reasoning_level, permission_mode, execution_mode, patch_only,
           status, archived, pinned,
           created_at, updated_at, last_opened_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 0, 0, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 0, 0, ?, ?, ?)`,
       )
       .run(
         id,
         input.title,
         input.parentSessionId ?? null,
         input.forkedFromMessageId ?? null,
+        asAgentMode(agentMode),
+        input.chatGroupId ?? null,
         input.providerId,
         input.modelId,
         input.agentProfileId,
@@ -1691,6 +1869,7 @@ export class Repository {
     if (!session) {
       throw new Error("Session insert failed.");
     }
+    if (parent) this.copyBuiltinCapabilitySelection(parent.id, session.id);
 
     return session;
   }
@@ -1703,6 +1882,9 @@ export class Repository {
 
     const next = {
       title: update.title ?? current.title,
+      agentMode: update.agentMode ?? current.agentMode ?? "code",
+      chatGroupId:
+        update.chatGroupId === undefined ? (current.chatGroupId ?? null) : update.chatGroupId,
       providerId: update.providerId ?? current.providerId,
       modelId: update.modelId ?? current.modelId,
       agentProfileId: update.agentProfileId ?? current.agentProfileId,
@@ -1722,7 +1904,8 @@ export class Repository {
     this.database
       .prepare(
         `update sessions set
-          title = ?, provider_id = ?, model_id = ?, agent_profile_id = ?, workspace_path = ?,
+          title = ?, agent_mode = ?, chat_group_id = ?,
+          provider_id = ?, model_id = ?, agent_profile_id = ?, workspace_path = ?,
           system_prompt = ?, reasoning_level = ?, permission_mode = ?,
           execution_mode = ?, patch_only = ?,
           status = ?, archived = ?, pinned = ?, updated_at = ?
@@ -1730,6 +1913,8 @@ export class Repository {
       )
       .run(
         next.title,
+        next.agentMode,
+        next.chatGroupId,
         next.providerId,
         next.modelId,
         next.agentProfileId,
@@ -1774,10 +1959,10 @@ export class Repository {
     this.removeSetting(`tokenSaver.cache.${sessionId}`);
     this.removeSetting(hostContextKey(sessionId));
     this.removeSetting(composerDraftKey(sessionId));
-    const prefix = composerAttachmentPrefix(sessionId);
-    this.database
-      .prepare("delete from app_settings where substr(key, 1, ?) = ?")
-      .run(prefix.length, prefix);
+    this.removeSetting(queuedPromptSettingKey(sessionId));
+    this.removeSetting(sessionBuiltinCapabilitiesSettingKey(sessionId));
+    this.removeSettingsWithPrefix(composerAttachmentPrefix(sessionId));
+    this.removeSettingsWithPrefix(`tool.output.${sessionId}.`);
   }
 
   touchSession(sessionId: string): void {
@@ -2182,6 +2367,8 @@ export class Repository {
       ...(row.child_count !== undefined ? { childCount: asNumber(row.child_count) } : {}),
       title: asString(row.title),
       parentSessionId: asNullableString(row.parent_session_id),
+      agentMode: asAgentMode(row.agent_mode),
+      chatGroupId: asNullableString(row.chat_group_id),
       providerId: asNullableString(row.provider_id),
       modelId: asNullableString(row.model_id),
       agentProfileId: asString(row.agent_profile_id) || "primary",
@@ -2226,9 +2413,27 @@ export class Repository {
       topP: typeof row.top_p === "number" ? row.top_p : null,
       maxSteps: typeof row.max_steps === "number" ? row.max_steps : null,
       color: asNullableString(row.color),
+      applicableModes: asApplicableAgentModes(row.applicable_modes_json),
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
     };
+  }
+
+  private mapChatGroup(row: Row): ChatGroupView {
+    return {
+      id: asString(row.id),
+      name: asString(row.name),
+      createdAt: asString(row.created_at),
+      updatedAt: asString(row.updated_at),
+    };
+  }
+
+  private validateChatGroupName(name: string): string {
+    const normalized = name.trim();
+    if (!normalized || normalized.length > 80) {
+      throw new Error("聊天分组名称长度必须为 1 到 80 个字符。");
+    }
+    return normalized;
   }
 
   private mapExtension(row: Row): ExtensionView {

@@ -3,11 +3,22 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { OpenDialogOptions } from "electron";
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, webContents } from "electron";
-import type { BootstrapData } from "../shared/domain";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  nativeImage,
+  screen,
+  shell,
+  webContents,
+} from "electron";
+import type { BootstrapData, ChatStreamEvent } from "../shared/domain";
 import type { AppInfo } from "../shared/ipc";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { localizeError } from "../shared/localized-errors";
+import type { QuickChatAction, QuickChatState } from "../shared/quick-chat";
 import type { SessionBatchTarget } from "../shared/session-catalog";
 import { normalizeUiPreferences } from "../shared/ui-preferences";
 import {
@@ -22,8 +33,10 @@ import { ApprovalNotifications } from "./desktop/approval-notifications";
 import { CompletionNotifications } from "./desktop/completion-notifications";
 import { flushComposerDrafts } from "./desktop/composer-draft-flush";
 import { DesktopController } from "./desktop/desktop-controller";
+import { DesktopShortcuts } from "./desktop/desktop-shortcuts";
 import { reloadInterfaceWindow } from "./desktop/interface-reload";
 import { QuestionNotifications } from "./desktop/question-notifications";
+import { QuickChatController } from "./desktop/quick-chat-controller";
 import { RuntimeDependencies } from "./desktop/runtime-dependencies";
 import { UpdateService } from "./desktop/update-service";
 import { createUpdateFetcher } from "./desktop/update-transport";
@@ -58,6 +71,12 @@ const commandDataDirectory = process.argv
   ?.slice("--mingshen-user-data=".length);
 
 let mainWindow: BrowserWindow | null = null;
+let quickChatWindow: BrowserWindow | null = null;
+let quickChat: QuickChatController | null = null;
+let shortcuts: DesktopShortcuts | null = null;
+let quickChatVisibilityOperation: Promise<unknown> = Promise.resolve();
+let quickChatVisibilityRevision = 0;
+let quickChatVisibilityRequested = false;
 let services: AppServices | null = null;
 let disposed = false;
 let disposal: Promise<void> | null = null;
@@ -68,6 +87,240 @@ let backgroundStarted = false;
 let completions: CompletionNotifications | null = null;
 let runtimeLogs: RuntimeLogService | null = null;
 let updateInstaller: string | null = null;
+
+function applicationWindows(): BrowserWindow[] {
+  return [mainWindow, quickChatWindow].filter((window): window is BrowserWindow =>
+    Boolean(window && !window.isDestroyed()),
+  );
+}
+
+async function flushApplicationDrafts(
+  purpose: "save" | "shutdown" | "interface-reload",
+): Promise<void> {
+  const results = await Promise.allSettled(
+    applicationWindows().map((window) => flushComposerDrafts(window, ipcMain, undefined, purpose)),
+  );
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
+}
+
+function emitRuntimeEvent(event: ChatStreamEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send(IPC_CHANNELS.runtimeEvent, event);
+  if (
+    quickChatWindow &&
+    !quickChatWindow.isDestroyed() &&
+    !quickChatWindow.webContents.isCrashed() &&
+    quickChat?.permitsRuntimeEvent(event)
+  )
+    quickChatWindow.webContents.send(IPC_CHANNELS.runtimeEvent, event);
+}
+
+function emitComposerDraftChanged(
+  senderId: number,
+  sessionId: string,
+  revision: string | null,
+): void {
+  for (const window of applicationWindows()) {
+    if (window.webContents.id === senderId) continue;
+    if (
+      window === quickChatWindow &&
+      (!quickChat?.acceptsSession(sessionId) || window.webContents.isCrashed())
+    )
+      continue;
+    window.webContents.send(IPC_CHANNELS.composerDraftChanged, sessionId, revision);
+  }
+}
+
+function createQuickChatWindow(): BrowserWindow {
+  const bounds = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = Math.min(480, bounds.width);
+  const height = Math.min(680, bounds.height);
+  const window = new BrowserWindow({
+    width,
+    height,
+    x: Math.round(bounds.x + (bounds.width - width) / 2),
+    y: Math.round(bounds.y + (bounds.height - height) / 2),
+    minWidth: Math.min(400, width),
+    minHeight: Math.min(460, height),
+    show: false,
+    frame: false,
+    skipTaskbar: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#09090b",
+    title: "Mingshen Harness · ChatAgent",
+    icon: isPackagedBuild
+      ? join(process.resourcesPath, "icon.ico")
+      : join(app.getAppPath(), "build", "icon.ico"),
+    webPreferences: {
+      preload: join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      spellcheck: false,
+    },
+  });
+  window.setAlwaysOnTop(quickChat?.pinned ?? false, "floating");
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  window.webContents.on("will-navigate", (event) => event.preventDefault());
+  const recoverWindow = (source: string, detail: string) => {
+    recordRuntimeError(source, detail);
+    if (quickChatWindow === window) quickChatWindow = null;
+    if (!window.isDestroyed()) window.destroy();
+  };
+  window.webContents.on("render-process-gone", (_event, details) =>
+    recoverWindow("quick-chat.process", `Renderer process exited: ${details.reason}`),
+  );
+  window.on("unresponsive", () =>
+    recordRuntimeError("quick-chat.unresponsive", "Renderer process became unresponsive"),
+  );
+  window.webContents.on("did-fail-load", (_event, code, description, _url, mainFrame) => {
+    if (mainFrame && code !== -3) recoverWindow("quick-chat.load", `${description} (${code})`);
+  });
+  window.webContents.on("did-finish-load", () => {
+    void quickChat
+      ?.state()
+      .then((state) => {
+        if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.quickChatEvent, state);
+      })
+      .catch((cause) => recordRuntimeError("quick-chat.state", cause));
+  });
+  window.on("close", (event) => {
+    if (disposed || disposal) return;
+    event.preventDefault();
+    void hideQuickChat().catch((cause) => recordRuntimeError("quick-chat.hide", cause));
+  });
+  window.on("closed", () => {
+    if (quickChatWindow === window) quickChatWindow = null;
+  });
+  window.on("focus", () => {
+    if (quickChat?.currentSessionId) completions?.markRead(quickChat.currentSessionId);
+  });
+  if (isDevelopment && process.env.ELECTRON_RENDERER_URL) {
+    const url = new URL(process.env.ELECTRON_RENDERER_URL);
+    url.searchParams.set("surface", "quick-chat");
+    void window.loadURL(url.href);
+  } else
+    void window.loadFile(join(__dirname, "../renderer/index.html"), {
+      query: { surface: "quick-chat" },
+    });
+  return window;
+}
+
+function queueQuickChatVisibility<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = quickChatVisibilityOperation.then(operation, operation);
+  quickChatVisibilityOperation = pending.catch(() => undefined);
+  return pending;
+}
+
+function showQuickChat(forceNew = false): Promise<QuickChatState | null> {
+  return queueQuickChatVisibility(() => showQuickChatNow(forceNew));
+}
+
+async function showQuickChatNow(forceNew = false): Promise<QuickChatState | null> {
+  if (disposed || disposal || updateInstaller) return null;
+  if (!desktop?.state().accepted || desktop.state().manualPending) {
+    desktop?.show();
+    return null;
+  }
+  const controller = quickChat;
+  if (!controller) return null;
+  quickChatVisibilityRequested = true;
+  const visibilityRevision = ++quickChatVisibilityRevision;
+  try {
+    const draftResults = await Promise.allSettled([
+      flushComposerDrafts(mainWindow, ipcMain, 2_000, "save").catch((cause) =>
+        recordRuntimeError("quick-chat.draft-flush", cause),
+      ),
+      flushComposerDrafts(quickChatWindow, ipcMain, undefined, "save"),
+    ]);
+    const draftFailure = draftResults.find((result) => result.status === "rejected");
+    if (draftFailure?.status === "rejected") throw draftFailure.reason;
+    const state = await controller.activate(forceNew);
+    if (disposed || disposal) return null;
+    if (
+      !quickChatWindow ||
+      quickChatWindow.isDestroyed() ||
+      quickChatWindow.webContents.isCrashed()
+    ) {
+      if (quickChatWindow && !quickChatWindow.isDestroyed()) quickChatWindow.destroy();
+      quickChatWindow = createQuickChatWindow();
+    }
+    const window = quickChatWindow;
+    window.setAlwaysOnTop(state.pinned, "floating");
+    if (window.isMinimized()) window.restore();
+    if (window.webContents.isLoadingMainFrame())
+      window.webContents.once("did-finish-load", () => {
+        if (
+          !window.isDestroyed() &&
+          quickChatVisibilityRequested &&
+          visibilityRevision === quickChatVisibilityRevision
+        ) {
+          window.show();
+          window.focus();
+        }
+      });
+    else if (quickChatVisibilityRequested && visibilityRevision === quickChatVisibilityRevision) {
+      window.webContents.send(IPC_CHANNELS.quickChatEvent, state);
+      window.show();
+      window.focus();
+    }
+    if (state.session) completions?.markRead(state.session.id);
+    return state;
+  } catch (cause) {
+    if (visibilityRevision === quickChatVisibilityRevision) quickChatVisibilityRequested = false;
+    throw cause;
+  }
+}
+
+function hideQuickChat(): Promise<void> {
+  return queueQuickChatVisibility(hideQuickChatNow);
+}
+
+async function hideQuickChatNow(): Promise<void> {
+  await flushComposerDrafts(quickChatWindow, ipcMain, undefined, "save");
+  quickChatVisibilityRequested = false;
+  quickChatVisibilityRevision += 1;
+  if (quickChatWindow && !quickChatWindow.isDestroyed()) quickChatWindow.hide();
+}
+
+function toggleQuickChat(): Promise<void> {
+  return queueQuickChatVisibility(async () => {
+    if (disposed || disposal || updateInstaller) return;
+    const window = quickChatWindow;
+    if (
+      window &&
+      !window.isDestroyed() &&
+      !window.isMinimized() &&
+      (window.isVisible() || quickChatVisibilityRequested)
+    )
+      await hideQuickChatNow();
+    else await showQuickChatNow();
+  });
+}
+
+function reportShortcutFailure(accelerator: string, cause?: unknown): void {
+  runtimeLogs?.record(
+    "desktop.shortcut",
+    `Cannot register ${accelerator}: ${cause ? String(cause) : "already in use"}`,
+    {},
+    "warn",
+  );
+}
+
+function localPluginArgument(value: unknown, label: string, maxLength = 160): string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value.length > maxLength ||
+    value.includes("\0")
+  )
+    throw new Error(`Invalid local plugin ${label}.`);
+  return value.trim();
+}
 
 function startBackgroundServices(): void {
   if (backgroundStarted || !desktop?.state().accepted) return;
@@ -136,11 +389,14 @@ function createMainWindow(): BrowserWindow {
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  window.webContents.on("render-process-gone", (_event, details) =>
+  window.on("blur", () => shortcuts?.setCallbacksSuppressed(false));
+  window.webContents.on("did-start-loading", () => shortcuts?.setCallbacksSuppressed(false));
+  window.webContents.on("render-process-gone", (_event, details) => {
+    shortcuts?.setCallbacksSuppressed(false);
     recordRuntimeError("renderer.process", `Renderer process exited: ${details.reason}`, {
       code: String(details.exitCode),
-    }),
-  );
+    });
+  });
   window.webContents.on("did-fail-load", (_event, code, description, _url, mainFrame) => {
     if (mainFrame) recordRuntimeError("renderer.load", description, { code: String(code) });
   });
@@ -223,7 +479,7 @@ function registerIpcHandlers(): void {
       fetchPackage: createUpdateFetcher(),
       activeTasks: () => services?.chatService.activeConversationCount() ?? 0,
       handoff: async (installer) => {
-        await flushComposerDrafts(mainWindow, ipcMain, undefined, "save");
+        await flushApplicationDrafts("save");
         if (disposal || !services?.chatService.prepareForUpdate()) return false;
         updateInstaller = installer;
         // app.relaunch below runs the installer only after services and SQLite close.
@@ -236,9 +492,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle = (channel, listener) =>
     originalHandle(channel, async (event, ...args) => {
       const frame = event.senderFrame;
+      const quickSender = Boolean(
+        quickChatWindow &&
+          !quickChatWindow.isDestroyed() &&
+          event.sender.id === quickChatWindow.webContents.id,
+      );
       const trusted =
-        mainWindow &&
-        event.sender.id === mainWindow.webContents.id &&
+        applicationWindows().some((window) => event.sender.id === window.webContents.id) &&
         frame === event.sender.mainFrame &&
         (process.env.ELECTRON_RENDERER_URL && isDevelopment
           ? frame.url.startsWith(`${new URL(process.env.ELECTRON_RENDERER_URL).origin}/`)
@@ -247,6 +507,14 @@ function registerIpcHandlers(): void {
       if (!trusted) {
         recordRuntimeError("ipc.security", "Untrusted IPC sender", { operation: channel });
         throw new Error("Untrusted IPC sender");
+      }
+      if (quickSender && !quickChat?.permitsIpc(channel, args)) {
+        recordRuntimeError(
+          "ipc.security",
+          "Quick Chat IPC is outside the current ChatAgent scope",
+          { operation: channel },
+        );
+        throw new Error("ChatAgent 小窗口仅允许操作当前对话。");
       }
       const allowedBeforeConsent: string[] = [
         IPC_CHANNELS.appInfo,
@@ -293,7 +561,7 @@ function registerIpcHandlers(): void {
       }
     });
   ipcMain.handle(IPC_CHANNELS.editCommand, (event, command: unknown) => {
-    if (!mainWindow?.isFocused() || !event.sender.isFocused())
+    if (!BrowserWindow.fromWebContents(event.sender)?.isFocused() || !event.sender.isFocused())
       throw new Error("The application must be focused to edit clipboard content.");
     switch (command) {
       case "copy":
@@ -399,7 +667,7 @@ function registerIpcHandlers(): void {
     );
   });
   ipcMain.handle(IPC_CHANNELS.uiReloadInterface, async () => {
-    await flushComposerDrafts(mainWindow, ipcMain, undefined, "interface-reload");
+    await flushApplicationDrafts("interface-reload");
     reloadInterfaceWindow({
       window: mainWindow,
       activeConversations: requireServices().chatService.activeConversationCount(),
@@ -443,7 +711,61 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.desktopState, () => {
     if (!desktop) throw new Error("Application services are not ready.");
-    return desktop.state();
+    return {
+      ...desktop.state(),
+      shortcuts: shortcuts?.status(),
+      shortcutBindings: shortcuts?.state().settings,
+    };
+  });
+  ipcMain.handle(IPC_CHANNELS.desktopShortcutsGet, () => {
+    if (!shortcuts) throw new Error("Application services are not ready.");
+    return shortcuts.state();
+  });
+  ipcMain.handle(IPC_CHANNELS.desktopShortcutsSet, (_event, settings: unknown) => {
+    if (!shortcuts) throw new Error("Application services are not ready.");
+    const result = shortcuts.update(settings);
+    mainWindow?.webContents.send(IPC_CHANNELS.desktopEvent, { type: "shortcuts-changed" });
+    return result;
+  });
+  ipcMain.handle(IPC_CHANNELS.desktopShortcutRecording, (event, recording: unknown) => {
+    if (typeof recording !== "boolean") throw new Error("Invalid shortcut recording state.");
+    if (recording && (!mainWindow?.isFocused() || event.sender.id !== mainWindow.webContents.id))
+      throw new Error("Focus the main window before recording a shortcut.");
+    shortcuts?.setCallbacksSuppressed(recording);
+    mainWindow?.webContents.send(IPC_CHANNELS.desktopEvent, { type: "shortcuts-changed" });
+  });
+  ipcMain.handle(IPC_CHANNELS.quickChatState, () => {
+    if (!quickChat) throw new Error("Application services are not ready.");
+    return quickChat.state();
+  });
+  ipcMain.handle(IPC_CHANNELS.quickChatAction, async (_event, action: QuickChatAction) => {
+    if (!["show", "new", "hide", "open-main", "configure", "toggle-pin", "toggle"].includes(action))
+      throw new Error("Invalid quick chat action.");
+    if (action === "show" || action === "new") return showQuickChat(action === "new");
+    if (action === "toggle") {
+      await toggleQuickChat();
+      return quickChat?.state() ?? null;
+    }
+    if (action === "toggle-pin") {
+      if (!quickChat) throw new Error("Application services are not ready.");
+      const state = await quickChat.togglePinned();
+      if (quickChatWindow && !quickChatWindow.isDestroyed()) {
+        quickChatWindow.setAlwaysOnTop(state.pinned, "floating");
+        quickChatWindow.webContents.send(IPC_CHANNELS.quickChatEvent, state);
+      }
+      return state;
+    }
+    await hideQuickChat();
+    if (action === "open-main" || action === "configure") {
+      desktop?.show();
+      mainWindow?.webContents.send(
+        IPC_CHANNELS.desktopEvent,
+        action === "configure"
+          ? { type: "open-provider-settings" }
+          : { type: "select-session", sessionId: quickChat?.currentSessionId },
+      );
+    }
+    return null;
   });
   ipcMain.handle(IPC_CHANNELS.completionState, () => completions?.state());
   ipcMain.handle(IPC_CHANNELS.completionDraftAck, (_event, id) => {
@@ -458,8 +780,14 @@ function registerIpcHandlers(): void {
     if (id !== null && typeof id !== "string") throw new Error("Invalid session ID.");
     completions?.setActiveSession(id);
   });
-  ipcMain.handle(IPC_CHANNELS.desktopAction, (_event, action, value, remember) => {
+  ipcMain.handle(IPC_CHANNELS.desktopAction, (event, action, value, remember) => {
     if (!desktop) throw new Error("Application services are not ready.");
+    if (event.sender.id === quickChatWindow?.webContents.id) {
+      if (action === "show") return showQuickChat();
+      if (action === "minimize") return quickChatWindow?.minimize();
+      if (action === "close" || action === "tray") return hideQuickChat();
+      throw new Error("Invalid quick chat window action.");
+    }
     return desktop.action(action, value, remember);
   });
   ipcMain.handle(IPC_CHANNELS.policyRead, (_event, document, locale) => {
@@ -522,10 +850,10 @@ function registerIpcHandlers(): void {
         await current.agentProfileService.syncWorkspace(workspace);
       }
       const page = options?.paged ? current.repository.sessionPage({ limit: 100 }) : null;
-      const sessions = page ? page.sessions : current.repository.listSessions();
+      const sessions = page ? page.sessions : current.repository.listWorkspaceSessions();
       if (options?.selectedId && !sessions.some((item) => item.id === options.selectedId)) {
         const selected = current.repository.getSession(options.selectedId);
-        if (selected) sessions.push(selected);
+        if (selected && selected.agentMode !== "chat") sessions.push(selected);
       }
       for (const item of [...sessions]) {
         let parentId = item.parentSessionId;
@@ -548,6 +876,7 @@ function registerIpcHandlers(): void {
       return {
         providers: current.repository.listProviders(),
         sessions,
+        chatGroups: current.repository.listChatGroups(),
         ...(page
           ? {
               sessionCatalog: {
@@ -587,6 +916,18 @@ function registerIpcHandlers(): void {
     requireServices().repository.getSession(id),
   );
   ipcMain.handle(IPC_CHANNELS.sessionGroups, () => requireServices().repository.sessionGroups());
+  ipcMain.handle(IPC_CHANNELS.chatGroupsList, () =>
+    requireServices().sessionService.listChatGroups(),
+  );
+  ipcMain.handle(IPC_CHANNELS.chatGroupCreate, (_event, name: string) =>
+    requireServices().sessionService.createChatGroup(name),
+  );
+  ipcMain.handle(IPC_CHANNELS.chatGroupRename, (_event, id: string, name: string) =>
+    requireServices().sessionService.renameChatGroup(id, name),
+  );
+  ipcMain.handle(IPC_CHANNELS.chatGroupRemove, (_event, id: string) =>
+    requireServices().sessionService.removeChatGroup(id),
+  );
 
   ipcMain.handle(IPC_CHANNELS.workspaceChoose, async (): Promise<string | null> => {
     const options: OpenDialogOptions = {
@@ -670,9 +1011,12 @@ function registerIpcHandlers(): void {
     return requireServices().sessionService.create(input);
   });
 
-  ipcMain.handle(IPC_CHANNELS.sessionCreateInWorkspace, (_event, workspacePath: string | null) => {
-    return requireServices().sessionService.createInWorkspace(workspacePath);
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.sessionCreateInWorkspace,
+    (_event, workspacePath: string | null, agentMode?: "code" | "work") => {
+      return requireServices().sessionService.createInWorkspace(workspacePath, agentMode);
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.sessionOpenWorkspace, (_event, sessionId: string) => {
     if (!desktop) throw new Error("Application services are not ready.");
     return desktop.openSessionWorkspace(sessionId);
@@ -693,6 +1037,13 @@ function registerIpcHandlers(): void {
       if (input.archived === true && isBusy(input.sessionId))
         throw new Error("请先停止会话及其子任务，再归档。");
       const session = current.repository.getSession(input.sessionId);
+      if (
+        session &&
+        input.agentMode !== undefined &&
+        input.agentMode !== session.agentMode &&
+        isBusy(input.sessionId)
+      )
+        throw new Error("请先停止会话及其子任务，再切换 CodeAgent/WorkAgent 模式。");
       const projectKey = (path: string | null) => (path ? canonicalProjectMemoryRoot(path) : "");
       if (
         session &&
@@ -747,14 +1098,17 @@ function registerIpcHandlers(): void {
     return requireServices().chatService.send(input);
   });
   ipcMain.handle(IPC_CHANNELS.composerDraftGet, (_event, sessionId: string) =>
-    requireServices().repository.getComposerDraft(sessionId),
+    requireServices().chatService.getComposerDraft(sessionId),
   );
-  ipcMain.handle(IPC_CHANNELS.composerDraftSave, (_event, input) =>
-    requireServices().repository.saveComposerDraft(input),
-  );
-  ipcMain.handle(IPC_CHANNELS.composerDraftClear, (_event, sessionId: string, revision: string) =>
-    requireServices().repository.clearComposerDraft(sessionId, revision),
-  );
+  ipcMain.handle(IPC_CHANNELS.composerDraftSave, (event, input) => {
+    requireServices().chatService.saveComposerDraft(input);
+    emitComposerDraftChanged(event.sender.id, input.sessionId, input.revision);
+  });
+  ipcMain.handle(IPC_CHANNELS.composerDraftClear, (event, sessionId: string, revision: string) => {
+    const cleared = requireServices().repository.clearComposerDraft(sessionId, revision);
+    if (cleared) emitComposerDraftChanged(event.sender.id, sessionId, null);
+    return cleared;
+  });
 
   ipcMain.handle(IPC_CHANNELS.chatRewrite, (_event, input) => {
     return requireServices().chatService.rewriteAndSend(input);
@@ -853,8 +1207,8 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.extensionsChooseDirectory, async (): Promise<string | null> => {
     const options: OpenDialogOptions = {
-      title: "导入 Skills 或 Codex Plugin",
-      buttonLabel: "导入此目录",
+      title: "选择技能、插件或本地开发市场目录",
+      buttonLabel: "选择此目录",
       properties: ["openDirectory"],
     };
     const result = mainWindow
@@ -896,6 +1250,56 @@ function registerIpcHandlers(): void {
     },
   );
 
+  ipcMain.handle(IPC_CHANNELS.sessionBuiltinCapabilitiesList, (_event, sessionId: string) =>
+    requireServices().sessionBuiltinCapabilityService.list(sessionId),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.sessionBuiltinCapabilitySet,
+    (_event, sessionId: string, capabilityId: string, selected: boolean) =>
+      requireServices().sessionBuiltinCapabilityService.set(sessionId, capabilityId, selected),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.queuedPromptList, (_event, sessionId: string) => {
+    return requireServices().queuedPromptService.list(sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.queuedPromptAdd, (_event, input) => {
+    return requireServices().queuedPromptService.add(input);
+  });
+  ipcMain.handle(IPC_CHANNELS.queuedPromptUpdate, (_event, input) => {
+    return requireServices().queuedPromptService.update(input);
+  });
+  ipcMain.handle(IPC_CHANNELS.queuedPromptReorder, (_event, input) => {
+    return requireServices().queuedPromptService.reorder(input);
+  });
+  ipcMain.handle(IPC_CHANNELS.queuedPromptRemove, (_event, sessionId: string, itemId: string) => {
+    requireServices().queuedPromptService.remove(sessionId, itemId);
+  });
+  ipcMain.handle(IPC_CHANNELS.queuedPromptContinue, (_event, sessionId: string, itemId: string) => {
+    return requireServices().queuedPromptService.continue(sessionId, itemId);
+  });
+  const queueEditOwners = new Set<number>();
+  ipcMain.handle(IPC_CHANNELS.queuedPromptBeginEdit, (event, sessionId: string, itemId: string) => {
+    const owner = event.sender;
+    if (!queueEditOwners.has(owner.id)) {
+      queueEditOwners.add(owner.id);
+      const abandon = () => services?.queuedPromptService.abandonEdits(owner.id);
+      owner.on("did-start-loading", abandon);
+      owner.on("render-process-gone", abandon);
+      owner.once("destroyed", () => {
+        abandon();
+        queueEditOwners.delete(owner.id);
+      });
+    }
+    return requireServices().queuedPromptService.beginEdit(sessionId, itemId, owner.id);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.queuedPromptEndEdit,
+    (event, sessionId: string, editId: string, abandon = false) => {
+      requireServices().queuedPromptService.endEdit(sessionId, editId, abandon, event.sender.id);
+    },
+  );
+
   ipcMain.handle(IPC_CHANNELS.scheduledTasksList, () => {
     return requireServices().scheduledTaskService.list();
   });
@@ -932,6 +1336,57 @@ function registerIpcHandlers(): void {
       skillPath,
     );
   });
+
+  ipcMain.handle(IPC_CHANNELS.localPluginValidate, (_event, path: unknown) =>
+    requireServices().localPluginMarketplaceService.validatePlugin(
+      localPluginArgument(path, "directory", 32_768),
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginMarketsList, () =>
+    requireServices().localPluginMarketplaceService.listSources(),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginMarketAdd, (_event, path: unknown) =>
+    requireServices().localPluginMarketplaceService.addMarket(
+      localPluginArgument(path, "market directory", 32_768),
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginMarketGet, (_event, id: unknown) =>
+    requireServices().localPluginMarketplaceService.getMarket(localPluginArgument(id, "market ID")),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginMarketRefresh, (_event, id: unknown) =>
+    requireServices().localPluginMarketplaceService.refreshMarket(
+      localPluginArgument(id, "market ID"),
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginMarketRemove, (_event, id: unknown) =>
+    requireServices().localPluginMarketplaceService.removeMarketSource(
+      localPluginArgument(id, "market ID"),
+    ),
+  );
+  const installLocalPlugin = async (marketId: unknown, pluginName: unknown, update: boolean) => {
+    const current = requireServices();
+    if (current.chatService.activeConversationCount() > 0)
+      throw new Error("请先等待 Agent 任务结束或手动停止，再安装或更新本地插件。");
+    const id = localPluginArgument(marketId, "market ID");
+    const name = localPluginArgument(pluginName, "name");
+    const result = update
+      ? await current.localPluginMarketplaceService.updatePlugin(id, name)
+      : await current.localPluginMarketplaceService.installPlugin(id, name);
+    try {
+      await current.mcpService.importPluginServers(result.extension.id);
+    } catch (cause) {
+      result.warnings.push(
+        `插件已安装，但 MCP 声明尚未完成同步；可重新点击安装以重试：${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    return result;
+  };
+  ipcMain.handle(IPC_CHANNELS.localPluginInstall, (_event, marketId: unknown, name: unknown) =>
+    installLocalPlugin(marketId, name, false),
+  );
+  ipcMain.handle(IPC_CHANNELS.localPluginUpdate, (_event, marketId: unknown, name: unknown) =>
+    installLocalPlugin(marketId, name, true),
+  );
 
   ipcMain.handle(IPC_CHANNELS.mcpList, () => {
     return requireServices().mcpService.list();
@@ -1493,12 +1948,15 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
               cause instanceof Error ? cause.message : String(cause),
             );
           }
-          for (const window of BrowserWindow.getAllWindows()) {
-            if (!window.isDestroyed()) {
-              window.webContents.send(IPC_CHANNELS.runtimeEvent, event);
-            }
-          }
+          emitRuntimeEvent(event);
         },
+      });
+      quickChat = new QuickChatController({
+        repository: services.repository,
+        sessionService: services.sessionService,
+        context: (sessionId) => requireServices().chatService.restoreContext(sessionId),
+        isBusy: (sessionId) => requireServices().chatService.isSessionBusy(sessionId),
+        emit: emitRuntimeEvent,
       });
       registerIpcHandlers();
       mainWindow = createMainWindow();
@@ -1516,7 +1974,25 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
           session.executionMode === "worktree"
             ? (requireServices().worktreeService.get(sessionId) ?? session.workspacePath)
             : session.workspacePath,
+        () => void showQuickChat().catch((cause) => recordRuntimeError("quick-chat.show", cause)),
       );
+      shortcuts = new DesktopShortcuts(
+        globalShortcut,
+        {
+          quickChat: () =>
+            void toggleQuickChat().catch((cause) => recordRuntimeError("quick-chat.toggle", cause)),
+          toggleMain: () => {
+            if (!disposed && !disposal) desktop?.toggle();
+          },
+        },
+        reportShortcutFailure,
+        {
+          load: () => requireServices().repository.getSetting("desktop.shortcuts"),
+          persist: (settings) =>
+            requireServices().repository.setSetting("desktop.shortcuts", settings),
+        },
+      );
+      shortcuts.start();
       const openNotificationSession = (sessionId: string) => {
         completions?.setActiveSession(sessionId);
         desktop?.show();
@@ -1591,17 +2067,17 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
     if (disposed) return;
     event.preventDefault();
     if (disposal) return;
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setEnabled(false);
+    for (const window of applicationWindows()) window.setEnabled(false);
     disposal = (async () => {
       try {
-        await flushComposerDrafts(mainWindow, ipcMain);
+        await flushApplicationDrafts("shutdown");
       } catch (cause) {
         recordRuntimeError("desktop.draft-flush", cause);
         const error = cause instanceof Error ? cause.message : String(cause);
         updateInstaller = null;
         services?.chatService.cancelUpdatePreparation();
         updates?.cancelHandoff(error);
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setEnabled(true);
+        for (const window of applicationWindows()) window.setEnabled(true);
         desktop?.cancelQuit();
         mainWindow?.webContents.send(IPC_CHANNELS.desktopEvent, {
           type: "composer-draft-error",
@@ -1611,6 +2087,7 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
         return;
       }
       completions?.dispose();
+      shortcuts?.stop();
       updates?.stop();
       try {
         await Promise.all([services?.dispose(), updates?.shutdown()]);
@@ -1626,4 +2103,5 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
       }
     })();
   });
+  app.on("will-quit", () => shortcuts?.stop());
 }

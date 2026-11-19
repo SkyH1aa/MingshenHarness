@@ -1,16 +1,66 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const { builtinModules } = require('node:module');
+const { builtinModules, createRequire } = require('node:module');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { TENCENT_MEMORY_RESOURCES, checkTencentMemoryResources } = require('./tencent-memory-package.cjs');
 const { validateWindowsIcon } = require('./windows-icon.cjs');
 const { checkElectronRuntime } = require('./provision-electron-runtime.cjs');
 const desktop = path.resolve(__dirname, '../apps/desktop');
+const requireDesktop = createRequire(path.resolve(desktop, 'package.json'));
+const YAML = requireDesktop('yaml');
+const WORK_SOURCE_CATALOG = 'work-sources/catalog.json';
+const WORK_SOURCE_ARCHIVE_SHA256 =
+  'D7AEAEE62CF99E3E49391A581B16C8F4E1091A6D9DCB46FB20E9F83769FD9A17';
+const WORK_SOURCE_ENTRY_COUNT = 124;
+const WORK_SOURCE_UNIQUE_HASH_COUNT = 104;
+const WORK_SOURCE_DESIGN_RESOURCE_COUNT = 82;
+const WORK_SOURCE_COMPATIBILITY = new Set(['native', 'adapted', 'resource', 'reference']);
+const WORK_SOURCE_LICENSE_DISPOSITIONS = new Set(['verbatim', 'adapted', 'reference-only']);
+const PDF_SOURCE_PATHS = [
+  'pdf/SKILL.md',
+  'pdf-reading/SKILL.md',
+  'pdf-1/0.1.7/skills/pdf/SKILL.md',
+  'pdf-1/0.1.8/skills/pdf/SKILL.md',
+  'pdf-1/0.2.1/skills/pdf/SKILL.md',
+  'pdf-1/0.2.1/skills/pdf-viewer/SKILL.md',
+  'pdf-1/0.2.2/skills/pdf/SKILL.md',
+  'pdf-1/0.2.2/skills/pdf-viewer/SKILL.md',
+  'pdf-1/0.2.3/skills/pdf/SKILL.md',
+  'pdf-1/0.2.3/skills/pdf-viewer/SKILL.md',
+];
+const PDF_UNIQUE_BODY_COUNT = 5;
+const IMPORTED_SKILL_SOURCES = [
+  {
+    id: 'work-ppt-master',
+    sourceName: 'ppt-master',
+    version: '6.9.0',
+    relativeRoot: 'work-ppt-master/references/source',
+    repositoryRoot: 'ppt-master/skills/ppt-master',
+    expectedFiles: 13089,
+    expectedBytes: 39892466,
+    expectedTreeSha256:
+      '6e8023b4b8ab81e0fb4cffb71c1dcea8dd4f6f6abca490395c21fb273bfe473c',
+    excludedRelativePaths: new Set(['.env.example']),
+  },
+  {
+    id: 'work-asd-ste100',
+    sourceName: 'asd-ste100',
+    version: '0.4.0',
+    relativeRoot: 'work-asd-ste100/references/source',
+    repositoryRoot: 'asd-ste100-skill-master',
+    expectedFiles: 9,
+    expectedBytes: 231661,
+    expectedTreeSha256:
+      '0886b021b0f18d8997736af0a3b51a3492dd2c3b378ebb7484bead7803e04930',
+    excludedRelativePaths: new Set(),
+  },
+];
 const indexedLanguages = ['python', 'go', 'rust', 'java', 'c', 'cpp', 'csharp'];
 const authoringPackages = new Map([
   ['docx', '9.15.3'],
   ['pptxgenjs', '4.0.1'],
+  ['exceljs', '4.4.0'],
   ['@xmldom/xmldom', '0.8.15'],
   ['marked', null],
   ['katex', null],
@@ -43,7 +93,12 @@ function runtimeEntryCandidates(root, main) {
 }
 
 function packageRoot(resolveModule, name) {
-  const entry = resolveModule(name);
+  let entry;
+  try {
+    entry = resolveModule(`${name}/package.json`);
+  } catch {
+    entry = resolveModule(name);
+  }
   let current = path.dirname(entry);
   while (!fs.existsSync(path.join(current, 'package.json'))) {
     const parent = path.dirname(current);
@@ -166,9 +221,432 @@ function checkParsers(resolveModule, unpackedRoot) {
     if (unpackedRoot) assert.ok(parser.startsWith(unpackedRoot), 'Dynamic parsers must be unpacked');
   }
 }
-const required = [
+function skillResourceFiles(directory, local = '') {
+  return fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en')).flatMap(entry => {
+    assert.ok(!entry.isSymbolicLink(), `Linked bundled skill resource: ${path.join(directory, entry.name)}`);
+    const file = path.posix.join(local, entry.name);
+    return entry.isDirectory() ? skillResourceFiles(path.join(directory, entry.name), file)
+      : entry.isFile() ? [`prompts/skills/${file}`] : [];
+  });
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function normalizedSkillDescription(value) {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function safeCatalogRelative(value, label) {
+  assert.equal(typeof value, 'string', `${label} must be a string`);
+  assert.ok(value.length > 0, `${label} must not be empty`);
+  assert.ok(!value.includes('\\'), `${label} must use portable forward slashes`);
+  assert.ok(!path.posix.isAbsolute(value), `${label} must be relative`);
+  assert.ok(!/^[a-z]:/i.test(value), `${label} must not contain a drive letter`);
+  const normalized = path.posix.normalize(value);
+  assert.equal(normalized, value, `${label} must be normalized`);
+  assert.ok(normalized !== '.', `${label} must not be the root itself`);
+  assert.ok(!normalized.startsWith('../'), `${label} must not escape its root`);
+  return normalized;
+}
+
+function assertPathWithin(root, target, label) {
+  const local = path.relative(root, target);
+  assert.ok(
+    local && local !== '..' && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local),
+    `${label} escapes its root`,
+  );
+}
+
+function assertNoLinkedPath(root, relative, label, kind) {
+  const rootStat = fs.lstatSync(root);
+  assert.ok(rootStat.isDirectory(), `${label} root is unavailable`);
+  assert.ok(!rootStat.isSymbolicLink(), `${label} root must not be linked`);
+  let current = root;
+  for (const part of relative.split('/')) {
+    current = path.join(current, part);
+    const metadata = fs.lstatSync(current);
+    assert.ok(!metadata.isSymbolicLink(), `${label} must not traverse a linked path: ${relative}`);
+  }
+  if (kind === 'file') assert.ok(fs.lstatSync(current).isFile(), `${label} must be a file`);
+  if (kind === 'directory') assert.ok(fs.lstatSync(current).isDirectory(), `${label} must be a directory`);
+  return current;
+}
+
+function readSkillFrontmatter(file, label) {
+  const text = fs.readFileSync(file, 'utf8');
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  assert.ok(match, `${label} is missing YAML frontmatter`);
+  const metadata = YAML.parse(match[1]);
+  assert.ok(metadata && typeof metadata === 'object', `${label} frontmatter must be an object`);
+  assert.equal(typeof metadata.name, 'string', `${label} frontmatter name is missing`);
+  assert.ok(metadata.name.trim(), `${label} frontmatter name is empty`);
+  assert.equal(typeof metadata.description, 'string', `${label} frontmatter description is missing`);
+  assert.ok(metadata.description.trim(), `${label} frontmatter description is empty`);
+  return metadata;
+}
+
+function inventoryWorkSkills(sourceRoot) {
+  const rows = new Map();
+  function walk(directory, local = '') {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      assert.ok(!entry.isSymbolicLink(), `Linked WorkAgent skill source: ${file}`);
+      const relative = path.posix.join(local, entry.name);
+      if (entry.isDirectory()) walk(file, relative);
+      else if (entry.isFile() && entry.name === 'SKILL.md') {
+        const bytes = fs.readFileSync(file);
+        const metadata = readSkillFrontmatter(file, `WorkAgent skill ${relative}`);
+        rows.set(relative, {
+          sourcePath: relative,
+          sourceSha256: sha256(bytes),
+          name: metadata.name,
+          description: metadata.description,
+        });
+      }
+    }
+  }
+  walk(sourceRoot);
+  return rows;
+}
+
+function checkWorkSourceCatalog(skillsRoot, sourceRoot) {
+  const catalogFile = path.join(skillsRoot, WORK_SOURCE_CATALOG);
+  assert.ok(fs.existsSync(catalogFile), `Missing work source catalog: ${catalogFile}`);
+  const catalog = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
+  assert.equal(catalog.schemaVersion, 1, 'Unsupported work source catalog schema version');
+  assert.equal(
+    catalog.sourceArchiveSha256,
+    WORK_SOURCE_ARCHIVE_SHA256,
+    'Unexpected WorkAgentSkill source archive SHA-256',
+  );
+  assert.ok(Array.isArray(catalog.entries), 'Work source catalog entries must be an array');
+  assert.equal(
+    catalog.entries.length,
+    WORK_SOURCE_ENTRY_COUNT,
+    'Work source catalog must contain every physical source entry',
+  );
+
+  const ids = new Set();
+  const sourcePaths = new Set();
+  const sourceHashes = new Set();
+  const bySourcePath = new Map();
+  let designResources = 0;
+  for (const entry of catalog.entries) {
+    assert.ok(entry && typeof entry === 'object' && !Array.isArray(entry), 'Invalid work source entry');
+    for (const field of [
+      'id',
+      'name',
+      'description',
+      'family',
+      'version',
+      'sourcePath',
+      'sourceSha256',
+      'entry',
+      'resourceRoot',
+      'compatibility',
+      'licenseDisposition',
+    ])
+      assert.ok(Object.hasOwn(entry, field), `Work source entry is missing ${field}`);
+    assert.match(
+      entry.id,
+      /^builtin:work-source-[a-z0-9][a-z0-9-]*-(?:[0-9]+(?:-[0-9]+){2}|loose)-[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/,
+      `Invalid work source id: ${entry.id}`,
+    );
+    assert.ok(!ids.has(entry.id), `Duplicate work source id: ${entry.id}`);
+    ids.add(entry.id);
+    assert.ok(typeof entry.name === 'string' && entry.name.trim(), `Missing name: ${entry.id}`);
+    assert.ok(
+      typeof entry.description === 'string' && entry.description.trim(),
+      `Missing description: ${entry.id}`,
+    );
+    assert.ok(typeof entry.family === 'string' && entry.family.trim(), `Missing family: ${entry.id}`);
+    assert.ok(
+      entry.version === null || /^\d+\.\d+\.\d+$/.test(entry.version),
+      `Invalid source version: ${entry.id}`,
+    );
+    assert.match(entry.sourceSha256, /^[a-f0-9]{64}$/, `Invalid source SHA-256: ${entry.id}`);
+    assert.ok(
+      entry.id.endsWith(entry.sourceSha256.slice(0, 8)),
+      `Work source id must end with the source SHA-256 prefix: ${entry.id}`,
+    );
+    assert.ok(
+      WORK_SOURCE_COMPATIBILITY.has(entry.compatibility),
+      `Invalid compatibility: ${entry.id}`,
+    );
+    assert.ok(
+      WORK_SOURCE_LICENSE_DISPOSITIONS.has(entry.licenseDisposition),
+      `Invalid license disposition: ${entry.id}`,
+    );
+
+    const sourcePath = safeCatalogRelative(entry.sourcePath, `${entry.id} sourcePath`);
+    assert.ok(sourcePath.endsWith('/SKILL.md'), `Work source must be a SKILL.md: ${entry.id}`);
+    const sourceFamily = sourcePath.split('/')[0];
+    const runtimeFamily = sourceFamily.replace(/-1$/, '');
+    assert.equal(runtimeFamily, entry.family, `Source family mismatch: ${entry.id}`);
+    if (entry.version) {
+      assert.ok(
+        sourcePath.split('/').includes(entry.version),
+        `Source version is missing from sourcePath: ${entry.id}`,
+      );
+    } else {
+      assert.ok(
+        !sourcePath.split('/').some(part => /^\d+\.\d+\.\d+$/.test(part)),
+        `Loose source unexpectedly has a version directory: ${entry.id}`,
+      );
+    }
+    assert.ok(!sourcePaths.has(sourcePath), `Duplicate physical work source path: ${sourcePath}`);
+    sourcePaths.add(sourcePath);
+    assert.ok(!bySourcePath.has(sourcePath), `Duplicate work source mapping: ${sourcePath}`);
+    bySourcePath.set(sourcePath, entry);
+    sourceHashes.add(entry.sourceSha256);
+
+    const entryPath = safeCatalogRelative(entry.entry, `${entry.id} entry`);
+    const resourceRootPath = safeCatalogRelative(entry.resourceRoot, `${entry.id} resourceRoot`);
+    assert.match(entryPath, /(?:^|\/)SKILL\.md$/i, `Work source entry must be SKILL.md: ${entry.id}`);
+    const entryFile = assertNoLinkedPath(skillsRoot, entryPath, `${entry.id} entry`, 'file');
+    const resourceRoot = assertNoLinkedPath(
+      skillsRoot,
+      resourceRootPath,
+      `${entry.id} resourceRoot`,
+      'directory',
+    );
+    assertPathWithin(skillsRoot, entryFile, `${entry.id} entry`);
+    assertPathWithin(skillsRoot, resourceRoot, `${entry.id} resourceRoot`);
+    assertPathWithin(resourceRoot, entryFile, `${entry.id} entry within resourceRoot`);
+    const entryText = fs.readFileSync(entryFile, 'utf8');
+    assert.ok(entryText.trim(), `Empty work source entry: ${entry.id}`);
+    assert.ok(!entryText.includes('\0'), `Binary work source entry: ${entry.id}`);
+
+    const designMarker = '/skills/design/design-resources/';
+    if (entry.family === 'design' && sourcePath.includes(designMarker)) {
+      designResources += 1;
+      const copied = sourcePath.slice(sourcePath.indexOf(designMarker) + designMarker.length);
+      const copiedRelative = `work-visual-design/references/design-resources/${copied}`;
+      const copiedFile = assertNoLinkedPath(
+        skillsRoot,
+        copiedRelative,
+        `${sourcePath} copied design resource`,
+        'file',
+      );
+      assertPathWithin(skillsRoot, copiedFile, `${sourcePath} copied design resource`);
+      assert.equal(
+        sha256(fs.readFileSync(copiedFile)),
+        entry.sourceSha256,
+        `Design source resource copy is not byte-identical: ${sourcePath}`,
+      );
+      assert.ok(
+        entryText.includes(`resource:"references/design-resources/${copied}"`),
+        `Design adapter does not route to its exact copied resource: ${sourcePath}`,
+      );
+    }
+  }
+  assert.equal(ids.size, WORK_SOURCE_ENTRY_COUNT, 'Work source ids are incomplete');
+  assert.equal(sourcePaths.size, WORK_SOURCE_ENTRY_COUNT, 'Work source paths are incomplete');
+  assert.equal(
+    sourceHashes.size,
+    WORK_SOURCE_UNIQUE_HASH_COUNT,
+    'Work source catalog must preserve 104 unique bodies',
+  );
+  assert.equal(
+    designResources,
+    WORK_SOURCE_DESIGN_RESOURCE_COUNT,
+    'Work source catalog must reuse every copied design resource',
+  );
+
+  for (const sourcePath of PDF_SOURCE_PATHS) {
+    const entry = bySourcePath.get(sourcePath);
+    assert.ok(entry, `Missing PDF source variant: ${sourcePath}`);
+    const target = path.join(skillsRoot, safeCatalogRelative(entry.entry, `${sourcePath} entry`));
+    assert.ok(fs.existsSync(target) && fs.statSync(target).isFile(), `PDF source is not loadable: ${sourcePath}`);
+  }
+  const pdfHashes = new Set(
+    PDF_SOURCE_PATHS.map(sourcePath => bySourcePath.get(sourcePath)?.sourceSha256),
+  );
+  assert.equal(
+    pdfHashes.size,
+    PDF_UNIQUE_BODY_COUNT,
+    `All ${PDF_SOURCE_PATHS.length} PDF source paths and ${PDF_UNIQUE_BODY_COUNT} unique bodies must remain loadable`,
+  );
+
+  if (sourceRoot) {
+    assert.ok(fs.existsSync(sourceRoot), `Missing WorkAgentSkill source directory: ${sourceRoot}`);
+    const sourceStat = fs.lstatSync(sourceRoot);
+    assert.ok(sourceStat.isDirectory() && !sourceStat.isSymbolicLink(), 'WorkAgentSkill source root must be a real directory');
+    const physical = inventoryWorkSkills(sourceRoot);
+    assert.equal(
+      physical.size,
+      WORK_SOURCE_ENTRY_COUNT,
+      'WorkAgentSkill source inventory must contain 124 physical SKILL.md files',
+    );
+    assert.equal(
+      new Set([...physical.values()].map(row => row.sourceSha256)).size,
+      WORK_SOURCE_UNIQUE_HASH_COUNT,
+      'WorkAgentSkill source inventory must have 104 unique bodies',
+    );
+    assert.deepEqual(
+      [...physical.keys()].sort(),
+      [...sourcePaths].sort(),
+      'Work source catalog does not cover the exact physical source paths',
+    );
+    for (const [sourcePath, row] of physical) {
+      const entry = bySourcePath.get(sourcePath);
+      assert.ok(entry, `Unlisted WorkAgentSkill source: ${sourcePath}`);
+      assert.equal(entry.sourceSha256, row.sourceSha256, `Stale WorkAgentSkill source SHA: ${sourcePath}`);
+      assert.equal(entry.name, row.name, `Stale WorkAgentSkill source name: ${sourcePath}`);
+      assert.equal(
+        normalizedSkillDescription(entry.description),
+        normalizedSkillDescription(row.description),
+        `Stale WorkAgentSkill source description: ${sourcePath}`,
+      );
+    }
+    const archive = path.resolve(sourceRoot, '..', 'WorkAgentSkill.7z');
+    if (fs.existsSync(archive))
+      assert.equal(
+        sha256(fs.readFileSync(archive)),
+        WORK_SOURCE_ARCHIVE_SHA256.toLowerCase(),
+        'WorkAgentSkill archive SHA-256 does not match the catalog',
+      );
+  }
+  return { entryCount: ids.size, uniqueShaCount: sourceHashes.size, designResources };
+}
+
+function importedSkillTreeDescriptor(root, excludedRelativePaths = new Set()) {
+  const rootMetadata = fs.lstatSync(root);
+  assert.ok(rootMetadata.isDirectory(), `Imported skill source is not a directory: ${root}`);
+  assert.ok(!rootMetadata.isSymbolicLink(), `Imported skill source root is linked: ${root}`);
+  const files = [];
+  let bytes = 0;
+  function walk(directory, local = '') {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      const relative = path.posix.join(local, entry.name);
+      assert.ok(!entry.isSymbolicLink(), `Linked imported skill resource: ${absolute}`);
+      if (entry.isDirectory()) {
+        walk(absolute, relative);
+        continue;
+      }
+      assert.ok(entry.isFile(), `Unsupported imported skill resource: ${absolute}`);
+      if (excludedRelativePaths.has(relative)) continue;
+      const metadata = fs.lstatSync(absolute);
+      assert.ok(metadata.isFile() && !metadata.isSymbolicLink(), `Invalid imported skill resource: ${absolute}`);
+      bytes += metadata.size;
+      files.push({ absolute, relative });
+    }
+  }
+  walk(root);
+  files.sort((left, right) => left.relative.localeCompare(right.relative, 'en'));
+  const tree = createHash('sha256');
+  for (const file of files) {
+    tree.update(Buffer.from(file.relative, 'utf8'));
+    tree.update(Buffer.from([0]));
+    tree.update(createHash('sha256').update(fs.readFileSync(file.absolute)).digest());
+  }
+  return {
+    files: files.length,
+    bytes,
+    treeSha256: tree.digest('hex'),
+    paths: files.map(file => file.relative),
+  };
+}
+
+function assertImportedSkillSource(descriptor, expected, label) {
+  assert.equal(
+    descriptor.files,
+    expected.expectedFiles,
+    `${label} must contain ${expected.expectedFiles} packaged resources`,
+  );
+  assert.equal(
+    descriptor.bytes,
+    expected.expectedBytes,
+    `${label} must contain ${expected.expectedBytes} resource bytes`,
+  );
+  assert.equal(
+    descriptor.treeSha256,
+    expected.expectedTreeSha256,
+    `${label} deterministic tree SHA-256 changed`,
+  );
+}
+
+function checkImportedSkillSources(skillsRoot, repositoryRoot) {
+  for (const expected of IMPORTED_SKILL_SOURCES) {
+    const packagedRoot = path.join(
+      skillsRoot,
+      ...expected.relativeRoot.split('/'),
+    );
+    assertNoLinkedPath(
+      skillsRoot,
+      expected.relativeRoot,
+      `${expected.id} imported source`,
+      'directory',
+    );
+    const packaged = importedSkillTreeDescriptor(
+      packagedRoot,
+      expected.excludedRelativePaths,
+    );
+    assertImportedSkillSource(packaged, expected, expected.id);
+    assert.ok(
+      packaged.paths.every(relative => !/(?:^|\/)\.env(?:\.example)?$/i.test(relative)),
+      `${expected.id} must not package an environment or credential template`,
+    );
+    const metadata = readSkillFrontmatter(
+      path.join(packagedRoot, 'SKILL.md'),
+      `${expected.id} source entry`,
+    );
+    assert.equal(metadata.name, expected.sourceName, `${expected.id} source name changed`);
+    assert.equal(
+      String(metadata.metadata?.version),
+      expected.version,
+      `${expected.id} source version changed`,
+    );
+    assert.ok(
+      fs.existsSync(path.join(packagedRoot, 'LICENSE')),
+      `${expected.id} must package its upstream license`,
+    );
+    if (repositoryRoot) {
+      const sourceRoot = path.resolve(repositoryRoot, expected.repositoryRoot);
+      assert.ok(
+        fs.existsSync(sourceRoot),
+        `Missing imported skill repository source: ${sourceRoot}`,
+      );
+      const source = importedSkillTreeDescriptor(
+        sourceRoot,
+        expected.excludedRelativePaths,
+      );
+      assertImportedSkillSource(source, expected, `${expected.id} repository source`);
+      assert.equal(
+        packaged.treeSha256,
+        source.treeSha256,
+        `${expected.id} packaged source is stale`,
+      );
+    }
+  }
+  return IMPORTED_SKILL_SOURCES.map(source => source.id);
+}
+
+const bundledSkills = skillResourceFiles(path.join(desktop, 'resources/prompts/skills'));
+const required = [...new Set([
   ...TENCENT_MEMORY_RESOURCES.map(file => `tencentdb-memory/${file}`),
   'documents/document-worker.cjs',
+  'documents/office-com-verify.ps1',
+  'prompts/chat.md', 'prompts/work.md',
+  ...['code-engineering', 'code-debugging', 'code-verification', 'code-frontend', 'code-platform',
+    'work-word', 'work-spreadsheets', 'work-presentations', 'work-analysis', 'work-research',
+    'work-operations', 'artifact-quality', 'work-pdf', 'work-visual-design', 'work-visualization',
+    'work-image-sourcing', 'work-ppt-master', 'work-asd-ste100',
+    'skill-creator', 'plugin-creator', 'harness-plugin-api'].map(name => `prompts/skills/${name}.md`),
+  ...[
+    'code-engineering/references/large-change-execution.md',
+    'code-debugging/references/failure-forensics.md',
+    'code-verification/references/test-design.md',
+    'code-frontend/references/visual-acceptance.md',
+    'code-platform/references/release-safety.md',
+    'work-word/references/editorial-quality.md',
+    'work-spreadsheets/references/report-surfaces.md',
+    'work-presentations/references/story-and-layout.md',
+    'artifact-quality/references/format-acceptance.md',
+  ].map(name => `prompts/skills/${name}`),
   'native/codex-sandbox.exe', 'native/LICENSE', 'native/NOTICE',
   'prompts/runtime.md', 'prompts/compaction.md', 'docs/USER_GUIDE.md', 'docs/USER_GUIDE.en.md',
   'docs/CHANGELOG.md', 'docs/CHANGELOG.en.md',
@@ -177,20 +655,64 @@ const required = [
   'docs/DISCLAIMER.md', 'docs/DISCLAIMER.en.md',
   'lsp/typescript/lib/tsserver.js', 'lsp/typescript/lib/typescript.js', 'lsp/typescript-language-server/lib/cli.mjs',
   'sdk/mingshen-client.mjs', 'sdk/mingshen-acp.mjs', 'icon.png', 'icon.ico', 'THIRD_PARTY_NOTICES.md',
-];
+  'sdk/plugin-dev/mingshen-plugin.mjs', 'sdk/plugin-dev/README.md', 'docs/LOCAL_PLUGINS.md',
+  ...bundledSkills,
+])];
 function sourcePath(item) {
   if (item.startsWith('docs/')) return path.resolve(desktop, '../..', item);
   if (item === 'THIRD_PARTY_NOTICES.md') return path.resolve(desktop, '../..', item);
   if (item.startsWith('icon.')) return path.join(desktop, 'build', item);
   return path.join(desktop, 'resources', item);
 }
+
+function isEmptyPackageResourceAllowed(item) {
+  return (
+    /^prompts\/skills\/work-sources\/entries\/[a-z0-9-]+\/.+/.test(item) &&
+    path.posix.basename(item) !== 'SKILL.md'
+  );
+}
+
 function check(root) {
   const version = require(path.join(desktop, 'package.json')).version;
   for (const item of required) {
     const file = root ? path.join(root, item) : sourcePath(item);
-    assert.ok(fs.existsSync(file) && fs.statSync(file).size > 0, `Missing package resource: ${file}`);
+    const metadata = fs.existsSync(file) ? fs.statSync(file) : null;
+    assert.ok(
+      metadata &&
+        metadata.isFile() &&
+        (metadata.size > 0 || isEmptyPackageResourceAllowed(item)),
+      `Missing, non-file, or empty package resource: ${file}`,
+    );
+    if (root && item.startsWith('prompts/skills/'))
+      assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'),
+        createHash('sha256').update(fs.readFileSync(sourcePath(item))).digest('hex'), `Stale bundled skill resource: ${item}`);
     if (item.startsWith('docs/'))
       assert.ok(fs.readFileSync(file, 'utf8').split(/\r?\n/).slice(0, 5).join('\n').includes(version), `Stale embedded document version: ${item}`);
+  }
+  const skillsRoot = root
+    ? path.join(root, 'prompts/skills')
+    : path.join(desktop, 'resources/prompts/skills');
+  const workSourceRoot = root ? null : path.resolve(desktop, '../../WorkAgentSkill');
+  checkWorkSourceCatalog(skillsRoot, workSourceRoot);
+  checkImportedSkillSources(
+    skillsRoot,
+    root ? null : path.resolve(desktop, '../..'),
+  );
+  const designManifestPath = 'prompts/skills/work-visual-design/references/design-entry-manifest.json';
+  const designManifest = JSON.parse(fs.readFileSync(root ? path.join(root, designManifestPath) : sourcePath(designManifestPath), 'utf8'));
+  assert.equal(designManifest.entryCount, 82, 'Incomplete bundled design entry manifest');
+  assert.equal(designManifest.entries.length, designManifest.entryCount, 'Missing design resource entries');
+  const designRoot = root ? path.join(root, 'prompts/skills/work-visual-design') : sourcePath('prompts/skills/work-visual-design');
+  const designTargets = new Set();
+  for (const entry of designManifest.entries) {
+    assert.equal(typeof entry.targetResource, 'string', 'Missing design target');
+    assert.ok(entry.targetResource.startsWith('references/design-resources/'), 'Design target outside bundled references');
+    const target = path.resolve(designRoot, entry.targetResource);
+    const local = path.relative(designRoot, target);
+    assert.ok(local && local !== '..' && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local), 'Escaping design resource');
+    assert.ok(!designTargets.has(target), 'Duplicate design resource target');
+    designTargets.add(target);
+    assert.ok(fs.existsSync(target) && fs.statSync(target).isFile(), `Missing design entry: ${entry.targetResource}`);
   }
   const native = root ? path.join(root, 'native/codex-sandbox.exe') : sourcePath('native/codex-sandbox.exe');
   assert.equal(createHash('sha256').update(fs.readFileSync(native)).digest('hex'), '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42', 'Native runtime integrity');
@@ -238,3 +760,8 @@ if (require.main === module) {
 
 module.exports.checkAuthoringRuntime = checkAuthoringRuntime;
 module.exports.checkPackagedAuthoringRuntime = checkPackagedAuthoringRuntime;
+module.exports.checkWorkSourceCatalog = checkWorkSourceCatalog;
+module.exports.checkImportedSkillSources = checkImportedSkillSources;
+module.exports.importedSkillTreeDescriptor = importedSkillTreeDescriptor;
+module.exports.inventoryWorkSkills = inventoryWorkSkills;
+module.exports.isEmptyPackageResourceAllowed = isEmptyPackageResourceAllowed;

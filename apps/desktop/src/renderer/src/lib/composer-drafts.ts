@@ -3,6 +3,10 @@ import type {
   ComposerDraftAttachment,
   SaveComposerDraftInput,
 } from "../../../shared/composer-draft";
+import {
+  COMPOSER_DRAFT_CONFLICT_MESSAGE,
+  isComposerDraftConflict,
+} from "../../../shared/composer-draft";
 import type { AttachmentKind } from "../../../shared/domain";
 
 export interface DraftAttachment {
@@ -26,7 +30,10 @@ export interface ComposerDraftState {
   ready: boolean;
   saving: boolean;
   error: string | null;
+  conflict: boolean;
 }
+
+export type ComposerDraftConflictResolution = "overwrite" | "reload";
 
 interface DraftApi {
   getComposerDraft(sessionId: string): Promise<ComposerDraft | null>;
@@ -39,6 +46,8 @@ interface DraftEntry {
   listeners: Set<() => void>;
   loaded: Promise<void> | null;
   pending: Promise<void> | null;
+  refreshEpoch: number;
+  baseRevision: string | null;
   persistedRevision: string;
   storedAttachments: Set<string>;
   removed: boolean;
@@ -52,6 +61,14 @@ function emptyDraft(): ComposerDraftValue {
     attachments: [],
     notificationDraftIds: [],
   };
+}
+
+export function hasComposerDraftContent(
+  value: Pick<ComposerDraftValue, "text" | "attachments" | "notificationDraftIds">,
+): boolean {
+  return Boolean(
+    value.text.length || value.attachments.length || value.notificationDraftIds.length,
+  );
 }
 
 function restoredAttachment(attachment: ComposerDraftAttachment): DraftAttachment {
@@ -92,10 +109,12 @@ export class ComposerDraftStore {
     if (!entry) {
       const value = emptyDraft();
       entry = {
-        state: { value, ready: false, saving: false, error: null },
+        state: { value, ready: false, saving: false, error: null, conflict: false },
         listeners: new Set(),
         loaded: null,
         pending: null,
+        refreshEpoch: 0,
+        baseRevision: null,
         persistedRevision: value.revision,
         storedAttachments: new Set(),
         removed: false,
@@ -137,9 +156,10 @@ export class ComposerDraftStore {
               notificationDraftIds: saved.notificationDraftIds,
             }
           : emptyDraft();
+        entry.baseRevision = saved?.revision ?? null;
         entry.persistedRevision = value.revision;
         entry.storedAttachments = new Set(value.attachments.map((item) => item.id));
-        this.publish(entry, { value, ready: true, error: null });
+        this.publish(entry, { value, ready: true, error: null, conflict: false });
       })
       .catch((cause: unknown) => {
         this.publish(entry, { error: cause instanceof Error ? cause.message : String(cause) });
@@ -151,6 +171,69 @@ export class ComposerDraftStore {
     return entry.loaded;
   }
 
+  /**
+   * Applies draft changes written by another window only while this cache is
+   * clean. Never creates an entry just because another window saved a draft.
+   */
+  refreshIfClean(sessionId: string, changedRevision?: string | null): Promise<void> {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.removed) return Promise.resolve();
+    if (!entry.state.ready) {
+      const loading = entry.loaded;
+      if (!loading) return Promise.resolve();
+      return loading.then(
+        () => this.refreshIfClean(sessionId, changedRevision),
+        () => undefined,
+      );
+    }
+    if (
+      entry.pending !== null ||
+      entry.persistedRevision !== entry.state.value.revision ||
+      (changedRevision !== undefined &&
+        changedRevision !== null &&
+        changedRevision === entry.state.value.revision)
+    )
+      return Promise.resolve();
+    const valueAtRequest = entry.state.value.revision;
+    const epoch = ++entry.refreshEpoch;
+    return this.api
+      .getComposerDraft(sessionId)
+      .then((saved) => {
+        if (
+          entry.removed ||
+          epoch !== entry.refreshEpoch ||
+          !entry.state.ready ||
+          entry.pending !== null ||
+          entry.persistedRevision !== valueAtRequest ||
+          entry.state.value.revision !== valueAtRequest
+        )
+          return;
+        const value: ComposerDraftValue = saved
+          ? {
+              revision: saved.revision,
+              text: saved.text,
+              formatted: saved.formatted,
+              attachments: saved.attachments.map(restoredAttachment),
+              notificationDraftIds: saved.notificationDraftIds,
+            }
+          : emptyDraft();
+        entry.baseRevision = saved?.revision ?? null;
+        entry.persistedRevision = value.revision;
+        entry.storedAttachments = new Set(value.attachments.map((item) => item.id));
+        this.publish(entry, { value, ready: true, error: null, conflict: false });
+      })
+      .catch((cause: unknown) => {
+        if (
+          !entry.removed &&
+          epoch === entry.refreshEpoch &&
+          entry.persistedRevision === entry.state.value.revision
+        )
+          this.publish(entry, {
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+      });
+  }
+
   update(sessionId: string, change: (current: ComposerDraftValue) => ComposerDraftValue): void {
     const entry = this.entry(sessionId);
     if (!entry.state.ready || entry.removed) return;
@@ -158,14 +241,16 @@ export class ComposerDraftStore {
     if (value === entry.state.value) return;
     this.publish(entry, {
       value: { ...value, revision: crypto.randomUUID() },
-      error: null,
+      ...(entry.state.conflict ? {} : { error: null }),
     });
-    void this.save(sessionId).catch(() => undefined);
+    if (!entry.state.conflict) void this.save(sessionId).catch(() => undefined);
   }
 
-  private save(sessionId: string): Promise<void> {
+  private save(sessionId: string, resolvingConflict = false): Promise<void> {
     const entry = this.entry(sessionId);
     if (entry.pending) return entry.pending;
+    if (entry.state.conflict && !resolvingConflict)
+      return Promise.reject(new Error(entry.state.error ?? COMPOSER_DRAFT_CONFLICT_MESSAGE));
     if (entry.persistedRevision === entry.state.value.revision) return Promise.resolve();
     this.publish(entry, { saving: true });
     entry.pending = (async () => {
@@ -191,6 +276,7 @@ export class ComposerDraftStore {
         if (entry.removed) return;
         await this.api.saveComposerDraft({
           sessionId,
+          baseRevision: entry.baseRevision,
           revision: value.revision,
           text: value.text,
           formatted: value.formatted,
@@ -198,13 +284,17 @@ export class ComposerDraftStore {
           ...(addedAttachments.length ? { addedAttachments } : {}),
           notificationDraftIds: value.notificationDraftIds,
         });
+        entry.baseRevision = hasComposerDraftContent(value) ? value.revision : null;
         entry.storedAttachments = new Set(value.attachments.map((item) => item.id));
         entry.persistedRevision = value.revision;
       }
-      this.publish(entry, { error: null });
+      this.publish(entry, { error: null, conflict: false });
     })()
       .catch((cause: unknown) => {
-        this.publish(entry, { error: cause instanceof Error ? cause.message : String(cause) });
+        this.publish(entry, {
+          error: cause instanceof Error ? cause.message : String(cause),
+          conflict: isComposerDraftConflict(cause),
+        });
         throw cause;
       })
       .finally(() => {
@@ -220,16 +310,34 @@ export class ComposerDraftStore {
   }
 
   async flushAll(): Promise<void> {
-    do {
-      await Promise.all(
-        [...this.entries.entries()]
-          .filter(([, entry]) => !entry.removed)
-          .map(([id]) => this.flush(id)),
+    const failed = new Set<string>();
+    const pendingEntries = () =>
+      [...this.entries.entries()].filter(
+        ([id, entry]) =>
+          !entry.removed &&
+          !failed.has(id) &&
+          (entry.pending !== null ||
+            !entry.state.ready ||
+            (entry.state.ready && entry.persistedRevision !== entry.state.value.revision)),
       );
-    } while (
-      this.hasPending() ||
-      [...this.entries.values()].some((entry) => !entry.removed && !entry.state.ready)
-    );
+    let targets = [...this.entries.entries()].filter(([, entry]) => !entry.removed);
+    let firstFailure: unknown;
+    let failedAny = false;
+    while (targets.length) {
+      const results = await Promise.allSettled(targets.map(([id]) => this.flush(id)));
+      for (const [index, result] of results.entries()) {
+        const target = targets[index];
+        if (!target) continue;
+        if (result.status !== "rejected") continue;
+        failed.add(target[0]);
+        if (!failedAny) {
+          firstFailure = result.reason;
+          failedAny = true;
+        }
+      }
+      targets = pendingEntries();
+    }
+    if (failedAny) throw firstFailure;
   }
 
   hasPending(): boolean {
@@ -260,7 +368,9 @@ export class ComposerDraftStore {
       // Acceptance may have removed attachment bytes before its IPC reply arrived.
       await entry.pending?.catch(() => undefined);
       if (entry.removed) return;
+      entry.baseRevision = null;
       entry.storedAttachments.clear();
+      this.publish(entry, { error: null, conflict: false });
       await this.save(sessionId);
       return;
     }
@@ -268,9 +378,41 @@ export class ComposerDraftStore {
       ...emptyDraft(),
       notificationDraftIds: entry.state.value.notificationDraftIds,
     };
+    entry.baseRevision = null;
     entry.persistedRevision = value.revision;
     entry.storedAttachments.clear();
-    this.publish(entry, { value, error: null });
+    this.publish(entry, { value, error: null, conflict: false });
+  }
+
+  async resolveConflict(
+    sessionId: string,
+    resolution: ComposerDraftConflictResolution,
+  ): Promise<void> {
+    const entry = this.entry(sessionId);
+    if (!entry.state.ready) await this.load(sessionId);
+    await entry.pending?.catch(() => undefined);
+    if (entry.removed || !entry.state.conflict) return;
+    const latest = await this.api.getComposerDraft(sessionId);
+    if (entry.removed || !entry.state.conflict) return;
+    if (resolution === "reload") {
+      const value: ComposerDraftValue = latest
+        ? {
+            revision: latest.revision,
+            text: latest.text,
+            formatted: latest.formatted,
+            attachments: latest.attachments.map(restoredAttachment),
+            notificationDraftIds: latest.notificationDraftIds,
+          }
+        : emptyDraft();
+      entry.baseRevision = latest?.revision ?? null;
+      entry.persistedRevision = value.revision;
+      entry.storedAttachments = new Set(value.attachments.map((item) => item.id));
+      this.publish(entry, { value, error: null, conflict: false });
+      return;
+    }
+    entry.baseRevision = latest?.revision ?? null;
+    entry.storedAttachments = new Set(latest?.attachments.map((item) => item.id) ?? []);
+    await this.save(sessionId, true);
   }
 
   async clearIfCurrent(sessionId: string, revision: string): Promise<void> {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ModelConfig, SessionView } from "../../shared/domain";
+import type { ModelConfig, QuestionRequest, SessionView } from "../../shared/domain";
 import { ApprovalBroker } from "../permissions/approval-broker";
 import { PermissionStore } from "../permissions/permission-store";
 import { QuestionBroker } from "../permissions/question-broker";
@@ -11,7 +11,14 @@ import { ChatService } from "./chat-service";
 function fixture(permissionMode: SessionView["permissionMode"] = "request_approval") {
   const database = openDatabase(":memory:");
   const repository = new Repository(database);
-  const broker = new QuestionBroker();
+  const questionWaiters: Array<(request: QuestionRequest) => void> = [];
+  const broker = new QuestionBroker(undefined, (state) => {
+    const request = state.requests[0];
+    if (!request) return;
+    for (let index = questionWaiters.length - 1; index >= 0; index -= 1) {
+      questionWaiters.splice(index, 1)[0]?.(request);
+    }
+  });
   const approvals = new ApprovalBroker();
   const session = repository.insertSession({
     title: "Question test",
@@ -51,7 +58,22 @@ function fixture(permissionMode: SessionView["permissionMode"] = "request_approv
       signal,
       toolCall: { index: 0, callId: "call", name: "ask_user", arguments: JSON.stringify(args) },
     });
-  return { database, repository, broker, approvals, session, chat, internal, ask };
+  const waitForQuestion = (): Promise<QuestionRequest> => {
+    const current = broker.list()[0];
+    if (current) return Promise.resolve(current);
+    return new Promise((resolve) => questionWaiters.push(resolve));
+  };
+  return {
+    database,
+    repository,
+    broker,
+    approvals,
+    session,
+    chat,
+    internal,
+    ask,
+    waitForQuestion,
+  };
 }
 
 describe("Agent clarification lifecycle", () => {
@@ -74,12 +96,12 @@ describe("Agent clarification lifecycle", () => {
             },
           ],
         });
-        const request = f.broker.list()[0];
-        expect(request?.questions?.[0]?.multiSelect).toBe(true);
+        const request = await f.waitForQuestion();
+        expect(request.questions?.[0]?.multiSelect).toBe(true);
         expect(f.repository.getSession(f.session.id)?.status).toBe("waiting_approval");
         expect(f.approvals.state().requests).toEqual([]);
         f.broker.answer({
-          questionId: request?.id as string,
+          questionId: request.id,
           answers: [{ id: "scope", selectedOptions: ["Test", "Build"], otherText: "Document it" }],
         });
         const result = await pending;
@@ -122,6 +144,7 @@ describe("Agent clarification lifecycle", () => {
       const controller = new AbortController();
       const pending = f.ask({ question: "Need more context?", options: [] }, controller.signal);
       const rejected = expect(pending).rejects.toThrow("取消");
+      await f.waitForQuestion();
       f.chat.stop(f.session.id);
       await rejected;
       expect(f.broker.list()).toEqual([]);

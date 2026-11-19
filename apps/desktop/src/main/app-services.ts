@@ -7,12 +7,15 @@ import { LspDiagnosticsService } from "./agents/lsp-diagnostics-service";
 import { ProjectConfigService } from "./agents/project-config-service";
 import { ProjectInstructionService } from "./agents/project-instruction-service";
 import { ProjectToolingService } from "./agents/project-tooling-service";
+import { SessionBuiltinCapabilityService } from "./agents/session-builtin-capability-service";
 import { BrowserService } from "./browser/browser-service";
 import { GitHubService } from "./browser/github-service";
 import { ChatService } from "./chat/chat-service";
+import { QueuedPromptService } from "./chat/queued-prompt-service";
 import { recordRuntimeError } from "./diagnostics/runtime-log";
 import { ExtensionService } from "./extensions/extension-service";
 import { PluginHookService } from "./extensions/plugin-hook-service";
+import { LocalPluginMarketplaceService } from "./marketplace/local-plugin-marketplace-service";
 import { SkillMarketplaceService } from "./marketplace/skill-marketplace-service";
 import { McpService } from "./mcp/mcp-service";
 import { ApprovalBroker } from "./permissions/approval-broker";
@@ -41,11 +44,13 @@ export interface AppServices {
   repository: Repository;
   providerService: ProviderService;
   agentProfileService: AgentProfileService;
+  sessionBuiltinCapabilityService: SessionBuiltinCapabilityService;
   customCommandService: CustomCommandService;
   sessionService: SessionService;
   sessionRetentionService: SessionRetentionService;
   extensionService: ExtensionService;
   marketplaceService: SkillMarketplaceService;
+  localPluginMarketplaceService: LocalPluginMarketplaceService;
   browserService: BrowserService;
   githubService: GitHubService;
   mcpService: McpService;
@@ -61,6 +66,7 @@ export interface AppServices {
   headlessServerService: HeadlessServerService;
   scheduledTaskService: ScheduledTaskService;
   chatService: ChatService;
+  queuedPromptService: QueuedPromptService;
   customToolService: CustomToolService;
   approvalBroker: ApprovalBroker;
   questionBroker: QuestionBroker;
@@ -82,7 +88,17 @@ export function createAppServices(input: {
   repository.recoverInterruptedRuns();
   const trajectoryService = new TrajectoryService(repository);
   let headlessServerService: HeadlessServerService | null = null;
+  let queuedPromptService: QueuedPromptService | null = null;
   const emit = (event: ChatStreamEvent): void => {
+    if (event.type === "run_started") {
+      const session = repository.getSession(event.sessionId);
+      if (session && !session.parentSessionId)
+        queuedPromptService?.runStarted(event.sessionId, event.runId, event.kind);
+    }
+    if (event.type === "session_updated") queuedPromptService?.sessionChanged(event.session.id);
+    if (event.type === "session_removed") queuedPromptService?.forgetSession(event.sessionId);
+    if (event.type === "run_failed")
+      queuedPromptService?.runFailed(event.sessionId, event.runId, event.error);
     if (event.type === "run_failed")
       recordRuntimeError("chat.run", event.error, {
         sessionId: event.sessionId,
@@ -114,12 +130,24 @@ export function createAppServices(input: {
   const secretStore = new SecretStore(database);
   const providerService = new ProviderService(repository, secretStore);
   const agentProfileService = new AgentProfileService(repository);
-  const customCommandService = new CustomCommandService();
-  const sessionService = new SessionService(repository);
+  const customCommandService = new CustomCommandService(repository);
+  let chatService: ChatService | null = null;
+  const sessionBuiltinCapabilityService = new SessionBuiltinCapabilityService(
+    repository,
+    input.promptDirectory,
+    (sessionId) => chatService?.isSessionBusy(sessionId) ?? false,
+    (session) => chatService?.availableBuiltinPluginToolNames(session) ?? new Set(),
+  );
+  const sessionService = new SessionService(repository, sessionBuiltinCapabilityService);
   const extensionService = new ExtensionService(repository, input.extensionDirectory);
   const marketplaceService = new SkillMarketplaceService(
     join(input.userDataDirectory, "marketplace"),
     extensionService,
+  );
+  const localPluginMarketplaceService = new LocalPluginMarketplaceService(
+    repository,
+    extensionService,
+    input.extensionDirectory,
   );
   const browserService = new BrowserService(
     join(input.userDataDirectory, "browser-captures"),
@@ -160,10 +188,11 @@ export function createAppServices(input: {
   const customToolService = new CustomToolService(repository);
   const workspaceService = new WorkspaceService();
   const gitChangeService = new GitChangeService(join(input.userDataDirectory, "git-undo"));
-  const chatService = new ChatService({
+  const chatServiceInstance = new ChatService({
     repository,
     providerService,
     agentProfileService,
+    sessionBuiltinCapabilityService,
     customCommandService,
     promptDirectory: input.promptDirectory,
     appVersion: input.appVersion,
@@ -173,6 +202,7 @@ export function createAppServices(input: {
     questionBroker,
     permissions,
     extensionService,
+    localPluginMarketplaceService,
     browserService,
     githubService,
     mcpService,
@@ -185,12 +215,23 @@ export function createAppServices(input: {
     worktreeService,
     dockerService,
     emit,
+    onRunSettled: (input) => queuedPromptService?.runSettled(input),
+    onRunStopped: (sessionId) => queuedPromptService?.pause(sessionId),
+    onDelegatedSubagentRunStarted: ({ sessionId, runId }) =>
+      queuedPromptService?.runStarted(sessionId, runId),
   });
-  const scheduledTaskService = new ScheduledTaskService(repository, chatService);
-  const sessionRetentionService = new SessionRetentionService(repository, chatService);
+  chatService = chatServiceInstance;
+  const queuedPromptServiceInstance = new QueuedPromptService(repository, {
+    isSessionBusy: (sessionId) => chatServiceInstance.isSessionBusy(sessionId),
+    send: (input) => chatServiceInstance.sendQueuedPrompt(input),
+    changed: (sessionId) => emit({ type: "queued_prompts_updated", sessionId }),
+  });
+  queuedPromptService = queuedPromptServiceInstance;
+  const scheduledTaskService = new ScheduledTaskService(repository, chatServiceInstance);
+  const sessionRetentionService = new SessionRetentionService(repository, chatServiceInstance);
   const headlessService = new HeadlessServerService(
     repository,
-    chatService,
+    chatServiceInstance,
     agentProfileService,
     customCommandService,
     projectToolingService,
@@ -207,11 +248,13 @@ export function createAppServices(input: {
     repository,
     providerService,
     agentProfileService,
+    sessionBuiltinCapabilityService,
     customCommandService,
     sessionService,
     sessionRetentionService,
     extensionService,
     marketplaceService,
+    localPluginMarketplaceService,
     browserService,
     githubService,
     mcpService,
@@ -226,20 +269,28 @@ export function createAppServices(input: {
     trajectoryService,
     headlessServerService: headlessService,
     scheduledTaskService,
-    chatService,
+    chatService: chatServiceInstance,
+    queuedPromptService: queuedPromptServiceInstance,
     customToolService,
     approvalBroker,
     questionBroker,
     workspaceService,
     gitChangeService,
     dispose: async () => {
+      queuedPromptServiceInstance.dispose();
       await sessionRetentionService.dispose();
       const stopSchedules = scheduledTaskService.dispose();
       const stopServer = headlessServerService?.stop();
-      const stopChat = chatService.shutdown();
+      const stopChat = chatServiceInstance.shutdown();
       browserService.dispose();
       mcpService.dispose();
       await Promise.all([stopSchedules, stopServer, stopChat]);
+      try {
+        const cleanup = await localPluginMarketplaceService.cleanupStaleVersions();
+        if (cleanup.errors.length) recordRuntimeError("plugins.cleanup", cleanup.errors.join("\n"));
+      } catch (cause) {
+        recordRuntimeError("plugins.cleanup", cause);
+      }
       database.close();
     },
   };

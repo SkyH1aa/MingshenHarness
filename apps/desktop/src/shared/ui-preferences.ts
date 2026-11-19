@@ -6,6 +6,8 @@ export interface ProjectLayout {
   inspectorWidth: number;
   sidebarOpen: boolean;
   inspectorOpen: boolean;
+  taskPanelHeight?: number | undefined;
+  taskPanelCollapsed?: boolean;
 }
 export interface UiPreferences {
   interfaceStyle: InterfaceStyle;
@@ -44,6 +46,12 @@ export function normalizeUiPreferences(
         inspectorWidth: dimension(project.inspectorWidth, 460, 360, 720),
         sidebarOpen: project.sidebarOpen !== false,
         inspectorOpen: project.inspectorOpen === true,
+        ...(typeof project.taskPanelHeight === "number" && Number.isFinite(project.taskPanelHeight)
+          ? { taskPanelHeight: dimension(project.taskPanelHeight, 160, 160, 640) }
+          : {}),
+        ...(typeof project.taskPanelCollapsed === "boolean"
+          ? { taskPanelCollapsed: project.taskPanelCollapsed }
+          : {}),
       };
     }
   }

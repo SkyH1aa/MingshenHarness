@@ -1,6 +1,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { BoundedOutput } from "./bounded-output";
 
 const MAX_BUFFERED_CHARS = 256_000;
 const MAX_SESSIONS = 64;
@@ -39,6 +40,7 @@ export interface CommandSnapshot {
   unreadOutputChars: number;
   exitCode: number | null;
   output: string;
+  fullOutput?: string;
   isError: boolean;
 }
 
@@ -49,6 +51,7 @@ interface ManagedCommand extends CommandOwner {
   securityScope: string;
   child: ChildProcess;
   buffer: string;
+  capture: BoundedOutput;
   baseOffset: number;
   readOffset: number;
   finished: boolean;
@@ -149,6 +152,7 @@ export class PersistentCommandService {
       id: randomUUID(),
       child,
       buffer: "",
+      capture: new BoundedOutput(),
       baseOffset: 0,
       readOffset: 0,
       finished: false,
@@ -181,6 +185,7 @@ export class PersistentCommandService {
     };
     this.commands.set(command.id, command);
     const collect = (chunk: string) => {
+      command.capture.append(chunk);
       command.buffer += chunk;
       if (command.buffer.length > MAX_BUFFERED_CHARS) {
         let dropped = command.buffer.length - MAX_BUFFERED_CHARS;
@@ -395,6 +400,11 @@ export class PersistentCommandService {
     return {
       id: command.id,
       running: !command.finished,
+      ...(command.baseOffset > 0
+        ? {
+            fullOutput: `command_session: ${command.id}\nstatus: ${command.finished ? "completed" : "running"}\n${command.capture.text()}`,
+          }
+        : {}),
       unreadOutputChars: remaining,
       exitCode: command.exitCode,
       isError:

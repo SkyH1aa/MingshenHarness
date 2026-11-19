@@ -3,7 +3,12 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatSendInput, ModelConfig, SessionView } from "../../shared/domain";
+import type {
+  AgentProfileView,
+  ChatSendInput,
+  ModelConfig,
+  SessionView,
+} from "../../shared/domain";
 import { LspDiagnosticsService } from "../agents/lsp-diagnostics-service";
 import { ProjectConfigService } from "../agents/project-config-service";
 import { ProjectToolingService } from "../agents/project-tooling-service";
@@ -12,7 +17,7 @@ import { PermissionStore } from "../permissions/permission-store";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import { SecretStore } from "../storage/secret-store";
-import { ChatService } from "./chat-service";
+import { agentPermission, ChatService, USER_INTERRUPT_REASON } from "./chat-service";
 
 vi.mock("electron", () => ({
   safeStorage: {
@@ -571,6 +576,158 @@ process.exit(1);`,
     await closing;
     expect(closed).toBe(true);
   });
+  it("dispatches Interrupt with a fresh signal after an explicit user stop", async () => {
+    let resolveHook!: () => void;
+    const runPluginHooks = vi.fn(
+      (..._args: unknown[]) =>
+        new Promise<void>((resolve) => {
+          resolveHook = resolve;
+        }),
+    );
+    const cancel = vi.fn();
+    const chat = new ChatService({
+      repository: { listChildSessions: () => [] },
+      approvalBroker: { cancelSession: cancel },
+      questionBroker: { cancelSession: cancel },
+      pluginHookService: {},
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const state = chat as unknown as {
+      activeRuns: Map<string, AbortController>;
+      runPluginHooks: (...args: unknown[]) => Promise<void>;
+      dispatchInterruptHooks: (session: SessionView, runId: string, signal: AbortSignal) => void;
+    };
+    state.runPluginHooks = runPluginHooks;
+    const main = new AbortController();
+    state.activeRuns.set("session", main);
+    const session = {
+      id: "session",
+      agentMode: "code",
+      workspacePath: process.cwd(),
+      agentProfileId: "primary",
+      parentSessionId: null,
+      permissionMode: "full_access",
+      executionMode: "host",
+    } as SessionView;
+
+    chat.stop(session.id);
+    expect(main.signal.reason).toBe(USER_INTERRUPT_REASON);
+    state.dispatchInterruptHooks(session, "run", main.signal);
+    await vi.waitFor(() => expect(runPluginHooks).toHaveBeenCalledOnce());
+    const call = runPluginHooks.mock.calls[0];
+    const cleanupSignal = call?.[3] as AbortSignal;
+    expect(call?.[0]).toBe("Interrupt");
+    expect(call?.[1]).toBe(session);
+    expect(call?.[2]).toBe("run");
+    expect(cleanupSignal).not.toBe(main.signal);
+    expect(cleanupSignal.aborted).toBe(false);
+    expect(call?.[4]).toEqual({ metadata: { reason: "user_stop" } });
+    resolveHook();
+  });
+  it("does not dispatch Interrupt for an internal abort", async () => {
+    const runPluginHooks = vi.fn(async () => undefined);
+    const chat = new ChatService({
+      repository: { listChildSessions: () => [] },
+      pluginHookService: {},
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const state = chat as unknown as {
+      runPluginHooks: (...args: unknown[]) => Promise<void>;
+      dispatchInterruptHooks: (session: SessionView, runId: string, signal: AbortSignal) => void;
+    };
+    state.runPluginHooks = runPluginHooks;
+    const internal = new AbortController();
+    internal.abort();
+    state.dispatchInterruptHooks(
+      {
+        id: "session",
+        agentMode: "code",
+        workspacePath: process.cwd(),
+        parentSessionId: null,
+        permissionMode: "full_access",
+        executionMode: "host",
+      } as SessionView,
+      "run",
+      internal.signal,
+    );
+    await Promise.resolve();
+    expect(runPluginHooks).not.toHaveBeenCalled();
+  });
+  it("bounds Interrupt dispatch with an independent cleanup timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: () => void;
+      const runPluginHooks = vi.fn(
+        (..._args: unknown[]) =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const chat = new ChatService({
+        repository: { listChildSessions: () => [] },
+        pluginHookService: {},
+        emit: vi.fn(),
+      } as unknown as ConstructorParameters<typeof ChatService>[0]);
+      const state = chat as unknown as {
+        runPluginHooks: (...args: unknown[]) => Promise<void>;
+        dispatchInterruptHooks: (session: SessionView, runId: string, signal: AbortSignal) => void;
+      };
+      state.runPluginHooks = runPluginHooks;
+      const main = new AbortController();
+      main.abort(USER_INTERRUPT_REASON);
+      state.dispatchInterruptHooks(
+        {
+          id: "session",
+          agentMode: "code",
+          workspacePath: process.cwd(),
+          parentSessionId: null,
+          permissionMode: "full_access",
+          executionMode: "host",
+        } as SessionView,
+        "run",
+        main.signal,
+      );
+      const cleanupSignal = runPluginHooks.mock.calls[0]?.[3] as AbortSignal;
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(cleanupSignal.aborted).toBe(true);
+      expect(cleanupSignal.reason).toBe("interrupt-hook-timeout");
+      finish();
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("does not dispatch Interrupt while the application is closing", async () => {
+    const runPluginHooks = vi.fn(async () => undefined);
+    const chat = new ChatService({
+      repository: { listChildSessions: () => [] },
+      pluginHookService: {},
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const state = chat as unknown as {
+      closing: boolean;
+      runPluginHooks: (...args: unknown[]) => Promise<void>;
+      dispatchInterruptHooks: (session: SessionView, runId: string, signal: AbortSignal) => void;
+    };
+    state.closing = true;
+    state.runPluginHooks = runPluginHooks;
+    const main = new AbortController();
+    main.abort(USER_INTERRUPT_REASON);
+    state.dispatchInterruptHooks(
+      {
+        id: "session",
+        agentMode: "code",
+        workspacePath: process.cwd(),
+        parentSessionId: null,
+        permissionMode: "full_access",
+        executionMode: "host",
+      } as SessionView,
+      "run",
+      main.signal,
+    );
+    await Promise.resolve();
+    expect(runPluginHooks).not.toHaveBeenCalled();
+  });
   it("blocks new work at the updater handoff only after live and preparing tasks drain", async () => {
     const chat = new ChatService({} as ConstructorParameters<typeof ChatService>[0]);
     const state = chat as unknown as {
@@ -923,7 +1080,10 @@ process.exit(1);`,
         "run",
         new AbortController().signal,
       ),
-    ).toEqual([expect.objectContaining({ name: "recall_context" })]);
+    ).toEqual([
+      expect.objectContaining({ name: "read_tool_output" }),
+      expect.objectContaining({ name: "recall_context" }),
+    ]);
     expect(internal.requestApproval).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledOnce();
   });
@@ -981,6 +1141,7 @@ process.exit(1);`,
       { toolCalls: true } as ModelConfig,
     );
     expect(tools.map((tool) => tool.name)).toEqual([
+      "read_tool_output",
       "recall_context",
       "execute_tool_chain",
       "read_file",
@@ -1081,7 +1242,11 @@ process.exit(1);`,
         permissionMode: "request_approval",
       } as SessionView;
       const tools = await internal.availableTools(session, { toolCalls: true } as ModelConfig);
-      expect(tools.map((tool) => tool.name)).toEqual(["recall_context", "mcp__fixture__lookup"]);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "read_tool_output",
+        "recall_context",
+        "mcp__fixture__lookup",
+      ]);
       const input = {
         session,
         runId: "run",
@@ -1108,6 +1273,7 @@ process.exit(1);`,
       expect((await mcp.callTool("fixture", "mutate", {})).isError).toBe(true);
       await mcp.setEnabled("fixture", false);
       expect(await internal.availableTools(session, { toolCalls: true } as ModelConfig)).toEqual([
+        expect.objectContaining({ name: "read_tool_output" }),
         expect.objectContaining({ name: "recall_context" }),
       ]);
     } finally {
@@ -1116,5 +1282,285 @@ process.exit(1);`,
       await new Promise<void>((done) => server.close(() => done()));
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("dispatches PreToolUse and PostToolUse around the real tool executor", async () => {
+    const runPluginHooks = vi.fn(async (..._args: unknown[]) => undefined);
+    const performToolCall = vi.fn(async () => ({
+      output: "tool result",
+      isError: false,
+    }));
+    const chat = new ChatService({
+      repository: { getSetting: () => null },
+      pluginHookService: {},
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      runPluginHooks: (...args: unknown[]) => Promise<void>;
+      performToolCall: (...args: unknown[]) => Promise<{ output: string; isError: boolean }>;
+      executeToolCall: (input: {
+        session: SessionView;
+        runId: string;
+        signal: AbortSignal;
+        toolCall: { index: number; callId: string; name: string; arguments: string };
+      }) => Promise<{ output: string; isError: boolean }>;
+    };
+    internal.runPluginHooks = runPluginHooks;
+    internal.performToolCall = performToolCall;
+    const signal = new AbortController().signal;
+    const session = {
+      id: "session",
+      agentMode: "code",
+      workspacePath: process.cwd(),
+      agentProfileId: "primary",
+      parentSessionId: null,
+      permissionMode: "full_access",
+      executionMode: "host",
+    } as SessionView;
+
+    await expect(
+      internal.executeToolCall({
+        session,
+        runId: "run",
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "call",
+          name: "read_file",
+          arguments: JSON.stringify({ path: "a.txt" }),
+        },
+      }),
+    ).resolves.toEqual({ output: "tool result", isError: false });
+
+    expect(performToolCall).toHaveBeenCalledOnce();
+    expect(runPluginHooks).toHaveBeenNthCalledWith(
+      1,
+      "PreToolUse",
+      session,
+      "run",
+      signal,
+      expect.objectContaining({
+        toolCallId: "call",
+        toolName: "read_file",
+        toolInput: { path: "a.txt" },
+      }),
+    );
+    expect(runPluginHooks).toHaveBeenNthCalledWith(
+      2,
+      "PostToolUse",
+      session,
+      "run",
+      signal,
+      expect.objectContaining({
+        toolCallId: "call",
+        toolName: "read_file",
+        toolInput: { path: "a.txt" },
+        toolResponse: expect.objectContaining({ output: "tool result", isError: false }),
+      }),
+    );
+  });
+});
+
+function permissionRuntime(
+  permissions: AgentProfileView["permissions"],
+  toolAllowlist: string[] = ["read_file", "use_skill", "read_tool_output"],
+  extensionService: Record<string, unknown> = {},
+) {
+  const profile = {
+    id: "permission-profile",
+    permissions,
+    readOnly: false,
+    toolAllowlist,
+  } as AgentProfileView;
+  const session = {
+    id: "permission-session",
+    agentProfileId: profile.id,
+    agentMode: "code",
+    workspacePath: null,
+    permissionMode: "full_access",
+    executionMode: "host",
+    patchOnly: false,
+  } as SessionView;
+  const values = new Map<string, unknown>();
+  const repository = {
+    getAgentProfile: () => profile,
+    getSession: () => session,
+    getSetting: (key: string) => values.get(key) ?? null,
+    setSetting: (key: string, value: unknown) => values.set(key, value),
+    removeSetting: (key: string) => values.delete(key),
+  };
+  const chat = new ChatService({
+    repository,
+    providerService: {},
+    extensionService,
+    promptDirectory: join(process.cwd(), "resources", "prompts"),
+    emit: vi.fn(),
+  } as unknown as ConstructorParameters<typeof ChatService>[0]);
+  const approvalTarget = chat as unknown as {
+    requestApproval: (...args: unknown[]) => Promise<{ decision: "deny" }>;
+  };
+  const requestApproval = vi
+    .spyOn(approvalTarget, "requestApproval")
+    .mockResolvedValue({ decision: "deny" });
+  const executeTarget = chat as unknown as {
+    executeOwnedToolCall(
+      input: {
+        session: SessionView;
+        runId: string;
+        signal: AbortSignal;
+        toolCall: { name: string; arguments: string; callId: string; index: number };
+      },
+      onCommandLease: (release: () => void) => void,
+    ): Promise<{ output: string; isError: boolean }>;
+  };
+  return {
+    requestApproval,
+    execute: (name: string, args: Record<string, unknown>, callId = "permission-call") =>
+      executeTarget.executeOwnedToolCall(
+        {
+          session,
+          runId: "permission-run",
+          signal: new AbortController().signal,
+          toolCall: {
+            name,
+            arguments: JSON.stringify(args),
+            callId,
+            index: 0,
+          },
+        },
+        vi.fn(),
+      ),
+  };
+}
+
+describe("Agent profile permission resolution", () => {
+  it.each([
+    { edit: "allow", write_file: "deny" },
+    { write_file: "deny", edit: "allow" },
+  ] as const)("keeps an explicit tool denial ahead of its group fallback: %o", (permissions) => {
+    expect(agentPermission({ permissions } as unknown as AgentProfileView, "write_file")).toBe(
+      "deny",
+    );
+  });
+
+  it.each([
+    { edit: "deny", write_file: "allow" },
+    { write_file: "allow", edit: "deny" },
+  ] as const)("keeps an explicit tool allow ahead of its group fallback: %o", (permissions) => {
+    expect(agentPermission({ permissions } as unknown as AgentProfileView, "write_file")).toBe(
+      "allow",
+    );
+  });
+
+  it.each([
+    {
+      permissions: {
+        read: "allow",
+        "use_skill:builtin:work-word": "deny",
+      } as AgentProfileView["permissions"],
+      toolName: "use_skill",
+      subject: "builtin:work-word",
+    },
+    {
+      permissions: {
+        read: "allow",
+        "read_file:builtin:work-word": "deny",
+      } as AgentProfileView["permissions"],
+      toolName: "use_skill",
+      subject: "builtin:work-word",
+    },
+    {
+      permissions: {
+        read: "allow",
+        "read_tool_output:retained-call": "ask",
+      } as AgentProfileView["permissions"],
+      toolName: "read_tool_output",
+      subject: "retained-call",
+    },
+  ])(
+    "resolves subject-scoped and inherited read rules: %o",
+    ({ permissions, toolName, subject }) => {
+      const expected = Object.values(permissions).includes("ask") ? "ask" : "deny";
+      expect(agentPermission({ permissions } as AgentProfileView, toolName, subject)).toBe(
+        expected,
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: "use_skill",
+      args: { name: "builtin:work-word" },
+      permissions: { read: "allow", "use_skill:builtin:work-word": "deny" },
+    },
+    {
+      name: "discover_capabilities",
+      args: { query: "pdf" },
+      permissions: { read: "allow", "discover_capabilities:pdf": "deny" },
+    },
+    {
+      name: "use_skill",
+      args: { name: "builtin:work-word" },
+      permissions: { read: "allow", "read_file:builtin:work-word": "deny" },
+    },
+    {
+      name: "read_tool_output",
+      args: { call_id: "retained-call" },
+      permissions: { read: "allow", "read_tool_output:retained-call": "deny" },
+    },
+  ] as const)("blocks $name with its subject-specific deny before approval", async (testCase) => {
+    const runtime = permissionRuntime({ ...testCase.permissions });
+    const result = await runtime.execute(testCase.name, testCase.args);
+    expect(result).toMatchObject({ isError: true, output: expect.stringContaining("禁止") });
+    expect(runtime.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "use_skill", args: { name: "builtin:work-word" } },
+    { name: "read_tool_output", args: { call_id: "retained-call" } },
+  ] as const)("checks the profile allowlist before asking for $name", async (testCase) => {
+    const runtime = permissionRuntime({ [testCase.name]: "ask" }, ["web_search"]);
+    const result = await runtime.execute(testCase.name, testCase.args);
+    expect(result).toMatchObject({ isError: true, output: expect.stringContaining("禁止") });
+    expect(runtime.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it("includes built-in creators in paginated discovery inside the read permission boundary", async () => {
+    const discoverCapabilities = vi.fn(async () => "combined capability index");
+    const runtime = permissionRuntime({ read: "allow" }, ["discover_capabilities"], {
+      discoverCapabilities,
+    });
+
+    const result = await runtime.execute("discover_capabilities", { query: "creator" });
+
+    expect(result).toEqual({ output: "combined capability index", isError: false });
+    expect(discoverCapabilities).toHaveBeenCalledWith(
+      "permission-session",
+      { query: "creator", kind: "all", offset: 0, limit: 20 },
+      expect.arrayContaining([
+        expect.objectContaining({ id: "builtin:skill-creator", source: "builtin" }),
+        expect.objectContaining({ id: "builtin:plugin-creator", source: "builtin" }),
+        expect.objectContaining({ id: "builtin:harness-plugin-api", source: "builtin" }),
+      ]),
+    );
+    expect(runtime.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "use_skill",
+      args: { name: "builtin:work-word" },
+      permissions: { read: "allow", "use_skill:builtin:work-word": "ask" },
+    },
+    {
+      name: "read_tool_output",
+      args: { call_id: "retained-call" },
+      permissions: { read: "allow", "read_tool_output:retained-call": "ask" },
+    },
+  ] as const)("asks only after $name passes deny and allowlist checks", async (testCase) => {
+    const runtime = permissionRuntime({ ...testCase.permissions }, ["read_file"]);
+    const result = await runtime.execute(testCase.name, testCase.args);
+    expect(result).toMatchObject({ isError: true, output: "用户拒绝了读取。" });
+    expect(runtime.requestApproval).toHaveBeenCalledOnce();
   });
 });

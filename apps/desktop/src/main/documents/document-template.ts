@@ -1,5 +1,5 @@
 import { DOMParser } from "@xmldom/xmldom";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, type Unzipped, unzipSync } from "fflate";
 import { validateDocumentArchive } from "./document-extractor";
 
 const WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -30,17 +30,13 @@ const unsafeElements = new Set([
 
 export type TemplateMediaBounds = { width: number; height: number };
 
-export async function validateTemplatePlaceholders(
+export async function openEditableDocx(
   bytes: Buffer,
-  names: string[],
-  mediaNames: ReadonlySet<string> = new Set(),
-): Promise<Map<string, TemplateMediaBounds>> {
+): Promise<{ archive: Unzipped; document: Document }> {
   if (bytes.length > 25 * 1024 * 1024) throw new Error("Template exceeds 25 MiB.");
   await validateDocumentArchive(bytes);
   const archive = unzipSync(bytes);
   if (!archive["word/document.xml"]) throw new Error("Template must be a DOCX document.");
-  const matches = new Map(names.map((name) => [name, { count: 0, standalone: true }]));
-  const mediaBounds = new Map<string, TemplateMediaBounds>();
   for (const [path, content] of Object.entries(archive)) {
     if (/vbaProject|digital-signature|_xmlsignatures/i.test(path))
       throw new Error("Signed or macro-enabled templates are not supported.");
@@ -58,6 +54,26 @@ export async function validateTemplatePlaceholders(
       )
         throw new Error("Signed or macro-enabled templates are not supported.");
     }
+  }
+  const document = parseTemplateXml(strFromU8(archive["word/document.xml"]));
+  if (
+    document.documentElement.namespaceURI !== WORD_NS ||
+    document.documentElement.localName !== "document" ||
+    document.getElementsByTagNameNS(WORD_NS, "body").length !== 1
+  )
+    throw new Error("Invalid DOCX document body or namespace.");
+  return { archive, document };
+}
+
+export async function validateTemplatePlaceholders(
+  bytes: Buffer,
+  names: string[],
+  mediaNames: ReadonlySet<string> = new Set(),
+): Promise<Map<string, TemplateMediaBounds>> {
+  const { archive } = await openEditableDocx(bytes);
+  const matches = new Map(names.map((name) => [name, { count: 0, standalone: true }]));
+  const mediaBounds = new Map<string, TemplateMediaBounds>();
+  for (const [path, content] of Object.entries(archive)) {
     if (!path.startsWith("word/") || !path.endsWith(".xml")) continue;
     const doc = parseTemplateXml(strFromU8(content));
     for (const paragraph of Array.from(doc.getElementsByTagNameNS(WORD_NS, "p"))) {
@@ -88,7 +104,7 @@ export async function validateTemplatePlaceholders(
         if (mediaNames.has(name)) {
           if (path !== "word/document.xml")
             throw new Error(
-              "TEMPLATE_MEDIA_LAYOUT_UNSUPPORTED: images and charts require a body paragraph.",
+              "TEMPLATE_MEDIA_LAYOUT_UNSUPPORTED: images, charts and fixed-width tables require a body paragraph.",
             );
           mediaBounds.set(name, readMediaBounds(doc, paragraph));
         }
@@ -118,7 +134,7 @@ function parseTemplateXml(xml: string): Document {
 function readMediaBounds(document: Document, paragraph: Element): TemplateMediaBounds {
   const fail = (): never => {
     throw new Error(
-      "TEMPLATE_MEDIA_LAYOUT_UNSUPPORTED: images and charts require a direct body placeholder in a single-column, single-section template with explicit page size and margins. Use a plain body placeholder or fill with text/formulas.",
+      "TEMPLATE_MEDIA_LAYOUT_UNSUPPORTED: images, charts and fixed-width tables require a direct body placeholder in a single-column, single-section template with explicit page size and margins. Use a plain body placeholder or fill with text/formulas.",
     );
   };
   const bodies = document.getElementsByTagNameNS(WORD_NS, "body");

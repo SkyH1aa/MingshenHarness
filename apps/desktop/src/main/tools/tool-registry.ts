@@ -24,6 +24,7 @@ import type {
 import { APP_VERSION } from "../../shared/release";
 import { CodeIndexService, type IndexSnapshot } from "../agents/code-index-service";
 import { isMemoryPath, MEMORY_DIRECTORY } from "../agents/project-memory-service";
+import { chatToolRejection } from "../chat/agent-mode-policy";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
 import { authorOfficeDocument, renderDocumentHtml } from "../documents/document-author";
 import {
@@ -33,8 +34,11 @@ import {
   MAX_AUTHORED_DOCUMENT_BYTES,
   MAX_AUTHORING_IMAGE_BYTES,
 } from "../documents/document-authoring-schema";
+import { readDocxStructure } from "../documents/document-edit";
 import { extractDocumentBuffer, isDocumentPath } from "../documents/document-extractor";
 import { printDocumentPdf } from "../documents/document-pdf";
+import { executeOfficeDocument, officeDocumentAssets } from "../documents/office-document";
+import { officeDocumentSchema } from "../documents/office-document-schema";
 import type { PermissionStore } from "../permissions/permission-store";
 import { publicFetch } from "../security/network-policy";
 import { dockerExecutable } from "../workspace/docker-path";
@@ -42,6 +46,7 @@ import { DOCKER_SECURITY_ARGS, DockerService } from "../workspace/docker-service
 import { createFileDiff } from "../workspace/file-diff";
 import { NativeSandboxService } from "../workspace/native-sandbox-service";
 import { safeFilePath } from "../workspace/safe-file-path";
+import { BoundedOutput } from "./bounded-output";
 import {
   type CommandLaunch,
   type CommandSessionInfo,
@@ -82,6 +87,8 @@ export interface ToolDescriptor {
 
 export interface ToolExecutionResult {
   output: string;
+  /** Internal capture for paginated recovery; removed before sending to a provider. */
+  fullOutput?: string;
   isError: boolean;
   fileChange?: FileChange;
   fileChanges?: FileChange[];
@@ -100,6 +107,7 @@ export interface ToolExecutionContext {
   contextEpoch?: string;
   forceApproval?: boolean;
   forceReadApprovalPaths?: ReadonlySet<string>;
+  forceWriteApprovalPaths?: ReadonlySet<string>;
   indexStore?: {
     load(key: string): IndexSnapshot | null;
     save(key: string, snapshot: IndexSnapshot): void;
@@ -114,6 +122,8 @@ const readFileSchema = z
   .object({
     path: z.string().min(1).max(32_767),
     refresh: z.boolean().optional(),
+    structure: z.boolean().optional(),
+    render: z.boolean().optional(),
     start_line: z.number().int().min(1).max(2_000_001).optional(),
     end_line: z.number().int().min(1).max(2_000_001).optional(),
     limit: z.number().int().min(1).max(2_500).optional(),
@@ -239,6 +249,7 @@ export function validateChainToolArguments(name: string, args: unknown): void {
     run_command: runCommandSchema,
     code_index: codeIndexSchema,
     create_document: createDocumentSchema,
+    office_document: officeDocumentSchema,
   };
   const schema = schemas[name];
   if (!schema) throw new Error(`Execution chain has no argument validator for ${name}.`);
@@ -308,6 +319,16 @@ export const TOOL_DESCRIPTORS: ToolDescriptor[] = [
           description:
             "Return the requested page even if unchanged; useful after compaction or when previous contents are unavailable.",
         },
+        structure: {
+          type: "boolean",
+          description:
+            "DOCX only: return body block/paragraph indices, exact text and source SHA-256 for localized edits.",
+        },
+        render: {
+          type: "boolean",
+          description:
+            "PDF only: return bounded page images for visual QA with an image-capable model. Inspect any page-limit warning.",
+        },
         ...READ_RANGE_PROPERTIES,
       },
       required: ["path"],
@@ -317,12 +338,21 @@ export const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   {
     name: "read_document",
     description:
-      "Extract readable text from DOC/DOCX, PDF, XLSX/XLS, PPTX or ODT using built-in parsers. Scanned PDF pages use offline Chinese/English OCR; report recognition warnings and use a visual attachment model for handwriting. Do not shell out to external document tools.",
+      "Extract readable text from DOC/DOCX, PDF, XLSX/XLS, PPTX or ODT using built-in parsers. For existing DOCX edits, pass structure:true to read indexed body blocks and paragraphs (including table cells), paragraph text with linear math summaries and source SHA-256; paginate with the normal read cursors. Scanned PDFs use offline Chinese/English OCR. Do not shell out to external document tools.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Absolute path or path relative to the workspace." },
         refresh: { type: "boolean" },
+        structure: {
+          type: "boolean",
+          description: "DOCX indices and source SHA-256 for edit operations.",
+        },
+        render: {
+          type: "boolean",
+          description:
+            "PDF only: return page images for visual layout review; page/image budgets are reported.",
+        },
         ...READ_RANGE_PROPERTIES,
       },
       required: ["path"],
@@ -343,8 +373,14 @@ export const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   {
     name: "create_document",
     description:
-      "Create DOCX/PPTX/PDF or fill a DOCX template in the workspace. DOCX supports native editable LaTeX equations (equation/inline rich_paragraph), Markdown, rich text, hyperlinks, footnotes, TOC fields, native charts, headers/footers/page numbers, lists, tables and approved local images. DOCX/PDF table rows accept literal string cells or {blocks:[...]} cells containing paragraph, rich_paragraph, equation, markdown, list, code or quote; use structured cells for native DOCX math, mixed text/math and multiple paragraphs (50 blocks/20000 characters per cell, no position). PDF typesets MathML equations (not editable Office objects); native charts/TOC/footnotes require DOCX. PPTX uses slides, editable text/tables/charts and notes; table cells must be strings, no native equations. A template uses unique {{placeholder}} whole paragraphs with replacement blocks, preserves surrounding content, and requires separate read approval. Unsupported math fails without rasterizing or losing content. Do not overwrite unless overwrite:true.",
+      "Create DOCX/PPTX/PDF, fill a DOCX template, or edit an existing DOCX locally. For old drafts, first read_document with structure:true; then use edit:{path,expected_sha256,operations}. Operations: replace_text {paragraph,old_text,new_text} replaces a unique inline match across runs while retaining surrounding run formatting; replace_blocks {start_block,end_block,blocks} replaces/deletes an inclusive body range without placeholders; format_paragraph {paragraph,layout} changes paragraph layout. Indices refer to the original SHA-256; operations must not overlap. Protected ranges fail without writing. Source requires separate read approval; output defaults to a new file. template and edit are mutually exclusive; omit top-level blocks/slides and document-level layout in both modes. DOCX supports native editable equations, Markdown, rich text, links, footnotes, TOC, charts, tables and approved local images. DOCX/PDF heading/paragraph/rich_paragraph/equation support layout (spacing in points, indentation in inches, line-spacing multiplier, alignment and pagination); tables support column_widths as relative weights and literal or {blocks:[...]} cells. PPTX cells are strings; no layout, rich text or equations. PDF typesets equations; charts/TOC/footnotes require DOCX. Templates still use unique whole-paragraph {{placeholder}} markers. Unsupported math fails without rasterizing. Do not overwrite unless overwrite:true.",
     parameters: z.toJSONSchema(createDocumentSchema, { target: "draft-7" }),
+  },
+  {
+    name: "office_document",
+    description:
+      "WorkAgent structured Office workflow. inspect returns DOCX/XLSX/PPTX package structure and source SHA. create_spreadsheet creates native editable XLSX with styled cells, formulas, filters and tables. edit_spreadsheet requires the inspected source SHA and supports sheets, ranges, styles, merges, columns, filters and native tables. edit_presentation requires source SHA and edits supported shape/placeholder text, table cells and notes without reserializing unrelated parts. verify performs package/content checks and can optionally use installed Microsoft Office COM for real Excel recalculation and Word/Excel/PowerPoint PDF export; COM is unavailable in isolated/protected/child workflows and results must say so. Formula caches written by ExcelJS are not evidence of recalculation. Macros, signatures, external links, ActiveX, OLE, pivot caches, slicers and unsupported embedded objects are rejected. Never claim rendering or recalculation succeeded when verify reports unavailable/failed/skipped.",
+    parameters: z.toJSONSchema(officeDocumentSchema, { target: "draft-7" }),
   },
   {
     name: "write_file",
@@ -1403,10 +1439,17 @@ export class ToolRegistry {
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
     try {
+      const chatDenied = chatToolRejection(context.session, name);
+      if (chatDenied) return chatDenied;
       if (
-        ["write_file", "replace_in_file", "delete_file", "apply_patch", "create_document"].includes(
-          name,
-        )
+        [
+          "write_file",
+          "replace_in_file",
+          "delete_file",
+          "apply_patch",
+          "create_document",
+          "office_document",
+        ].includes(name)
       ) {
         const args = rawArguments as Record<string, unknown>;
         const paths =
@@ -1428,6 +1471,16 @@ export class ToolRegistry {
           };
       }
       if (name === "code_index") return await this.queryCodeIndex(rawArguments, context);
+      if (name === "office_document") {
+        const parsed = officeDocumentSchema.safeParse(rawArguments);
+        if (
+          parsed.success &&
+          (parsed.data.operation === "create_spreadsheet" ||
+            parsed.data.operation === "edit_spreadsheet" ||
+            parsed.data.operation === "edit_presentation")
+        )
+          this.cache.clear();
+      }
       if (
         [
           "write_file",
@@ -1472,6 +1525,8 @@ export class ToolRegistry {
           return await this.viewImage(rawArguments, context);
         case "create_document":
           return await this.createDocument(rawArguments, context);
+        case "office_document":
+          return await this.officeDocument(rawArguments, context);
         case "write_file":
           return await this.writeFile(rawArguments, context);
         case "replace_in_file":
@@ -1514,7 +1569,18 @@ export class ToolRegistry {
           isError: true,
         };
       }
-      return { output: errorText(error), isError: true };
+      const captured =
+        error &&
+        typeof error === "object" &&
+        "capturedOutput" in error &&
+        typeof error.capturedOutput === "string"
+          ? error.capturedOutput
+          : undefined;
+      return {
+        output: errorText(error),
+        isError: true,
+        ...(captured ? { fullOutput: `${errorText(error)}\n${captured}` } : {}),
+      };
     }
   }
 
@@ -1732,11 +1798,26 @@ export class ToolRegistry {
           ),
           "base64",
         );
-        const document = await extractDocumentBuffer(data, target, context.signal);
+        if (args.structure) return await this.documentStructure(data, target, args, context);
+        const document = await extractDocumentBuffer(
+          data,
+          target,
+          context.signal,
+          args.render ? "vision" : "ocr",
+        );
         context.observeFile?.(target, createHash("sha256").update(data).digest("hex"));
         return {
           output: `Path: ${target}\nFormat: ${document.format}\n${document.warnings.join("\n")}\n\n${hasReadRange(args) ? formatNumberedLines(document.text, args) : document.text}`,
           isError: false,
+          ...(document.pageImages?.length
+            ? {
+                images: document.pageImages.map((page) => ({
+                  dataUrl: page.dataUrl,
+                  mimeType: "image/png",
+                  alt: `PDF page ${page.page}`,
+                })),
+              }
+            : {}),
         };
       }
       const text = await this.cache.deduplicate(
@@ -1898,7 +1979,13 @@ export class ToolRegistry {
         return { output: "文档超过 25 MiB，拒绝直接提取。", isError: true };
       }
       const buffer = await readFile(target);
-      const document = await extractDocumentBuffer(buffer, target, context.signal);
+      if (args.structure) return await this.documentStructure(buffer, target, args, context);
+      const document = await extractDocumentBuffer(
+        buffer,
+        target,
+        context.signal,
+        args.render ? "vision" : "ocr",
+      );
       context.observeFile?.(target, createHash("sha256").update(buffer).digest("hex"));
       return {
         output: [
@@ -1911,6 +1998,15 @@ export class ToolRegistry {
             : document.text.trim() || "(文档没有可提取文本)",
         ].join("\n"),
         isError: false,
+        ...(document.pageImages?.length
+          ? {
+              images: document.pageImages.map((page) => ({
+                dataUrl: page.dataUrl,
+                mimeType: "image/png",
+                alt: `PDF page ${page.page}`,
+              })),
+            }
+          : {}),
       };
     }
     if (metadata.size > MAX_FILE_BYTES)
@@ -1945,6 +2041,37 @@ export class ToolRegistry {
     const output = `Path: ${target}\n\n${formatNumberedLines(text, args)}`;
     this.cache.put(key, output);
     return { output, isError: false };
+  }
+
+  private async documentStructure(
+    bytes: Buffer,
+    target: string,
+    args: z.infer<typeof readFileSchema>,
+    context: ToolExecutionContext,
+  ): Promise<ToolExecutionResult> {
+    if (/\.(?:xlsx|pptx)$/i.test(target)) {
+      const result = await executeOfficeDocument(
+        { operation: "inspect", path: target },
+        new Map([[target, bytes]]),
+        context.signal,
+      );
+      context.observeFile?.(target, createHash("sha256").update(bytes).digest("hex"));
+      return {
+        output: `Path: ${target}\n${formatNumberedLines(result.output, args)}`,
+        isError: false,
+      };
+    }
+    if (!target.toLowerCase().endsWith(".docx"))
+      throw new Error(
+        "DOCUMENT_STRUCTURE_UNSUPPORTED: structure:true requires DOCX, XLSX or PPTX.",
+      );
+    const structure = await readDocxStructure(bytes);
+    context.signal.throwIfAborted();
+    context.observeFile?.(target, structure.sha256);
+    return {
+      output: `Path: ${target}\nFormat: DOCX structure\nSource SHA-256: ${structure.sha256}\n\n${formatNumberedLines(structure.text, args)}`,
+      isError: false,
+    };
   }
 
   private async viewImage(
@@ -2010,6 +2137,257 @@ export class ToolRegistry {
     };
   }
 
+  private async officeDocument(
+    rawArguments: unknown,
+    context: ToolExecutionContext,
+  ): Promise<ToolExecutionResult> {
+    const args = officeDocumentSchema.parse(rawArguments);
+    context.signal.throwIfAborted();
+    if (context.session.agentMode !== "work")
+      throw new Error("office_document 专精工具仅在 WorkAgent 中可用。");
+    if (
+      context.session.patchOnly &&
+      ["create_spreadsheet", "edit_spreadsheet", "edit_presentation"].includes(args.operation)
+    )
+      throw new Error("Patch-only 会话不能创建或修改二进制 Office 文件。");
+    const root = context.session.workspacePath;
+    if (!root) throw new Error("Office 文档处理需要先选择工作目录。");
+
+    const locate = async (path: string): Promise<string> => {
+      if (/^(?:https?|data|blob|file):/i.test(path))
+        throw new Error("Office 文档必须使用当前工作区文件路径。");
+      const local =
+        context.session.executionMode === "docker" && path.startsWith("/workspace/")
+          ? path.slice(11)
+          : path;
+      return await safeFilePath(root, resolveToolPath(local, root));
+    };
+    const isolated =
+      context.session.parentSessionId ||
+      context.session.executionMode === "docker" ||
+      context.session.permissionMode === "request_approval";
+    const readBinary = async (path: string): Promise<Buffer> => {
+      const absolute = await locate(path);
+      const forceOfficeReadApproval =
+        context.forceApproval ||
+        (context.forceReadApprovalPaths?.has(resolve(absolute).toLowerCase()) ?? false);
+      const approved = await this.approvePath(
+        {
+          ...context,
+          toolName: "read_file",
+          ...(forceOfficeReadApproval ? { forceApproval: true } : {}),
+        },
+        absolute,
+        "read",
+      );
+      if (!approved.allowed) throw new Error(approved.reason);
+      if (isolated) {
+        const local = relative(root, absolute).replaceAll("\\", "/");
+        if (context.session.executionMode === "docker") {
+          const bytes = Buffer.from(
+            String(
+              await new DockerService().fileOperation(
+                context.dockerImage ?? "mcr.microsoft.com/powershell:lts-alpine",
+                root,
+                { operation: "read_binary", path: local },
+                context.signal,
+              ),
+            ),
+            "base64",
+          );
+          if (bytes.length > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
+          context.observeFile?.(absolute, createHash("sha256").update(bytes).digest("hex"));
+          return bytes;
+        }
+        const bytes = Buffer.from(
+          String(
+            await this.nativeSandbox.fileOperation(
+              root,
+              { operation: "read_binary", path: local },
+              context.signal,
+            ),
+          ),
+          "base64",
+        );
+        if (bytes.length > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
+        context.observeFile?.(absolute, createHash("sha256").update(bytes).digest("hex"));
+        return bytes;
+      }
+      const metadata = await stat(absolute);
+      if (!metadata.isFile()) throw new Error(`Office 源不是普通文件：${absolute}`);
+      if (metadata.size > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
+      const bytes = await readFile(absolute);
+      if (bytes.length > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
+      context.observeFile?.(absolute, createHash("sha256").update(bytes).digest("hex"));
+      return bytes;
+    };
+    const assets = new Map<string, Buffer>();
+    for (const path of officeDocumentAssets(args)) {
+      context.signal.throwIfAborted();
+      const bytes = await readBinary(path);
+      assets.set(path, bytes);
+    }
+
+    const outputPaths =
+      args.operation === "verify"
+        ? [args.output_path, args.render_path].filter((path): path is string => Boolean(path))
+        : args.operation === "inspect"
+          ? []
+          : [args.path];
+    const targets = new Map<string, { path: string; local: string; expectedHash: string }>();
+    const hashTarget = async (path: string, local: string): Promise<string> => {
+      if (isolated) {
+        const request = { operation: "hash" as const, path: local };
+        return String(
+          context.session.executionMode === "docker"
+            ? await new DockerService().fileOperation(
+                context.dockerImage ?? "mcr.microsoft.com/powershell:lts-alpine",
+                root,
+                request,
+                context.signal,
+              )
+            : await this.nativeSandbox.fileOperation(root, request, context.signal),
+        );
+      }
+      try {
+        await locate(path);
+        const metadata = await stat(path);
+        if (!metadata.isFile() || metadata.size > MAX_DOCUMENT_BYTES)
+          throw new Error("Office 输出目标必须是小于 25 MiB 的普通文件。");
+        return createHash("sha256")
+          .update(await readFile(path))
+          .digest("hex");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+        throw error;
+      }
+    };
+    for (const path of outputPaths) {
+      const absolute = await locate(path),
+        local = relative(root, absolute).replaceAll("\\", "/");
+      if (isMemoryPath(absolute))
+        throw new Error("Project memory is broker-managed. Office tools cannot write it.");
+      if (
+        [...targets.values()].some((value) => value.path.toLowerCase() === absolute.toLowerCase())
+      )
+        throw new Error("Office 输出路径不能重复。");
+      if (
+        args.operation === "verify" &&
+        absolute.toLowerCase() === (await locate(args.path)).toLowerCase()
+      )
+        throw new Error("验证输出必须另存，不能覆盖检查源文件。");
+      const approval = await this.approvePath(
+        {
+          ...context,
+          forceApproval: Boolean(
+            context.forceApproval || context.forceWriteApprovalPaths?.has(absolute.toLowerCase()),
+          ),
+        },
+        absolute,
+        "write",
+      );
+      if (!approval.allowed) return { output: approval.reason, isError: true };
+      const expectedHash = await hashTarget(absolute, local);
+      if (expectedHash !== "missing" && !("overwrite" in args && args.overwrite))
+        return {
+          output: `输出文件已存在：${absolute}。请明确设置 overwrite:true。`,
+          isError: true,
+        };
+      targets.set(path, { path: absolute, local, expectedHash });
+    }
+
+    const canUseOffice =
+      context.session.agentMode === "work" &&
+      context.session.permissionMode === "full_access" &&
+      context.session.executionMode === "host" &&
+      !context.session.parentSessionId;
+    const result = await executeOfficeDocument(rawArguments, assets, context.signal, {
+      canUseOffice,
+    });
+    const warnings = [...result.warnings];
+    const fileChanges: FileChange[] = [];
+
+    const save = async (path: string, bytes: Buffer) => {
+      if (bytes.length > MAX_DOCUMENT_BYTES) throw new Error("生成 Office 文件超过 25 MiB 限制。");
+      const target = targets.get(path);
+      if (!target) throw new Error("Office 输出未经过路径和权限预检。");
+      const { path: outputPath, local, expectedHash } = target;
+      const existing = expectedHash !== "missing";
+      await context.beforeFileWrite?.(outputPath, expectedHash);
+      context.signal.throwIfAborted();
+      context.onEffectStart?.();
+      if (isolated) {
+        if (context.session.executionMode === "docker") {
+          await new DockerService().fileOperation(
+            context.dockerImage ?? "mcr.microsoft.com/powershell:lts-alpine",
+            root,
+            {
+              operation: "write_binary",
+              path: local,
+              content: bytes.toString("base64"),
+              expectedHash,
+            },
+            context.signal,
+          );
+        } else {
+          await this.nativeSandbox.fileOperation(
+            root,
+            {
+              operation: "write_binary",
+              path: local,
+              content: bytes.toString("base64"),
+              expectedHash,
+            },
+            context.signal,
+          );
+        }
+      } else {
+        await mkdir(dirname(outputPath), { recursive: true });
+        const temporary = await safeFilePath(root, `${outputPath}.${randomUUID()}.tmp`);
+        try {
+          const handle = await open(temporary, "wx");
+          try {
+            await handle.writeFile(bytes);
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          context.signal.throwIfAborted();
+          if ((await hashTarget(outputPath, local)) !== expectedHash)
+            throw new Error(
+              "EXTERNAL_FILE_CHANGED: Office 输出在准备期间发生变化，本次结果未写入。",
+            );
+          if (existing) await rename(temporary, outputPath);
+          else await link(temporary, outputPath);
+        } finally {
+          await rm(temporary, { force: true, maxRetries: 3, retryDelay: 100 });
+        }
+      }
+      context.observeFile?.(outputPath, createHash("sha256").update(bytes).digest("hex"));
+      fileChanges.push({
+        path: outputPath,
+        changeType: existing ? "modified" : "created",
+        additions: 0,
+        deletions: 0,
+      });
+    };
+    if (result.bytes) await save(args.path, result.bytes);
+    if (result.rendition && args.operation === "verify" && args.render_path)
+      await save(args.render_path, result.rendition.bytes);
+    if (result.recalculatedBytes && args.operation === "verify" && args.output_path)
+      await save(args.output_path, result.recalculatedBytes);
+    return {
+      output: [
+        result.output,
+        ...warnings.map((warning) => `WARNING: ${warning}`),
+        ...fileChanges.map((change) => `已写入 ${change.path}。`),
+      ].join("\n"),
+      isError: false,
+      ...(fileChanges.length === 1 && fileChanges[0] ? { fileChange: fileChanges[0] } : {}),
+      ...(fileChanges.length ? { fileChanges } : {}),
+    };
+  }
+
   private async createDocument(
     rawArguments: unknown,
     context: ToolExecutionContext,
@@ -2071,10 +2449,12 @@ export class ToolRegistry {
         );
       }
       const metadata = await stat(path);
-      if (!metadata.isFile()) throw new Error(`图片不是普通文件：${path}`);
-      if (metadata.size > MAX_AUTHORED_DOCUMENT_BYTES) throw new Error(`图片超过 25 MiB：${path}`);
+      if (!metadata.isFile()) throw new Error(`文档或图片不是普通文件：${path}`);
+      if (metadata.size > MAX_AUTHORED_DOCUMENT_BYTES)
+        throw new Error(`文档或图片超过 25 MiB：${path}`);
       const bytes = await readFile(path);
-      if (bytes.length > MAX_AUTHORED_DOCUMENT_BYTES) throw new Error(`图片超过 25 MiB：${path}`);
+      if (bytes.length > MAX_AUTHORED_DOCUMENT_BYTES)
+        throw new Error(`文档或图片超过 25 MiB：${path}`);
       return bytes;
     };
     const currentHash = async (): Promise<string> => {
@@ -2116,9 +2496,8 @@ export class ToolRegistry {
     context.signal.throwIfAborted();
 
     const extension = documentExtension(args);
-    const templateBytes = args.template
-      ? await readBinary(await locate(args.template.path))
-      : undefined;
+    const source = args.template ?? args.edit;
+    const templateBytes = source ? await readBinary(await locate(source.path)) : undefined;
     const content =
       extension === ".pdf"
         ? await printDocumentPdf(renderDocumentHtml(args, assets), args, context.signal)
@@ -2553,12 +2932,14 @@ export class ToolRegistry {
     const args = webSearchSchema.parse(rawArguments);
     const limit = args.max_results ?? 8;
     try {
-      const ddg = await fetch("https://html.duckduckgo.com/html/", {
+      const searchBody = new URLSearchParams({ q: args.query }).toString();
+      const ddg = await publicFetch("https://html.duckduckgo.com/html/", {
         method: "POST",
-        body: new URLSearchParams({ q: args.query }),
+        body: searchBody,
         signal: AbortSignal.any([context.signal, AbortSignal.timeout(20_000)]),
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": String(Buffer.byteLength(searchBody)),
           "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
         },
       });
@@ -2581,11 +2962,14 @@ export class ToolRegistry {
         }
       }
       if (results.length === 0) {
-        const rss = await fetch(
+        const rss = await publicFetch(
           `https://www.bing.com/search?format=rss&q=${encodeURIComponent(args.query)}`,
           {
             signal: AbortSignal.any([context.signal, AbortSignal.timeout(20_000)]),
-            headers: { "User-Agent": `Mingshen-Harness/${APP_VERSION}` },
+            headers: {
+              Accept: "application/rss+xml,application/xml,text/xml",
+              "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
+            },
           },
         );
         const xml = await rss.text();
@@ -2663,6 +3047,7 @@ export class ToolRegistry {
     );
     return {
       output: snapshot.output,
+      ...(snapshot.fullOutput ? { fullOutput: snapshot.fullOutput } : {}),
       isError: snapshot.isError,
       commandSession: {
         id: snapshot.id,
@@ -2740,6 +3125,7 @@ export class ToolRegistry {
     });
     return {
       output: snapshot.output,
+      ...(snapshot.fullOutput ? { fullOutput: snapshot.fullOutput } : {}),
       isError: snapshot.isError,
       commandSession: {
         id: snapshot.id,
@@ -2974,6 +3360,7 @@ export class ToolRegistry {
       this.cache.put(key, output, 15000);
       return {
         output: cached ? `[cached read-only command; dependencies verified]\n${cached}` : output,
+        ...(text.length > MAX_TOOL_OUTPUT ? { fullOutput: `exit_code: 0\n${text}` } : {}),
         isError: false,
       };
     }
@@ -3007,6 +3394,9 @@ export class ToolRegistry {
       if (commandKey && result.exitCode === 0) this.cache.put(commandKey, output, 15_000);
       return {
         output,
+        ...(result.output.length > MAX_TOOL_OUTPUT
+          ? { fullOutput: `exit_code: ${result.exitCode}\n${result.output}` }
+          : {}),
         isError: result.exitCode !== 0,
       };
     }
@@ -3094,6 +3484,7 @@ export class ToolRegistry {
       });
       let stdout = "";
       let stderr = "";
+      const captured = new BoundedOutput();
       let finished = false;
       let terminating: Promise<void> | null = null;
       let terminatedResult: ToolExecutionResult | null = null;
@@ -3111,6 +3502,11 @@ export class ToolRegistry {
           this.cache.put(commandKey, truncate(result.output), 15_000);
         resolveResult({
           output: truncate(result.output),
+          ...(captured.text().length > MAX_TOOL_OUTPUT
+            ? {
+                fullOutput: `${result.isError ? "Command failed or was interrupted.\n" : ""}${captured.text()}`,
+              }
+            : {}),
           isError: result.isError,
         });
       };
@@ -3140,9 +3536,11 @@ export class ToolRegistry {
       child.stdout?.setEncoding("utf8");
       child.stderr?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
+        captured.append(chunk);
         stdout = (stdout + chunk).slice(-MAX_TOOL_OUTPUT);
       });
       child.stderr?.on("data", (chunk: string) => {
+        captured.append(chunk);
         stderr = (stderr + chunk).slice(-MAX_TOOL_OUTPUT);
       });
       child.on("error", (error) => {

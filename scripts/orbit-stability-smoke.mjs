@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { createServer as createPortServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
+import { experimentalExecutable } from './experimental-executable.mjs';
 import { crc32 } from 'node:zlib';
 
 // Historical data and UI failure events belong only to this temporary profile.
@@ -540,7 +541,7 @@ try {
   const env = { ...process.env, MSH_EXPERIMENTAL: '1', MSH_USER_DATA_DIR: profile,
     MSH_DISABLE_AUTO_DEPENDENCIES: '1', MSH_NOTIFICATION_FIXTURE: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
-  child = spawn(resolve('apps/desktop/node_modules/electron/dist/MingshenHarnessExperimental.exe'),
+  child = spawn(experimentalExecutable(),
     [`--inspect=${mainPort}`, '.', `--remote-debugging-port=${rendererPort}`],
     { cwd: resolve('apps/desktop'), env, windowsHide: true, stdio: 'ignore' });
   main = await connect(mainPort);

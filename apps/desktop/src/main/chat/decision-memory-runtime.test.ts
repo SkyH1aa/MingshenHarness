@@ -241,6 +241,70 @@ function analysisModel(f: Awaited<ReturnType<typeof fixture>>, name: string): Mo
 }
 
 describe("decision reuse runtime", () => {
+  it("returns rendered Work pages to the model when write receipts use absolute workspace paths", async () => {
+    const f = await fixture();
+    f.repository.updateSession(f.session.id, { agentMode: "work" });
+    f.model.inputModalities.push("image");
+    const invocations: Array<{ name: string; args: Record<string, unknown> }> = [];
+    f.internal.executeToolCall = async (raw) => {
+      const input = raw as { toolCall: { name: string; arguments: string } };
+      const { name } = input.toolCall;
+      const args = JSON.parse(input.toolCall.arguments) as Record<string, unknown>;
+      invocations.push({ name, args });
+      if (name === "read_document")
+        return {
+          output: "Rendered page 1",
+          isError: false,
+          images: [{ mimeType: "image/png", dataUrl: "data:image/png;base64,AQID" }],
+        };
+      const preview = args.operation === "verify";
+      return {
+        output: preview ? "Microsoft Office verified; PDF exported." : "Workbook created.",
+        isError: false,
+        fileChanges: [
+          {
+            path: join(f.root, String(preview ? args.render_path : args.path)),
+            changeType: "created" as const,
+            additions: 0,
+            deletions: 0,
+          },
+        ],
+      };
+    };
+    const requests: ModelRequest[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        requests.push(requestBody(init));
+        return requests.length === 1
+          ? tool("office_document", { operation: "create_spreadsheet", path: "budget.xlsx" })
+          : answer();
+      }),
+    );
+    await f.run();
+    expect(invocations.map((call) => call.name)).toEqual([
+      "office_document",
+      "office_document",
+      "read_document",
+    ]);
+    expect(invocations[1]?.args).toMatchObject({
+      operation: "verify",
+      path: "budget.xlsx",
+      render_path: "budget.xlsx.preview-fixture-.pdf",
+      overwrite: true,
+    });
+    expect(invocations[2]?.args).toMatchObject({
+      path: "budget.xlsx.preview-fixture-.pdf",
+      render: true,
+    });
+    const results = f.repository
+      .getMessages(f.session.id)
+      .flatMap((message) => message.parts.filter((part) => part.type === "tool_result"));
+    expect(results.at(-1)?.images).toHaveLength(1);
+    expect(JSON.stringify(requests.at(-1)?.input)).toContain("input_image");
+    expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+  });
+
   it("executes two real reads in order with no model callback between them, preserving paired history", async () => {
     const f = await fixture();
     const bodies: Array<Record<string, unknown>> = [];

@@ -8,6 +8,29 @@ const DOCUMENT_MIME_EXTENSIONS: Record<string, string> = {
   "application/vnd.oasis.opendocument.text": ".odt",
 };
 
+const CHAT_RASTER_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/tiff",
+  "image/avif",
+]);
+
+const CHAT_RASTER_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|avif)$/i;
+
+export function isSupportedChatRasterImageMimeType(mimeType: string): boolean {
+  return CHAT_RASTER_IMAGE_MIME_TYPES.has(mimeType.trim().toLowerCase());
+}
+
+export function isSupportedChatRasterImageFile(name: string, mimeType: string): boolean {
+  const normalizedMimeType = mimeType.trim().toLowerCase();
+  return normalizedMimeType
+    ? isSupportedChatRasterImageMimeType(normalizedMimeType)
+    : CHAT_RASTER_IMAGE_EXTENSIONS.test(name);
+}
+
 export function attachmentDocumentName(name: string, mimeType: string): string | null {
   if (/\.(?:pdf|doc|docx|xlsx|xls|pptx|odt)$/i.test(name)) return name;
   const extension = DOCUMENT_MIME_EXTENSIONS[mimeType.toLowerCase()];

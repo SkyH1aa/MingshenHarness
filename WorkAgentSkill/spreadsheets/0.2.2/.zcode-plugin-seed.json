@@ -1,0 +1,7 @@
+{
+  "marketplace": "zcode-plugins-official",
+  "plugin": "spreadsheets",
+  "pluginVersion": "0.2.2",
+  "source": "filesystem",
+  "version": 1
+}

@@ -9,6 +9,7 @@ import type {
   ProviderView,
 } from "../../../shared/domain";
 import { tr } from "../i18n/index";
+import { profileApplicableModes, WORKSPACE_AGENT_MODES } from "../lib/agent-mode-ui";
 import { useDialog } from "./DialogProvider";
 import { ModelPicker } from "./ModelPicker";
 
@@ -42,6 +43,7 @@ function emptyDraft(): AgentProfileSaveInput {
     topP: null,
     maxSteps: DEFAULT_TOOL_ROUNDS,
     color: null,
+    applicableModes: ["code", "work"],
   };
 }
 
@@ -63,6 +65,7 @@ function profileToDraft(profile: AgentProfileView): AgentProfileSaveInput {
     topP: profile.topP,
     maxSteps: profile.maxSteps,
     color: profile.color,
+    applicableModes: profileApplicableModes(profile),
   };
 }
 
@@ -166,6 +169,35 @@ export function AgentSettings({ profiles, providers, onChanged }: AgentSettingsP
                 <option value="all">{tr("\u4E3B Agent + Subagent")}</option>
               </select>
             </label>
+            <div className="field settings-form-grid__full">
+              <span>{tr("适用模式")}</span>
+              <fieldset className="agent-mode-scope" aria-label={tr("适用模式")}>
+                {WORKSPACE_AGENT_MODES.map((mode) => {
+                  const checked = (draft.applicableModes ?? ["code", "work"]).includes(mode);
+                  return (
+                    <label key={mode} className="checkbox-line">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const currentModes = draft.applicableModes ?? ["code", "work"];
+                          const nextModes = checked
+                            ? currentModes.filter((item) => item !== mode)
+                            : WORKSPACE_AGENT_MODES.filter(
+                                (item) => item === mode || currentModes.includes(item),
+                              );
+                          setDraft({ ...draft, applicableModes: nextModes });
+                        }}
+                      />
+                      {mode === "code" ? "CodeAgent" : "WorkAgent"}
+                    </label>
+                  );
+                })}
+              </fieldset>
+              <small className="field__hint">
+                {tr("ChatAgent 不使用自定义 Agent 配置；至少保留一个 Code/Work 适用模式。")}
+              </small>
+            </div>
             <label className="field settings-form-grid__full">
               <span>{tr("\u63CF\u8FF0")}</span>
               <input
@@ -340,7 +372,7 @@ export function AgentSettings({ profiles, providers, onChanged }: AgentSettingsP
               className="btn btn--primary"
               type="button"
               onClick={() => void save()}
-              disabled={saving || !draft.name.trim()}
+              disabled={saving || !draft.name.trim() || !(draft.applicableModes?.length ?? 2)}
             >
               <Save aria-hidden="true" size={15} />
               {saving ? tr("\u4FDD\u5B58\u4E2D") : tr("\u4FDD\u5B58 Agent")}
@@ -381,6 +413,9 @@ export function AgentSettings({ profiles, providers, onChanged }: AgentSettingsP
                   {profile.readOnly ? <span>{tr("\u53EA\u8BFB")}</span> : null}
                   {profile.builtin ? <span>{tr("\u5185\u7F6E")}</span> : null}
                   {profile.sourcePath ? <span>{tr("\u6587\u4EF6")}</span> : null}
+                  {profileApplicableModes(profile).map((mode) => (
+                    <span key={mode}>{mode === "code" ? "Code" : "Work"}</span>
+                  ))}
                 </div>
                 <p>
                   {(profile.builtin ? tr(profile.description) : profile.description) ||

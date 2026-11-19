@@ -173,19 +173,18 @@ describe("project memory routing boundaries", () => {
   );
 
   it.each(["native", "tencentdb"] as const)(
-    "rejects an orphan child instead of reading its own %s memory",
+    "rejects an orphan child record before reading its own %s memory",
     async (backend) => {
       const f = await fixture(backend);
-      const child = f.repository.insertSession({
-        ...f.input,
-        title: "Orphan",
-        parentSessionId: "missing-parent",
-      });
       const nativeView = vi.spyOn(f.chat.projectMemory, "view");
       const tencentView = vi.spyOn(f.chat.tencentMemory, "view");
-      await expect(f.chat.getProjectMemory(child.id)).rejects.toThrow(
-        "Project memory owner is missing.",
-      );
+      expect(() =>
+        f.repository.insertSession({
+          ...f.input,
+          title: "Orphan",
+          parentSessionId: "missing-parent",
+        }),
+      ).toThrow("父会话不存在。");
       expect(nativeView).not.toHaveBeenCalled();
       expect(tencentView).not.toHaveBeenCalled();
     },

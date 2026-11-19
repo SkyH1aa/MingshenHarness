@@ -46,7 +46,8 @@ export function equationHtml(
   source: string,
   display: boolean,
   format: "docx" | "pdf",
-  align: "left" | "center" | "right" = "center",
+  align: "left" | "center" | "right" | "justify" = "center",
+  paragraphStyle = "",
 ): string {
   const latex = equationSource(source);
   if (format === "docx") {
@@ -64,7 +65,7 @@ export function equationHtml(
     maxSize: 20,
   });
   return display
-    ? `<div class="document-equation" style="text-align:${align}">${html}</div>`
+    ? `<div class="document-equation" style="text-align:${align}${paragraphStyle ? `;${escapeDocumentHtml(paragraphStyle)}` : ""}">${html}</div>`
     : html;
 }
 

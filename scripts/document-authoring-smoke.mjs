@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
+import { experimentalExecutable } from "./experimental-executable.mjs";
 
 const { version } = JSON.parse(await readFile("package.json", "utf8"));
 const desktop = resolve("apps/desktop");
@@ -361,15 +362,13 @@ async function launch() {
   const appIndex = process.argv.indexOf("--app");
   const packaged = appIndex >= 0;
   if (packaged) assert.ok(process.argv[appIndex + 1], "--app requires an executable path.");
-  const executable = packaged
-    ? resolve(process.argv[appIndex + 1])
-    : join(desktop, "node_modules/electron/dist/MingshenHarnessExperimental.exe");
   if (!packaged) {
     execFileSync(process.execPath, [resolve("scripts/prepare-experimental-runtime.cjs")], {
       windowsHide: true,
       stdio: "pipe",
     });
   }
+  const executable = packaged ? resolve(process.argv[appIndex + 1]) : experimentalExecutable();
   const environment = {
     ...process.env,
     MSH_EXPERIMENTAL: "1",
@@ -927,6 +926,151 @@ try {
     await copyFile(join(project, path), join(evidence, path));
   }
   passed.push("Real DOCX template read/fill: preserved input/page geometry/text/header/original note, plus native formula/chart/new note/list/link and rich table cells");
+
+  const oldDraftRequest = {
+    path: "old-draft.docx",
+    header: "DRAFT_HEADER_KEEP_133",
+    footer: "DRAFT_FOOTER_KEEP_133",
+    page_numbers: true,
+    page_size: "A4",
+    margins: { top: 0.7, bottom: 0.7, left: 0.8, right: 0.8 },
+    blocks: [
+      { type: "heading", text: "Project review", level: 1 },
+      {
+        type: "rich_paragraph",
+        runs: [
+          { type: "text", text: "Before " },
+          { type: "text", text: "old ", bold: true },
+          { type: "text", text: "draft", italic: true },
+          { type: "text", text: " after." },
+        ],
+      },
+      { type: "paragraph", text: "Replace this section" },
+      { type: "paragraph", text: "Remove this paragraph" },
+      { type: "table", rows: [["Cell target", { blocks: [{ type: "equation", latex: String.raw`\frac{1}{2}` }] }]] },
+      { type: "image", path: imagePath, width: 2.4, height: 1.2, alt: "Preserved local image" },
+      {
+        type: "rich_paragraph",
+        runs: [
+          { type: "text", text: "Original note remains." },
+          { type: "footnote", text: "DRAFT_ORIGINAL_NOTE_133" },
+        ],
+      },
+      { type: "paragraph", text: "Keep final paragraph" },
+    ],
+  };
+  const oldDraftRun = await run(session, "CREATE_OLD_DRAFT", stepsFor(oldDraftRequest));
+  assert.ok(oldDraftRun.toolResults.every((result) => !result.isError), JSON.stringify(oldDraftRun.toolResults));
+  const oldDraftBytes = await readFile(join(project, oldDraftRequest.path));
+  const structureRun = await run(session, "READ_DRAFT_STRUCTURE", [{
+    name: "read_document", arguments: { path: oldDraftRequest.path, structure: true },
+  }]);
+  assert.ok(!structureRun.toolResults[0].isError, JSON.stringify(structureRun.toolResults));
+  const structureText = structureRun.toolResults[0].output;
+  const sourceHash = structureText.match(/Source SHA-256: ([a-f0-9]{64})/)?.[1];
+  assert.equal(sourceHash, digest(oldDraftBytes));
+  const indexed = structureText.split("\n").flatMap((line) => {
+    const record = line.match(/^\s*\d+ \| (\{.*\})$/)?.[1];
+    return record ? [JSON.parse(record)] : [];
+  });
+  const anchor = (text) => {
+    const found = indexed.find((record) => record.text === text);
+    assert.ok(found, `Structure lost paragraph ${text}.`);
+    return found;
+  };
+  const draftReplacements = [
+    { type: "heading", text: "Updated findings", level: 2, layout: { keep_with_next: true, space_before: 10 } },
+    { type: "paragraph", text: "Revised section with native mathematics and an intentionally wider explanation column.", layout: { line_spacing: 1.5, space_after: 8 } },
+    { type: "equation", latex: "x^2+1", layout: { align: "left", space_before: 4, space_after: 8 } },
+    {
+      type: "table", header: true, column_widths: [1, 3],
+      rows: [["Item", "Explanation"], ["Review", "Native table widths follow the original draft page geometry."]],
+    },
+    {
+      type: "rich_paragraph",
+      runs: [{ type: "text", text: "New reference." }, { type: "footnote", text: "DRAFT_ADDED_NOTE_133" }],
+    },
+  ];
+  const draftEdit = {
+    path: oldDraftRequest.path,
+    expected_sha256: sourceHash,
+    operations: [
+      { type: "replace_text", paragraph: anchor("Before old draft after.").paragraph, old_text: "old draft", new_text: "revised draft" },
+      { type: "replace_blocks", start_block: anchor("Replace this section").block, end_block: anchor("Remove this paragraph").block, blocks: draftReplacements },
+      { type: "replace_text", paragraph: anchor("Cell target").paragraph, old_text: "target", new_text: "updated" },
+      { type: "format_paragraph", paragraph: anchor("Keep final paragraph").paragraph, layout: { align: "justify", line_spacing: 1.5, first_line_indent: 0.25, space_after: 8, keep_together: true } },
+    ],
+  };
+  const revisedRequest = { path: "revised-draft.docx", edit: draftEdit };
+  const revisedRun = await run(session, "EDIT_OLD_DRAFT", stepsFor(revisedRequest));
+  assert.ok(revisedRun.toolResults.every((result) => !result.isError), JSON.stringify(revisedRun.toolResults));
+  const revisedBytes = await readFile(join(project, revisedRequest.path));
+  const oldDraft = unzipSync(oldDraftBytes);
+  const revisedDraft = unzipSync(revisedBytes);
+  const revisedXml = archiveXml(revisedDraft, "word/document.xml");
+  const revisedDocument = parseXml(revisedXml);
+  const revisedText = (await mammoth.extractRawText({ buffer: revisedBytes })).value;
+  assert.ok(revisedText.includes("Before revised draft after.") && revisedText.includes("Cell updated"));
+  assert.ok(!revisedText.includes("Replace this section") && !revisedText.includes("Remove this paragraph"));
+  const revisedRunNode = Array.from(revisedDocument.getElementsByTagNameNS(wordNamespace, "r"))
+    .find((node) => node.textContent === "revised draft");
+  assert.ok(revisedRunNode?.getElementsByTagNameNS(wordNamespace, "b").length, "Cross-run replacement lost its inherited bold style.");
+  assert.equal(revisedDocument.getElementsByTagNameNS(mathNamespace, "oMath").length, 2);
+  assertNativeFootnotes(revisedDraft, 2);
+  const preservedParts = Object.keys(oldDraft).filter((name) => /header|footer|docProps|word\/media\//.test(name));
+  for (const name of preservedParts)
+    assert.deepEqual(revisedDraft[name], oldDraft[name], `Untouched source package part changed: ${name}`);
+  const sourceXml = archiveXml(oldDraft, "word/document.xml");
+  assert.equal(revisedXml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/)?.[0], sourceXml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/)?.[0]);
+  assert.equal(digest(await readFile(join(project, oldDraftRequest.path))), sourceHash, "Original draft changed.");
+  structures.push({ file: revisedRequest.path, relationships: assertOfficeRelationships(revisedDraft), equations: 2, footnotes: 2, preservedParts });
+  for (const path of [oldDraftRequest.path, revisedRequest.path])
+    await copyFile(join(project, path), join(evidence, path));
+  await writeFile(join(evidence, "old-draft-structure.txt"), structureText, "utf8");
+  passed.push("Old draft structure and edit round trip: real SHA/indices, cross-run/table-cell replacement, unmarked body-range replacement, native formulas/notes, paragraph layout and untouched parts preserved");
+
+  const staleDraftRun = await run(session, "STALE_DRAFT", [{
+    name: "create_document",
+    arguments: { ...revisedRequest, overwrite: true, edit: { ...draftEdit, expected_sha256: "0".repeat(64) } },
+  }]);
+  assert.equal(staleDraftRun.toolResults[0].isError, true);
+  assert.match(staleDraftRun.toolResults[0].output, /DOCUMENT_SOURCE_CHANGED/);
+  assert.equal(digest(await readFile(join(project, revisedRequest.path))), digest(revisedBytes));
+  assert.equal(digest(await readFile(join(project, oldDraftRequest.path))), sourceHash);
+  passed.push("Stale draft SHA fails before writing and preserves both source and existing output");
+
+  const layoutPdfRequest = {
+    path: "paragraph-layout.pdf",
+    title: "Project review",
+    page_size: "A4",
+    header: "LAYOUT_HEADER_133",
+    footer: "LAYOUT_FOOTER_133",
+    page_numbers: true,
+    margins: { top: 0.7, bottom: 0.7, left: 0.8, right: 0.8 },
+    blocks: [
+      { type: "heading", text: "Review findings", level: 1, layout: { keep_with_next: true } },
+      {
+        type: "paragraph",
+        text: "LAYOUT_BODY_133 中文排版验证。Paragraphs use one and a half line spacing, a first line indent and deliberate paragraph spacing. The table below gives the explanation column more room while preserving a compact item column.",
+        layout: { align: "justify", line_spacing: 1.5, first_line_indent: 0.25, space_before: 6, space_after: 12, keep_together: true },
+      },
+      { type: "equation", latex: String.raw`\frac{1}{2}+x^2`, layout: { align: "left", space_before: 4, space_after: 8 } },
+      { type: "table", header: true, column_widths: [1, 3], rows: [["Item", "Explanation"], ["Spacing", "Explicit paragraph spacing and weighted table columns remain readable."]] },
+      { type: "heading", text: "Follow up", level: 1, layout: { page_break_before: true, keep_with_next: true } },
+      { type: "paragraph", text: "LAYOUT_SECOND_PAGE_133 分页后段落。The heading and its paragraph stay together on the second page.", layout: { line_spacing: 1.5, indent_left: 0.25, indent_right: 0.25, space_after: 8 } },
+    ],
+  };
+  const layoutPdfRun = await run(session, "CREATE_LAYOUT_PDF", stepsFor(layoutPdfRequest));
+  assert.ok(layoutPdfRun.toolResults.every((result) => !result.isError), JSON.stringify(layoutPdfRun.toolResults));
+  const layoutPdf = await inspectPdf(await readFile(join(project, layoutPdfRequest.path)));
+  assert.equal(layoutPdf.pdf.totalPages, 2, JSON.stringify(layoutPdf.pdf));
+  assert.equal(layoutPdf.pageImages.length, 2);
+  for (const marker of ["LAYOUT_BODY_133", "LAYOUT_SECOND_PAGE_133", "LAYOUT_HEADER_133", "LAYOUT_FOOTER_133"])
+    assert.ok(layoutPdf.text.includes(marker), `Layout PDF lost ${marker}.`);
+  await savePdfPages(layoutPdf, "paragraph-layout");
+  await copyFile(join(project, layoutPdfRequest.path), join(evidence, layoutPdfRequest.path));
+  structures.push({ file: layoutPdfRequest.path, pages: layoutPdf.pdf.totalPages });
+  passed.push("Real paragraph-layout PDF: justified text, indent/line spacing, formula spacing, weighted table and paragraph-controlled second page");
 
   const chartPptxRequest = {
     path: "native-chart.pptx",

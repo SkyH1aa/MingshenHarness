@@ -139,4 +139,99 @@ describe("AgentProfileService", () => {
       database.close();
     }
   });
+
+  it("defaults existing profiles to both workbench modes and validates explicit applicability", () => {
+    const database = openDatabase(":memory:");
+    try {
+      const service = new AgentProfileService(new Repository(database));
+      expect(service.list()[0]?.applicableModes).toEqual(["code", "work"]);
+      const workOnly = service.save({
+        name: "Work specialist",
+        description: "",
+        role: "primary",
+        instructions: "",
+        readOnly: false,
+        enabled: true,
+        applicableModes: ["work"],
+      });
+      expect(workOnly.applicableModes).toEqual(["work"]);
+      expect(() =>
+        service.save({
+          name: "Invalid modes",
+          description: "",
+          role: "primary",
+          instructions: "",
+          readOnly: false,
+          enabled: true,
+          applicableModes: [],
+        }),
+      ).toThrow("至少需要适用于");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("preserves mode restrictions when an existing synced profile omits applicability metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-modes-"));
+    temporaryDirectories.push(root);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    const agents = join(root, ".opencode", "agents");
+    await mkdir(agents, { recursive: true });
+    const markdownPath = join(agents, "office.md");
+    await writeFile(
+      markdownPath,
+      [
+        "---",
+        "name: Office specialist",
+        "description: Version one",
+        "---",
+        "Edit office files.",
+      ].join("\n"),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      const office = service.list().find((profile) => profile.name === "Office specialist");
+      if (!office) throw new Error("Synced profile was not imported.");
+      repository.saveAgentProfile({ ...office, applicableModes: ["work"] });
+
+      await writeFile(
+        markdownPath,
+        [
+          "---",
+          "name: Office specialist",
+          "description: Version two",
+          "---",
+          "Edit office files.",
+        ].join("\n"),
+        "utf8",
+      );
+      await service.syncWorkspace(root);
+      expect(
+        service.list().find((profile) => profile.name === "Office specialist")?.applicableModes,
+      ).toEqual(["work"]);
+
+      await writeFile(
+        markdownPath,
+        [
+          "---",
+          "name: Office specialist",
+          "description: Version three",
+          "applicable_modes:",
+          "  - code",
+          "---",
+          "Edit office files.",
+        ].join("\n"),
+        "utf8",
+      );
+      await service.syncWorkspace(root);
+      expect(
+        service.list().find((profile) => profile.name === "Office specialist")?.applicableModes,
+      ).toEqual(["code"]);
+    } finally {
+      database.close();
+    }
+  });
 });

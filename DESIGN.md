@@ -28,15 +28,15 @@ colors:
   success: "#2F7D5B"
   warning: "#986314"
   danger: "#B5342C"
-  orbit-night-bg: "#081417"
-  orbit-night-surface: "#0C1C21"
-  orbit-night-raised: "#132A2F"
-  orbit-night-hover: "#19343A"
-  orbit-night-line: "#27434A"
-  orbit-night-line-strong: "#466B70"
-  orbit-night-text: "#ECF9F7"
-  orbit-night-muted: "#A5C1C4"
-  orbit-night-faint: "#85A8AE"
+  orbit-night-bg: "#10191C"
+  orbit-night-surface: "#141F22"
+  orbit-night-raised: "#1B292C"
+  orbit-night-hover: "#243337"
+  orbit-night-line: "#2C3C40"
+  orbit-night-line-strong: "#4B6367"
+  orbit-night-text: "#E6F0EF"
+  orbit-night-muted: "#A8BABC"
+  orbit-night-faint: "#92A9AC"
   orbit-night-brand: "#89FFE1"
   orbit-night-brand-strong: "#B9FFE9"
   orbit-night-primary: "#B5F8E5"
@@ -46,23 +46,24 @@ colors:
   orbit-night-success: "#9AE2B4"
   orbit-night-warning: "#EDC27D"
   orbit-night-danger: "#FF9B8F"
-  orbit-night-selected: "#1A3336"
-  orbit-night-shell: "#061113"
-  orbit-night-pane: "#0A181C"
+  orbit-night-selected: "#25383A"
+  orbit-night-shell: "#10191C"
+  orbit-night-pane: "#10191C"
   orbit-night-metal: "#487577"
+  orbit-night-light: "#89FFE1"
   orbit-night-signal: "#9BD7ED"
   orbit-night-brand-soft: "#89FFE115"
   orbit-night-edge: "#89FFE139"
   orbit-night-glow: "#89FFE12B"
-  orbit-day-bg: "#F8FDFC"
-  orbit-day-surface: "#EFF7F5"
-  orbit-day-raised: "#E5F0ED"
-  orbit-day-hover: "#D8EAE4"
-  orbit-day-line: "#B9D0CB"
-  orbit-day-line-strong: "#7BABA3"
-  orbit-day-text: "#153A3B"
-  orbit-day-muted: "#426665"
-  orbit-day-faint: "#537674"
+  orbit-day-bg: "#FFFFFF"
+  orbit-day-surface: "#F3F7F6"
+  orbit-day-raised: "#FFFFFF"
+  orbit-day-hover: "#E8EFED"
+  orbit-day-line: "#DDE6E3"
+  orbit-day-line-strong: "#A0B5B0"
+  orbit-day-text: "#203335"
+  orbit-day-muted: "#526A6B"
+  orbit-day-faint: "#5C7474"
   orbit-day-brand: "#007967"
   orbit-day-brand-strong: "#005F52"
   orbit-day-primary: "#096756"
@@ -72,9 +73,9 @@ colors:
   orbit-day-success: "#246E45"
   orbit-day-warning: "#8C5912"
   orbit-day-danger: "#B34235"
-  orbit-day-selected: "#D3E8DF"
-  orbit-day-shell: "#E4EFED"
-  orbit-day-pane: "#F8FDFC"
+  orbit-day-selected: "#E0EAE6"
+  orbit-day-shell: "#F3F7F6"
+  orbit-day-pane: "#FFFFFF"
   orbit-day-metal: "#6C9992"
   orbit-day-light: "#078975"
   orbit-day-signal: "#267DA1"
@@ -97,6 +98,19 @@ colors:
   orbit-preview-input: "#122A2F"
   orbit-soft-shadow: "#00000012"
   orbit-inset-shadow: "#0001"
+  orbit-night-hairline: "#2C3C40"
+  orbit-day-hairline: "#DDE6E3"
+  orbit-night-panel-header: "#10191C"
+  orbit-day-panel-header: "#FFFFFF"
+  orbit-night-state-line: "#89FFE1"
+  orbit-day-state-line: "#007967"
+  orbit-night-composer-shadow: "#0000000D"
+  orbit-day-composer-shadow: "#0000000D"
+  orbit-motion-fast: "120ms"
+  orbit-motion-base: "190ms"
+  orbit-motion-slow: "280ms"
+  orbit-ease-out: "cubic-bezier(0.16, 1, 0.3, 1)"
+  orbit-ease-standard: "cubic-bezier(0.2, 0, 0, 1)"
 typography:
   display:
     fontFamily: "Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, sans-serif"
@@ -201,13 +215,13 @@ typography:
     letterSpacing: "0em"
   orbit-metadata:
     fontFamily: "Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, sans-serif"
-    fontSize: "11px"
+    fontSize: "12px"
     fontWeight: 400
     letterSpacing: "0em"
   orbit-workspace-title:
     fontFamily: "Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI, sans-serif"
-    fontSize: "16px"
-    fontWeight: 550
+    fontSize: "15px"
+    fontWeight: 600
     lineHeight: 1.5
     letterSpacing: "0em"
   orbit-command:
@@ -234,8 +248,12 @@ spacing:
   lg: "16px"
   xl: "24px"
   xxl: "32px"
-  orbit-gutter: "10px"
-  orbit-inset: "20px"
+  orbit-gap: "8px"
+  orbit-inset: "12px"
+  orbit-rail-width: "48px"
+  orbit-header-height: "44px"
+  orbit-status-height: "24px"
+  orbit-task-height: "clamp(224px, 28dvh, 304px)"
 components:
   orbit-tool:
     backgroundColor: "{colors.orbit-night-selected}"
@@ -263,12 +281,12 @@ components:
     backgroundColor: "{colors.orbit-night-surface}"
     textColor: "{colors.orbit-night-text}"
     rounded: "{rounded.sm}"
-    padding: "10px 14px"
+    padding: "12px 16px"
   orbit-composer-day:
     backgroundColor: "{colors.orbit-day-surface}"
     textColor: "{colors.orbit-day-text}"
     rounded: "{rounded.sm}"
-    padding: "10px 14px"
+    padding: "12px 16px"
   orbit-role:
     textColor: "{colors.orbit-night-muted}"
     typography: "{typography.orbit-metadata}"
@@ -308,10 +326,12 @@ The product should read as a polished desktop instrument, not a terminal costume
 Light Trails is a distinct working composition for reading conversation, evidence
 and task progress together. It has a separate tool rail and session column, a
 workspace breadcrumb above the conversation, simultaneous review and task panes,
-and a bottom status strip. Its ice-white or ink-teal planes and fine metallic edges
-follow the approved preview in `docs/previews/harness-styles/index.html`. The original
-bitmap atom remains the identity asset. No large local-memory feature tile,
-simulated task records or decorative metrics are part of this world.
+and a bottom status strip. Its continuous workplane is built from aligned tonal
+planes, 1px hairlines and a restrained state line rather than floating cards. Day
+uses a white conversation pane on a pale gray-green shell; night uses a low-saturation
+ink-teal shell and pane with slightly raised work surfaces. The original bitmap atom
+remains the identity asset. No large local-memory feature tile, simulated task
+records or decorative metrics are part of this world.
 
 **Key Characteristics:**
 
@@ -325,7 +345,7 @@ simulated task records or decorative metrics are part of this world.
 
 - An independent tool rail, workspace sidebar and breadcrumb composition.
 - Conversation, review evidence and task progress visible together.
-- Ice-white or ink-teal planes with silver-green hairlines and a local composer light.
+- White or ink-teal planes with silver-green hairlines and one restrained composer lift.
 - The same real sessions, tools, permissions, settings and project memory as Simple.
 
 ## Colors
@@ -408,13 +428,12 @@ The same Chinese-first sans and Lucide family remain. Conversation prose retains
 the shared body size; message identities use compact interface text, and execution
 labels use 14px sans above 12px Cascadia/Consolas command previews.
 
-The approved composition has an observed 10px secondary brand caption and 11px
-timestamps, role tags, counts, task states and status metrics. These are explicitly
-scoped metadata roles in the frontmatter; they do not lower Simple's 12px supporting
-text guidance or set a new body-text minimum. Their extraction records current
-source values rather than claiming a complete accessibility certification.
-The breadcrumb title uses the `orbit-workspace-title` role, reducing to 14px in
-the compact composition.
+Timestamps, role tags, counts, execution states, task states and status metrics in
+the main workbench use 12px metadata. The compact secondary caption under the product
+name remains a scoped 10px brand label, while the dedicated Chat conversation list
+uses 13px titles and 12px metadata. These exceptions do not lower the general
+supporting-text minimum. The breadcrumb title uses the 15px/600
+`orbit-workspace-title` role and reduces to 14px when the workbench is narrow.
 
 ## Layout
 
@@ -428,34 +447,58 @@ Drawer thresholds derive from current panel widths and the minimum chat measure.
 
 ### Light Trails
 
-The inset caption is 68px tall with a 16px top and 20px side margin. Beneath it,
-the workbench uses a separate 56px tool rail, 10px gutters, an adjustable session
-sidebar and a fluid conversation beside the right column. The breadcrumb spans
-the conversation and right column at 52px; the bottom status strip spans the same
-columns at 26px. The right column shows workspace review/files/terminal above a
-task/Agent dock whose height is `clamp(264px, 26dvh, 320px)`. The conversation spans
-both middle rows. These are aligned regions within the shell, not repeated
-dashboard cards.
+The full-width caption is 56px tall, uses the shell ground and has no outer frame
+or gradient. Beneath it, the workbench uses a separate 48px tool rail, 12px side
+and bottom insets, and 8px gaps between aligned regions. The breadcrumb spans the
+conversation and right column at 44px; the bottom status strip spans the same
+columns at 24px. Both rows are square-cornered. The right column shows workspace
+review/files/terminal above a task/Agent dock whose default height is
+`clamp(224px, 28dvh, 304px)`. The conversation spans both middle rows. These are
+aligned regions within one shell, not repeated dashboard cards.
+
+The task dock has its own horizontal splitter. Pointer dragging changes its height;
+the focused splitter accepts Up/Down in 16px steps and Home/End at its bounds;
+Escape cancels an active drag. Enter or double-click restores the responsive default. The
+effective expanded height is constrained to the available window height and at
+most 640px; a 40px collapsed header leaves more room for the upper workspace.
+The header can reopen the dock, and task-tree navigation reveals it automatically.
 
 New Orbit project layouts default to a 228px sidebar and a 360px right column,
 with the right column open. The shared resize ranges remain 220-320px and
-360-720px. Layout keys use the `@orbit:` prefix so mode, widths and panel visibility
-remain independent from Simple for the same normalized project path. Switching
-the three modes retains mounted conversation and editor components.
+360-720px. Layout keys use the `@orbit:` prefix so mode, widths, task height and
+collapsed state, and panel visibility remain independent from Simple for the same
+normalized project path. Switching the three modes retains mounted conversation
+and editor components.
 
 Orbit keeps the shared 480px minimum chat calculation, with its additional rail
-and gutters included in drawer thresholds. The upper workspace and lower task
-pane open and close as one right drawer group; sidebar and right overlays remain
+and insets included in drawer thresholds. The upper workspace and lower task pane
+open and close as one right drawer group; sidebar and right overlays remain
 mutually exclusive. Conversation measure is at most 960px with 64px total side
 space. The composer fits its conversation pane.
 
 At 1100px and below, layout mode labels yield to their icons. At 900px and below,
-the caption becomes 56px with 12px side margins, breadcrumb/status rows become
-44px/24px, the task dock becomes 160px, and conversation side space becomes 48px.
-At 760px height and below, opening a file editor also uses the 160px task dock
-to preserve readable editor content in the upper workspace.
-At 700px height and below, rail controls compress to 34px tall and the composer
-textarea to 56px. Responsive drawers retain access to the same live content.
+the task dock defaults to 160px and conversation side space becomes 48px. When a
+file editor opens at 760px height or below, the dock also defaults to 160px. A
+saved custom height still applies within the available window bounds. The
+composer's own container query changes its context grid at 600px or below: the
+model selector takes the first row, while Agent and workspace controls share the
+second row. At 700px height or below, rail controls and the textarea compress to
+36px and 56px respectively. Responsive drawers retain access to the same live
+content.
+
+The Orbit app body isolates its stacking context and clips overflow so aligned
+planes and drawers cannot paint outside the workbench. Responsive drawer
+calculations reserve an 88px rail/sidebar shell and a 96px rail/inspector shell,
+including outer insets and splitters. These values are calculation contracts, not
+additional visible rails.
+
+ChatAgent uses its own grouped conversation page instead of the Code/Work sidebar.
+In Orbit, that page uses a 264px conversation sidebar, square shell edges, solid
+chrome and 13px/550 titles with 12px metadata. The selected row is a flat selected
+tone with a 1px brand inset line and no border or glow. The empty conversation title
+is fixed at 24px in Orbit, overriding the older viewport-scaled heading. At 900px
+and below the Chat sidebar becomes an overlay drawer instead of compressing the
+conversation.
 
 ## Elevation & Depth
 
@@ -467,46 +510,35 @@ Button feedback lasts 100ms, menus 160ms and workspace entrance 200ms. Motion us
 
 ### Light Trails
 
-Orbit retains tonal planes and thin borders, with restrained inset edge light.
-The caption uses a 125-degree raised/surface/shell gradient inside a transparent
-border, with a second gradient clipped to the border box. Its light edge mixes
-64% metal with signal; its shaded edge mixes 62% shell with line. These are
-derived materials from existing theme tokens, not additional palette primitives.
-The rail shares the frame and uses a vertical raised-to-surface fill. Breadcrumb,
-workspace and task headers use shallow 100-degree surface gradients.
+Orbit is flat by default, but not a single undifferentiated color. Depth comes
+from aligned tone steps, 1px hairlines and selective occlusion. The caption, rail
+and work regions do not use gradients, glows or floating inset frames. Selection
+uses a flat selected tone plus a 1px brand line on the nearest existing edge.
 
-The caption and composer carry local optical highlights; selected sessions use a
-115-degree selected-tone gradient and metal border. The conversation ground is
-plain, and selected session rows have no animated edge rail. Small brand glows
-and metallic control gradients are permitted in this scoped world because the
-user selected them. They remain outside prose and do not become large blurred
-backgrounds.
+The composer is the one intentionally lifted control surface. It uses a 1px
+hairline, an 8px radius and `0 4px 16px #0000000D`; overlays retain the theme
+`--shadow`. Focus uses a visible 1px brand outline at a 2px offset. The focused
+composer changes its border to brand and shows one 40px focus beam on the top edge.
+Text selection uses primary fill/text tokens; editable carets use brand.
 
-The overlay shadow uses the theme's `--shadow`. The caption and composer add
-`0 8px 24px #00000012`, with `inset 0 1px var(--orbit-edge)` on framed tools.
-Selected rail icons add `0 4px 12px #00000012` beneath their inset edge. Focus
-retains the shared visible outline; composer focus also changes its metal border
-to the brand token. Text selection uses primary fill/text tokens; editable
-carets use brand.
-
-Optical animation uses CSS transform/opacity: the caption light repeats at 12s;
-its `clamp(120px, 22%, 320px)` highlight travels by 100% of its width. The focused
-composer light repeats at 6s, or 3.6s during actual running, and travels by 150%
-of its width; live running signals repeat at 1.8s. Rail feedback uses 180ms
-`--ease-ui`, including a 1px pressed translation. A streamed message enters over
-180ms with a small translation and an opaque first frame. Waiting, approval,
-questions and completion do not masquerade as running. System reduced motion
-and application Off remove animations and transitions; hidden pages pause
-optical animation.
+Motion communicates state and continuity only. The composer focus beam runs once
+over 520ms. Streamed messages move by 3px over 280ms while their opacity remains 1
+from the first frame, so text is never hidden by the entrance effect. Disclosures
+use 190ms and detail or settings transitions use up to 280ms. Execution nodes
+breathe over 2.2s and the status signal over 1.9s only while their real status is
+running. Waiting, approval, questions, completion and idle states stay static.
+System reduced motion and application Motion off remove travel and loops; hidden
+pages pause animation.
 
 ## Shapes
 
 Radii are restrained: 4–6px for compact controls and 8px for composer and dialogs. Full workspace regions have no floating rounded outer border. Geometry comes from alignment and tonal surfaces. Icons use one Lucide stroke family with consistent 16px and 18px sizes.
 
-Light Trails deliberately frames its inset caption and aligned work regions with
-8px corners and 1px metal lines. Within them, session rows, execution groups and
-user-message bodies use 6px corners; message-role labels use 3px corners. Tool-rail
-buttons are stable 40px squares with 8px corners. Keep these scoped forms separate
+Light Trails deliberately keeps the outer workplane square and continuous. Alignment,
+tonal cuts and 1px hairlines separate regions; the caption and aligned work regions
+do not become floating rounded frames. Session rows use 4px corners, execution
+groups and user-message bodies use 6px, and message-role labels use 3px. Tool-rail
+buttons are stable 40px squares with 4px corners. Keep these scoped forms separate
 from Simple's continuous outer shell. The original bitmap atom remains unchanged;
 19px rail icons and 24px message marks support Orbit's denser identity hierarchy.
 
@@ -520,11 +552,11 @@ aqua atom assets. Preserve their bytes and pixels; this reconstruction introduce
 no new raster. Their user-confirmed origin is recorded here because the original
 files have no embedded provenance metadata.
 
-**Light Trails:** the centered style mark is unboxed, with a 1.5px-stroke icon
-between two mirrored 32px metal hairlines. At 900px and below, the hairlines
-reduce to 16px. A separate caption state has a compact shell fill and line border;
-only actual running adds the metal border and brand-soft fill. The caption also
-has a static 72px signal hairline at its upper right.
+**Light Trails:** the bitmap atom appears once in the main caption beside the
+product name. The tool rail, breadcrumb, conversation roles and empty regions do
+not repeat the brand, invent a letter-M mark or add a central light-trail wordmark.
+The titlebar state label reflects real runtime state without adding another
+decorative logo.
 
 ### Buttons
 
@@ -544,13 +576,12 @@ Inputs use the panel ground, a 1px line and a stable height appropriate to the f
 
 A session row is 44px tall with a status dot, title, and relative time. Running sessions show a small activity mark; waiting sessions show an approval marker. Selected rows use a neutral raised ground with no colored outline. The list supports pinning, rename, archive, delete, and search.
 
-**Light Trails:** rows have a 64px minimum height, 14px titles, 12px metadata,
-6px corners and a quiet border. The selected row uses the Orbit selected tone
-blended at 115 degrees toward a 60% selected/surface mix, with a stronger metal
-line. A separate rail provides real conversation, files, Agents, terminal,
-review and settings navigation; its active icon follows the actual view or
-workspace tab. The active icon has a 145-degree selected-to-surface fill, inset
-edge, soft local shadow and a short mint hairline along its upper edge.
+**Light Trails:** rows have a 52px minimum height, 13px/500 titles, 12px metadata,
+4px corners and a quiet border. The selected row uses a flat Orbit selected tone
+with a 1px brand line on its left edge and no shadow. A separate rail provides real
+conversation, files, Agents, terminal, review and settings navigation; its active
+icon follows the actual view or workspace tab. The active icon uses a flat selected
+tone with a 1px brand line on the nearest edge, without a gradient or glow.
 
 ### Conversation Timeline
 
@@ -565,6 +596,11 @@ record open independently. Invisible provider metadata does not split the group
 or consume the visible Agent header. Body text, errors, attachments and run
 summaries preserve their own message semantics.
 
+In an empty Orbit WorkAgent conversation, Word, Excel and PowerPoint starter
+actions append a relevant prompt to the existing draft; they never send it. The
+independent ChatAgent empty state aligns with its composer, without borrowing the
+Work-only actions.
+
 Persisted final replies have a visible 32px copy icon below their prose. Markdown code blocks use a compact language/copy toolbar above the independently scrolling code; controls never overlay source lines. Copy preserves the original reply Markdown or the block's code text, with a check mark/status announcement on success and a local retryable error on failure. Inline code remains inline, and active streamed replies do not offer full-reply copy.
 
 When at least two user messages exist, a narrow rail sits at the right edge of the scrollable conversation, above the composer. One short marker represents each sent question; the longer, higher-contrast marker tracks reading position. Hover or keyboard focus shows a compact local-text preview in the existing raised surface. Clicking jumps to the question and pauses streaming follow. A long rail scrolls independently, and its preview never changes conversation layout.
@@ -578,7 +614,7 @@ Each active assistant turn begins with a compact status line reflecting actual t
 During execution, compact activity rows replace raw tool-call detail and report what is happening in product language: reading a file, editing with live additions/deletions, running a command, opening a browser or waiting on a subagent. As soon as a file id is available, its activity row can open the current file in the workspace editor. Tool payloads remain available after the run.
 
 **Light Trails:** execution-group counts use an 18px-high outlined raised badge
-with 11px tabular figures. The live group receives a metal border and a 35%
+with 12px tabular figures. The live group receives a metal border and a 35%
 brand-soft/pane mix only while it contains an actual running row; that row's
 node uses brand stroke/text and selected fill. Completed nodes retain success
 tone. The bottom status strip uses an outlined diamond, filled only during
@@ -614,14 +650,16 @@ and failed writes keep the application available for recovery.
 `orbit-composer` variant. Its model, Agent and reasoning controls stay above the
 textarea. Permission mode, isolation and patch-only details move into the footer
 beside attachment/Skills controls, with metrics and send/stop aligned after them.
-The desktop textarea starts at 72px; narrow and short windows keep all controls
+The desktop textarea starts at 88px; narrow and short windows keep all controls
 reachable through wrapping and the documented compact dimensions.
 
-The Orbit surface uses a 125-degree raised-to-surface gradient, a 32%-wide upper
-light and a 40px vertical signal edge on the right. The context row has 8px
-bottom padding and a separating hairline. Its model trigger has 6px horizontal
-padding, brand-soft fill and selected-tone hover; it follows the shared inline
-provider behavior below.
+The context row is a three-column grid of `minmax(0, 1fr)`,
+`minmax(96px, 136px)` for Agent and `minmax(88px, 128px)` for workspace, with 8px
+gaps and a separating hairline. The model trigger has 6px horizontal padding, a
+transparent rest surface and selected-tone hover. Footer columns and their
+permission/metric children use `min-width: 0` so controls shrink or wrap instead
+of forcing horizontal overflow. The composer itself remains a flat tonal surface
+with one border and one modest shadow; it has no gradient.
 
 ### Approval Block
 
@@ -634,6 +672,12 @@ Clarification uses an inline form above the composer, separate from tool authori
 ### Task Workbench
 
 The conversation's compact top band contains Task plan and Agent task tree views, sharing existing ground colors, hairlines and typography. Its body scrolls within 240px or 30dvh and can collapse completely. Steps show actual persisted status, dependencies and breakpoint controls; editing uses normal inputs and selectors, with explicit save/cancel. Concurrent edits produce a visible version conflict rather than silently replacing the plan. The tree links real parent/child sessions and displays queued, running, waiting, interrupted and failed state without decorative graph animation. Writer conflicts use the existing themed question panel for a human decision.
+
+While a plan edit is open, navigation to another conversation or ChatAgent and
+new-conversation actions are blocked; the task workbench reveals the Plan tab and
+asks for Save or Cancel. Switching Code/Work within the same conversation remains
+available. The guard neither saves nor discards edits, and unsaved edits are not
+promised to persist across restart.
 
 Plan steps animate only during actual running execution. Interrupted, paused, awaiting-user, failed and unfinished idle states use static icons and explicit labels without changing stored completion. Task-tree rows separate a 28px disclosure arrow from a text name link: the arrow reveals a bounded, independently scrollable child-output region in place; the name navigates. Preview output uses existing sanitized Markdown, collapsed reasoning/tool details, lazy bounded local reads and real live deltas; it never steals the main timeline's reading position.
 
@@ -652,7 +696,9 @@ conversation, simultaneously with the upper workspace pane. Plan, Agent task
 tree and project plan library tabs retain real persisted data and the same
 editing/conflict behavior. The plan view includes a compact list of actual
 child tasks, linking to their task tree and expandable output. Its independently
-scrolling body shrinks within the dock and cannot cover the composer.
+scrolling body shrinks within the dock and cannot cover the composer. Compact
+32px controls remain distinct targets. The header collapse control retains the
+current task contents and can restore them without closing the upper workspace.
 
 ### Tabs and Panels
 
@@ -675,10 +721,12 @@ does not reformat stored arguments on each draft, streaming or timer update.
 
 **Light Trails:** review, files and terminal tabs share the upper right workspace,
 with existing Git and browser access preserved. Review lists actual changed files
-before the selected file's saved numbered diff, keeping open-file and copy-diff
-commands available. Tab selection uses a brand-soft fill and mint underline; the
-breadcrumb and rail reflect the actual selected view. Closing the right panel
-hides both upper workspace and lower task panes.
+before the selected file's saved numbered diff. Rows show the file name and, when
+present, its containing directory; the preview header shows its workspace-relative
+path when available, and full-path tooltips remain available. Open-file and
+copy-diff commands remain accessible. Tab selection uses a brand-soft fill and
+mint underline; the breadcrumb and rail reflect the actual selected view. Closing
+the right panel hides both upper workspace and lower task panes.
 
 ### Embedded Browser
 
@@ -716,9 +764,19 @@ Conversations and data includes a folder-based management list with native works
 
 A themed release dialog asks before downloading and installing a ZIP update. One shared control surface in the dialog and About shows actual download bytes, verification, extraction, waiting-for-conversations, installation, cancellation and retry states. Continue in background dismisses the dialog without stopping download; a compact title-bar action reopens it and persists across renderer reload. Long release notes and raw errors wrap and scroll within the viewport. Native Windows installer/security prompts remain outside the application dialog system.
 
+In Orbit, the titlebar update action returns to content-driven `width: auto` with a
+220px maximum. It shortens long labels instead of being forced into a square icon
+slot, while the fixed-size window controls remain stable.
+
 ### Extension Reference Picker
 
-The composer's lower-left plus button opens a fixed-position reference picker. Skills and plugins are separate collapsible groups, and session selection is indicated with a compact check mark. Selected extensions appear as removable chips above the composer footer. Empty groups teach the local import action without becoming decorative cards.
+The composer's lower-left plus button opens a fixed-position reference picker with four collapsible groups: Built-in Skills, Built-in Plugins, Installed Skills and Installed Plugins. A search field filters across identity, description, family, version, compatibility and available source metadata without clearing session selections. The panel supports per-session multi-select; selected rows sort first and carry a compact check mark, while built-in Sparkles and installed BookOpen distinguish Skill sources, and Puzzle identifies Plugins. Selected extensions appear as removable chips above the composer footer, and empty groups teach the local import action without becoming decorative cards.
+
+Built-in rows show family/version metadata and, when available, the source path plus a shortened SHA so same-name versioned sources remain distinguishable; the complete source metadata stays in the row title. Work-only selections remain stored when switching from WorkAgent to CodeAgent, disappear from the Code picker, and return selected when WorkAgent is restored. The trigger closes and becomes unavailable while a run, send preparation, approval/answer wait or child task is active; only one row mutation is in flight at a time.
+
+### Next-turn Queue
+
+While a main-interface CodeAgent, WorkAgent or ChatAgent conversation is busy, a compact Clock3 tray near the composer accepts up to ten later turns without inserting Steer into the active run. Items remain in insertion order and have no reorder controls. After a successful run and its background cleanup, the main process dispatches the first pending item automatically; approval waits do not advance the queue. Editing first holds the whole queue so a completed run cannot send stale text below the editor. Saving or cancelling releases only the edit hold: if the active run was stopped or failed meanwhile, the queue remains paused. A failed attachment replacement keeps the previous attachment snapshot and also pauses the queue so that unconfirmed content is not sent automatically. Stop, failure, send failure and application restart preserve the queue in a paused state with its error. The first item resumes after an explicit queue-level Resume action or after a later normal run in the same conversation succeeds; it never skips an unresolved head item. Changed configuration snapshots and unconfirmed dispatches remain blocking. Each item still supports text editing with save/cancel, whole-attachment replacement and deletion. Quick Chat and SubAgents expose no Queue UI.
 
 ### Interface Style Picker
 
@@ -732,6 +790,32 @@ The main process also rejects
 running, preparing, compacting, waiting-for-approval or waiting-for-answer tasks,
 shutdown and update handoff. Failures remain visible and retryable. Restart also
 applies the saved style; day/night and language changes remain immediate.
+
+### Light Trails 1.3.3 Workbench
+
+The 1.3.3 Light Trails pass follows a data-terminal workbench direction: navigation
+recedes, real state and evidence lead, and each selection is marked by a 1px state
+line on its nearest existing edge. Filled pill-shaped selected states and additional
+glows are not part of the system.
+
+Panels, the tool rail, breadcrumb header, status strip, sidebar and task dock share
+the `surface` ground with `orbit-hairline` borders and `orbit-panel-header` headers.
+The conversation pane uses `orbit-pane`. The composer is the one intentionally lifted
+surface: it uses a 1px border, the theme's composer shadow, and a short focus beam on
+its top edge. The textarea itself does not draw a second focus box while the composer
+is focused.
+
+Motion uses `orbit-motion-fast/base/slow` and `orbit-ease-out/standard`. Interaction
+feedback completes in 120–190ms; composer focus, streaming-message settle, disclosure
+and settings transitions use 190–280ms. Active execution nodes and the status signal
+breathe only while a run is active. Motion never substitutes for text or color state.
+App motion-off and system reduced-motion remove travel and loops while preserving
+focus, contrast and readable state.
+
+The persistent running signal belongs to the real execution/status indicator. The
+composer focus beam is a one-shot transition and must not be asserted as a looping
+animation. Interface-style checks should verify the status light with an actual
+running state rather than infer activity from the composer.
 
 ## Do's and Don'ts
 
@@ -760,3 +844,4 @@ applies the saved style; day/night and language changes remain immediate.
 - **Don't** reduce Light Trails to a recolor of Simple or restore the large local-memory tile.
 - **Don't** copy Orbit's local light effects or inset panel frames into Simple.
 - **Don't** add alignment grids, animated session rails, fabricated records or decorative metrics to Orbit.
+- **Don't** repeat the bitmap atom, substitute a synthetic letter-M identity or add a central wordmark inside the workplane.

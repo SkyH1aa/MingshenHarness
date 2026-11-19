@@ -261,6 +261,7 @@ export class NativeSandboxService {
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       const collect = (chunk: string, error: boolean) => {
+        if (limited) return;
         if (error) stderr += chunk;
         else stdout += chunk;
         if (stdout.length + stderr.length > (options.maxCapture || MAX_CAPTURE)) {
@@ -286,10 +287,13 @@ export class NativeSandboxService {
         }
         if (timedOut || limited) {
           reject(
-            new Error(
-              timedOut
-                ? "Native sandbox timed out; its process tree was stopped."
-                : "Native sandbox output exceeded 2 MiB.",
+            Object.assign(
+              new Error(
+                timedOut
+                  ? "Native sandbox timed out; its process tree was stopped."
+                  : "Native sandbox output exceeded 2 MiB.",
+              ),
+              { capturedOutput: [stdout, stderr].filter(Boolean).join("\n") },
             ),
           );
           return;

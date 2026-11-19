@@ -7,7 +7,6 @@ import {
   MessagesSquare,
   Moon,
   Network,
-  Orbit,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRight,
@@ -16,17 +15,26 @@ import {
   Sun,
   Terminal,
 } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import type { CompletionNotificationState } from "../../shared/desktop";
 import type {
   ActivityEvent,
+  AgentMode,
   AgentProfileView,
   ApprovalDecision,
   ApprovalRequest,
   ApprovalState,
   BootstrapData,
   ChatAttachmentInput,
+  ChatGroupView,
   ChatStreamEvent,
   ContextUsageView,
   ExtensionImportResult,
@@ -36,18 +44,24 @@ import type {
   QuestionRequest,
   QuestionState,
   ScheduledTaskView,
+  SessionBuiltinCapabilityView,
   SessionMessage,
   SessionRunState,
   SessionUpdateInput,
   SessionView,
 } from "../../shared/domain";
+import type { QueuedPromptContinueResult, QueuedPromptView } from "../../shared/queued-prompt";
 import { APP_VERSION } from "../../shared/release";
+import type { SessionPage } from "../../shared/session-catalog";
 import type { WorkbenchLayout } from "../../shared/ui-preferences";
 import { AgentGuide } from "./components/AgentGuide";
+import { AgentModeSwitcher } from "./components/AgentModeSwitcher";
 import { BrandMark } from "./components/BrandMark";
+import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatView } from "./components/ChatView";
 import { useDialog } from "./components/DialogProvider";
 import { LayoutPicker } from "./components/LayoutPicker";
+import { NewChatDialog } from "./components/NewChatDialog";
 import { NewSessionDialog } from "./components/NewSessionDialog";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import { ProviderSetup } from "./components/ProviderSetup";
@@ -63,6 +77,7 @@ import {
 import { useLocale } from "./i18n";
 import { tr } from "./i18n/index";
 import { runtimeText } from "./i18n/runtime";
+import { profileSupportsAgentMode, updateSessionLockSet } from "./lib/agent-mode-ui";
 import {
   approvalsFromSnapshot,
   newerPendingState,
@@ -79,8 +94,26 @@ interface BrowserRequest {
   requestKey: number;
 }
 
+const MIN_READABLE_CHAT_WIDTH = 480;
+const ORBIT_RAIL_WIDTH = 48;
+const ORBIT_OUTER_INSET = 24;
+const ORBIT_SPLITTER_WIDTH = 8;
+const ORBIT_SIDEBAR_SHELL_WIDTH = ORBIT_RAIL_WIDTH + ORBIT_OUTER_INSET + ORBIT_SPLITTER_WIDTH * 2;
+const ORBIT_INSPECTOR_SHELL_WIDTH = ORBIT_RAIL_WIDTH + ORBIT_OUTER_INSET + ORBIT_SPLITTER_WIDTH * 3;
+
 function readTheme(): Theme {
   return localStorage.getItem("mingshen.theme") === "day" ? "day" : "night";
+}
+
+function readAgentMode(): AgentMode {
+  const stored = localStorage.getItem("mingshen.agent-mode");
+  return stored === "work" || stored === "chat" ? stored : "code";
+}
+
+function sessionAgentMode(session: SessionView | null | undefined): AgentMode {
+  return session?.agentMode === "work" || session?.agentMode === "chat"
+    ? session.agentMode
+    : "code";
 }
 
 function appendUnique(current: SessionMessage[], message: SessionMessage): SessionMessage[] {
@@ -99,8 +132,12 @@ export function App() {
   const { confirm } = useDialog();
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
+  const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
   useEffect(() => {
-    const resize = () => setViewportWidth(window.innerWidth);
+    const resize = () => {
+      setViewportWidth(window.innerWidth);
+      setViewportHeight(window.innerHeight);
+    };
     window.addEventListener("resize", resize);
     window.visualViewport?.addEventListener("resize", resize);
     const observer = new ResizeObserver(resize);
@@ -136,12 +173,45 @@ export function App() {
   const [sessionExtensionsBySession, setSessionExtensionsBySession] = useState<
     Record<string, string[]>
   >({});
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionBuiltinCapabilitiesBySession, setSessionBuiltinCapabilitiesBySession] = useState<
+    Record<string, SessionBuiltinCapabilityView[]>
+  >({});
+  const [queuedPromptsBySession, setQueuedPromptsBySession] = useState<
+    Record<string, QueuedPromptView[]>
+  >({});
+  const queuedPromptLoadVersionsRef = useRef(new Map<string, number>());
+  const queuedPromptRefreshTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+  const [agentMode, setAgentMode] = useState<AgentMode>(readAgentMode);
+  const [workbenchSessionId, setWorkbenchSessionId] = useState<string | null>(null);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatDesktopSidebarOpen, setChatDesktopSidebarOpen] = useState(
+    () => localStorage.getItem("mingshen.chat-sidebar.desktop") !== "closed",
+  );
+  const [chatCompactSidebarOpen, setChatCompactSidebarOpen] = useState(false);
+  const chatSidebarDrawer = viewportWidth <= 900;
+  const chatSidebarOpen = chatSidebarDrawer ? chatCompactSidebarOpen : chatDesktopSidebarOpen;
+  const setChatSidebarOpen = (value: boolean | ((previous: boolean) => boolean)) => {
+    if (chatSidebarDrawer) {
+      setChatCompactSidebarOpen(value);
+      return;
+    }
+    setChatDesktopSidebarOpen(value);
+  };
+  const selectedSessionId = agentMode === "chat" ? chatSessionId : workbenchSessionId;
+  const [chatGroups, setChatGroups] = useState<ChatGroupView[]>([]);
   const [completionNotifications, setCompletionNotifications] =
     useState<CompletionNotificationState | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [liveBySession, setLiveBySession] = useState<Record<string, LiveRun>>({});
   const [runsBySession, setRunsBySession] = useState<Record<string, SessionRunState>>({});
+  const [modeStartLockSessionIds, setModeStartLockSessionIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [modePreparationSessionIds, setModePreparationSessionIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [activitiesBySession, setActivitiesBySession] = useState<Record<string, ActivityEvent[]>>(
     {},
   );
@@ -160,6 +230,13 @@ export function App() {
     retry: retryLayout,
   } = useProjectLayout(currentWorkspace);
   const optical = activeStyle === "orbit";
+  const taskPanelCollapsed = optical && layout.taskPanelCollapsed === true;
+  const taskPanelMaxHeight = Math.max(160, Math.min(640, viewportHeight - 300));
+  const taskPanelHeight = Math.min(
+    taskPanelMaxHeight,
+    layout.taskPanelHeight ??
+      (viewportWidth <= 900 ? 160 : Math.max(224, Math.min(304, viewportHeight * 0.28))),
+  );
   const sidebarOpen = layout.sidebarOpen;
   const setSidebarOpen = (value: boolean | ((previous: boolean) => boolean)) => {
     const open = typeof value === "function" ? value(sidebarOpen) : value;
@@ -171,14 +248,19 @@ export function App() {
     sessionManagementBusyRef.current = busy;
   }, []);
   const [settingsSection, setSettingsSection] = useState<
-    "appearance" | "permissions" | "context" | "extensions" | "mcp" | "project"
+    "appearance" | "providers" | "permissions" | "context" | "extensions" | "mcp" | "project"
   >("appearance");
   const workspaceOpen = layout.inspectorOpen;
-  const shellWidth = optical ? 56 + 40 + 36 : 12;
+  const shellWidth = optical ? ORBIT_INSPECTOR_SHELL_WIDTH : 12;
   const inspectorDrawer =
     viewportWidth <
-    480 + (sidebarOpen ? layout.sidebarWidth : 0) + layout.inspectorWidth + shellWidth;
-  const sidebarDrawer = viewportWidth < 480 + layout.sidebarWidth + (optical ? 104 : 6);
+    MIN_READABLE_CHAT_WIDTH +
+      (sidebarOpen ? layout.sidebarWidth : 0) +
+      layout.inspectorWidth +
+      shellWidth;
+  const sidebarDrawer =
+    viewportWidth <
+    MIN_READABLE_CHAT_WIDTH + layout.sidebarWidth + (optical ? ORBIT_SIDEBAR_SHELL_WIDTH : 6);
   const layoutRef = useRef({ layout, setLayout, sidebarDrawer });
   layoutRef.current = { layout, setLayout, sidebarDrawer };
   const setWorkspaceOpen = useCallback((value: boolean | ((previous: boolean) => boolean)) => {
@@ -195,17 +277,91 @@ export function App() {
   const [activeWorkspaceTab, setActiveWorkspaceTab] =
     useState<WorkspaceTabRequest["tab"]>("review");
   const [taskViewRequest, setTaskViewRequest] = useState<TaskWorkbenchViewRequest | null>(null);
+  const [planEditing, setPlanEditing] = useState(false);
   useEffect(() => {
     setTaskViewRequest((current) => (current?.sessionId === selectedSessionId ? current : null));
   }, [selectedSessionId]);
   const [inspectorView, setInspectorView] = useState<"tasks" | "workspace">("tasks");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionWorkspace, setNewSessionWorkspace] = useState<string | null>(null);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatGroupId, setNewChatGroupId] = useState<string | null>(null);
   const [creatingWorkspaceSession, setCreatingWorkspaceSession] = useState(false);
   const [workspaceSessionError, setWorkspaceSessionError] = useState("");
   const creatingWorkspaceSessionRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
+  const updateModeStartLock = useCallback((sessionId: string, locked: boolean) => {
+    setModeStartLockSessionIds((current) => updateSessionLockSet(current, sessionId, locked));
+  }, []);
+  const updateModePreparationLock = useCallback((sessionId: string, preparing: boolean) => {
+    setModePreparationSessionIds((current) => updateSessionLockSet(current, sessionId, preparing));
+  }, []);
+  const allowPlanNavigation = useCallback(
+    (nextSessionId: string | null) => {
+      const editor = document.querySelector<HTMLElement>('.task-workbench[data-unsaved="true"]');
+      if (!editor || editor.dataset.taskSession === nextSessionId) return true;
+      setWorkspaceOpen(true);
+      setTaskViewRequest({
+        sessionId: editor.dataset.taskSession ?? null,
+        tab: "plan",
+        requestKey: performance.now(),
+        notice: tr("请先保存或取消计划编辑，再切换会话或 ChatAgent。"),
+      });
+      return false;
+    },
+    [setWorkspaceOpen],
+  );
+  const applySessionSelection = useCallback(
+    (session: SessionView) => {
+      if (!allowPlanNavigation(session.id)) return false;
+      if (session.agentMode === "chat") {
+        setChatSessionId(session.id);
+        setAgentMode("chat");
+        return true;
+      }
+      setWorkbenchSessionId(session.id);
+      setAgentMode(session.agentMode === "work" ? "work" : "code");
+      return true;
+    },
+    [allowPlanNavigation],
+  );
+  const selectSession = useCallback(
+    async (sessionId: string | null) => {
+      if (!allowPlanNavigation(sessionId)) return false;
+      if (!sessionId) {
+        if (agentMode === "chat") setChatSessionId(null);
+        else setWorkbenchSessionId(null);
+        return true;
+      }
+      const known = sessionsRef.current.find((session) => session.id === sessionId);
+      if (known) {
+        return applySessionSelection(known);
+      }
+      try {
+        const session = await window.mingshen.getSession(sessionId);
+        if (!session) {
+          setBootError(tr("会话不存在。"));
+          return false;
+        }
+        mergeSessions([session]);
+        return applySessionSelection(session);
+      } catch (error) {
+        setBootError(errorMessage(error));
+        return false;
+      }
+    },
+    [agentMode, allowPlanNavigation, applySessionSelection, mergeSessions],
+  );
+  const setSelectedSessionId = useCallback(
+    (next: SetStateAction<string | null>) => {
+      const current = agentMode === "chat" ? chatSessionId : workbenchSessionId;
+      const value = typeof next === "function" ? next(current) : next;
+      if (agentMode === "chat") setChatSessionId(value);
+      else setWorkbenchSessionId(value);
+    },
+    [agentMode, chatSessionId, workbenchSessionId],
+  );
   const selectedSessionRef = useRef<string | null>(null);
   const restoredNotificationDraftRef = useRef<string | null>(null);
   const approvalSnapshotRef = useRef<ApprovalState>({ revision: -1, requests: [] });
@@ -228,14 +384,74 @@ export function App() {
       window.mingshen.getQuestionState().then(receiveQuestions),
     ]);
   }, [receiveApprovals, receiveQuestions]);
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
+  const selectedSessionAgentMode = selectedSession ? sessionAgentMode(selectedSession) : null;
   const selectedSessionExists = Boolean(
     selectedSessionId && sessions.some((session) => session.id === selectedSessionId),
+  );
+  const loadQueuedPrompts = useCallback(async (sessionId: string): Promise<QueuedPromptView[]> => {
+    const version = (queuedPromptLoadVersionsRef.current.get(sessionId) ?? 0) + 1;
+    queuedPromptLoadVersionsRef.current.set(sessionId, version);
+    const items = await window.mingshen.listQueuedPrompts(sessionId);
+    if (queuedPromptLoadVersionsRef.current.get(sessionId) === version)
+      setQueuedPromptsBySession((current) => ({ ...current, [sessionId]: items }));
+    return items;
+  }, []);
+  const scheduleQueuedPromptsRefresh = useCallback(
+    (sessionId: string) => {
+      const existing = queuedPromptRefreshTimersRef.current.get(sessionId);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        queuedPromptRefreshTimersRef.current.delete(sessionId);
+        void loadQueuedPrompts(sessionId).catch((error: unknown) => {
+          setBootError(errorMessage(error));
+        });
+      }, 0);
+      queuedPromptRefreshTimersRef.current.set(sessionId, timer);
+    },
+    [loadQueuedPrompts],
+  );
+
+  useEffect(() => {
+    if (!selectedSessionId || !selectedSessionExists) return;
+    let cancelled = false;
+    void loadQueuedPrompts(selectedSessionId).catch((error: unknown) => {
+      if (!cancelled) setBootError(errorMessage(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadQueuedPrompts, selectedSessionExists, selectedSessionId]);
+
+  useEffect(
+    () => () => {
+      for (const timer of queuedPromptRefreshTimersRef.current.values()) clearTimeout(timer);
+      queuedPromptRefreshTimersRef.current.clear();
+    },
+    [],
   );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("mingshen.theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("mingshen.agent-mode", agentMode);
+  }, [agentMode]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      "mingshen.chat-sidebar.desktop",
+      chatDesktopSidebarOpen ? "open" : "closed",
+    );
+  }, [chatDesktopSidebarOpen]);
+
+  useEffect(() => {
+    if (agentMode === "chat" && chatSessionId && chatSidebarDrawer) {
+      setChatCompactSidebarOpen(false);
+    }
+  }, [agentMode, chatSessionId, chatSidebarDrawer]);
 
   useEffect(() => {
     localStorage.setItem("mingshen.sidebar", sidebarOpen ? "open" : "closed");
@@ -251,9 +467,15 @@ export function App() {
     const receive = (state: CompletionNotificationState) => {
       if (cancelled) return;
       setCompletionNotifications(state);
-      if (state.replyDraft && restoredNotificationDraftRef.current !== state.replyDraft.id) {
-        restoredNotificationDraftRef.current = state.replyDraft.id;
-        setSelectedSessionId(state.replyDraft.sessionId);
+      if (
+        !planEditing &&
+        state.replyDraft &&
+        restoredNotificationDraftRef.current !== state.replyDraft.id
+      ) {
+        const draft = state.replyDraft;
+        void selectSession(draft.sessionId).then((selected) => {
+          if (!cancelled && selected) restoredNotificationDraftRef.current = draft.id;
+        });
       }
     };
     const unsubscribe = window.mingshen.onCompletionNotifications(receive);
@@ -265,18 +487,43 @@ export function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, []);
+  }, [selectSession, planEditing]);
   useEffect(
     () =>
       window.mingshen.onDesktopEvent((event) => {
+        if (event.type === "open-provider-settings") {
+          setSettingsSection("providers");
+          setSettingsOpen(true);
+        }
         if (
           (event.type === "select-session" || event.type === "notification-reply-failed") &&
           event.sessionId
         )
-          setSelectedSessionId(event.sessionId);
+          void selectSession(event.sessionId);
       }),
-    [],
+    [selectSession],
   );
+
+  const loadChatGroups = useCallback(async () => {
+    const groups = await window.mingshen.listChatGroups();
+    setChatGroups(groups);
+  }, []);
+
+  const loadAllChatSessions = useCallback(async () => {
+    const rows: SessionView[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: SessionPage = await window.mingshen.listSessionPage({
+        agentMode: "chat",
+        archived: false,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      rows.push(...page.sessions);
+      cursor = page.nextCursor;
+    } while (cursor);
+    mergeSessions(rows);
+  }, [mergeSessions]);
 
   const refreshAll = useCallback(async (): Promise<BootstrapData> => {
     const priorRevision = sessionRevision.current;
@@ -299,6 +546,7 @@ export function App() {
       } else sessionRevision.current = data.sessionCatalog.revision;
       setSessionGroups(data.sessionCatalog.groups);
     }
+    if (data.chatGroups) setChatGroups(data.chatGroups);
     setAgentProfiles(data.agentProfiles);
     setExtensions(data.extensions);
     setMcpServers(data.mcpServers);
@@ -342,7 +590,7 @@ export function App() {
           sessionsRef.current.map((item) => item.id),
         );
         if (delta.reset) {
-          setSessions([]);
+          setSessions((items) => items.filter((item) => item.agentMode === "chat"));
           await refreshAll();
           return;
         }
@@ -390,7 +638,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [selectedSessionId, selectedSessionExists, mergeSessions]);
+  }, [mergeSessions, selectedSessionExists, selectedSessionId, setSelectedSessionId]);
   useEffect(() => {
     if (!settingsOpen) return;
     let alive = true;
@@ -430,7 +678,7 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    void refreshAll()
+    void Promise.all([refreshAll(), loadAllChatSessions(), loadChatGroups()])
       .catch((error: unknown) => {
         if (!cancelled) {
           setBootError(errorMessage(error));
@@ -445,22 +693,29 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAll]);
+  }, [loadAllChatSessions, loadChatGroups, refreshAll]);
 
   useEffect(() => {
-    if (sessions.length === 0) {
-      return;
-    }
-    const currentExists = sessions.some(
-      (session) => session.id === selectedSessionId && !session.archived,
+    const workspaceSessions = sessions.filter(
+      (session) => session.agentMode !== "chat" && !session.archived,
     );
-    if (
-      !selectedSessionId ||
-      (!currentExists && sessions.some((item) => item.id === selectedSessionId && item.archived))
-    ) {
-      setSelectedSessionId(sessions.find((session) => !session.archived)?.id ?? null);
-    }
-  }, [sessions, selectedSessionId]);
+    const currentWorkspaceSession = workspaceSessions.find(
+      (session) => session.id === workbenchSessionId,
+    );
+    if (currentWorkspaceSession) return;
+    const next = workspaceSessions[0] ?? null;
+    setWorkbenchSessionId(next?.id ?? null);
+    if (agentMode !== "chat" && next) setAgentMode(sessionAgentMode(next));
+  }, [agentMode, sessions, workbenchSessionId]);
+
+  useEffect(() => {
+    const activeChats = sessions.filter(
+      (session) => session.agentMode === "chat" && !session.archived,
+    );
+    if (activeChats.some((session) => session.id === chatSessionId)) return;
+    const next = activeChats[0] ?? null;
+    setChatSessionId(next?.id ?? null);
+  }, [chatSessionId, sessions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -468,13 +723,19 @@ export function App() {
       setMessages([]);
       return;
     }
+    if (agentMode !== "chat" && selectedSessionAgentMode !== agentMode) {
+      return;
+    }
 
     void Promise.all([
       window.mingshen.getSessionMessages(selectedSessionId),
       window.mingshen.listSessionExtensions(selectedSessionId),
       window.mingshen.getContextUsage(selectedSessionId),
+      agentMode === "chat"
+        ? Promise.resolve([])
+        : window.mingshen.listSessionBuiltinCapabilities(selectedSessionId),
     ])
-      .then(([loaded, extensionIds, context]) => {
+      .then(([loaded, extensionIds, context, builtinCapabilities]) => {
         if (!cancelled) {
           setMessages(loaded);
           setBootError(null);
@@ -489,6 +750,10 @@ export function App() {
             ...current,
             [selectedSessionId]: extensionIds,
           }));
+          setSessionBuiltinCapabilitiesBySession((current) => ({
+            ...current,
+            [selectedSessionId]: builtinCapabilities,
+          }));
         }
       })
       .catch((error: unknown) => {
@@ -499,7 +764,15 @@ export function App() {
         if (message.includes("会话不存在")) {
           void refreshAll().then((data) => {
             if (!cancelled) {
-              setSelectedSessionId(data.sessions.find((session) => !session.archived)?.id ?? null);
+              const next =
+                data.sessions.find(
+                  (session) =>
+                    !session.archived &&
+                    (agentMode === "chat"
+                      ? session.agentMode === "chat"
+                      : session.agentMode !== "chat"),
+                )?.id ?? null;
+              void selectSession(next);
               setMessages([]);
               setBootError(null);
             }
@@ -512,12 +785,23 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAll, selectedSessionExists, selectedSessionId]);
+  }, [
+    agentMode,
+    refreshAll,
+    selectSession,
+    selectedSessionAgentMode,
+    selectedSessionExists,
+    selectedSessionId,
+  ]);
 
   useEffect(() => {
     const unsubscribe = window.mingshen.onRuntimeEvent((event: ChatStreamEvent) => {
       if (event.type === "composer_draft_consumed") {
         void composerDrafts.accepted(event.sessionId, event.revision).catch(() => undefined);
+        return;
+      }
+      if (event.type === "queued_prompts_updated") {
+        scheduleQueuedPromptsRefresh(event.sessionId);
         return;
       }
       if (event.type === "context_updated") {
@@ -533,13 +817,31 @@ export function App() {
             ? current.map((session) => (session.id === event.session.id ? event.session : session))
             : [event.session, ...current],
         );
+        scheduleQueuedPromptsRefresh(event.session.id);
         return;
       }
 
       if (event.type === "session_removed") {
+        queuedPromptLoadVersionsRef.current.set(
+          event.sessionId,
+          (queuedPromptLoadVersionsRef.current.get(event.sessionId) ?? 0) + 1,
+        );
         composerDrafts.forget([event.sessionId]);
-        setSelectedSessionId((current) => (current === event.sessionId ? null : current));
+        const queuedRefreshTimer = queuedPromptRefreshTimersRef.current.get(event.sessionId);
+        if (queuedRefreshTimer) {
+          clearTimeout(queuedRefreshTimer);
+          queuedPromptRefreshTimersRef.current.delete(event.sessionId);
+        }
+        updateModeStartLock(event.sessionId, false);
+        updateModePreparationLock(event.sessionId, false);
+        setWorkbenchSessionId((current) => (current === event.sessionId ? null : current));
+        setChatSessionId((current) => (current === event.sessionId ? null : current));
         setContextsBySession((current) => {
+          const next = { ...current };
+          delete next[event.sessionId];
+          return next;
+        });
+        setQueuedPromptsBySession((current) => {
           const next = { ...current };
           delete next[event.sessionId];
           return next;
@@ -571,6 +873,8 @@ export function App() {
       }
 
       if (event.type === "run_started") {
+        updateModeStartLock(event.sessionId, true);
+        scheduleQueuedPromptsRefresh(event.sessionId);
         setRunsBySession((current) => ({
           ...current,
           [event.sessionId]: {
@@ -734,6 +1038,7 @@ export function App() {
         event.type === "run_completed" ||
         event.type === "run_failed"
       ) {
+        updateModeStartLock(event.sessionId, false);
         setRunsBySession((current) => {
           const previous = current[event.sessionId];
           return previous
@@ -758,13 +1063,21 @@ export function App() {
           return next;
         });
         void syncPendingRequests().catch(() => undefined);
+        scheduleQueuedPromptsRefresh(event.sessionId);
       }
     });
 
     return unsubscribe;
-  }, [receiveApprovals, receiveQuestions, syncPendingRequests, setWorkspaceOpen]);
+  }, [
+    receiveApprovals,
+    receiveQuestions,
+    scheduleQueuedPromptsRefresh,
+    syncPendingRequests,
+    setWorkspaceOpen,
+    updateModePreparationLock,
+    updateModeStartLock,
+  ]);
 
-  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const visualRunState =
     selectedSessionId && questionsBySession[selectedSessionId]
       ? "question"
@@ -784,6 +1097,22 @@ export function App() {
   const selectedProvider = providers.find(
     (provider) => provider.id === selectedSession?.providerId,
   );
+  const workspaceSession = sessions.find((session) => session.id === workbenchSessionId) ?? null;
+  const sessionTaskRunning = (session: SessionView | null): boolean =>
+    Boolean(
+      session &&
+        (session.status === "running" ||
+          session.status === "waiting_approval" ||
+          approvalsBySession[session.id] ||
+          questionsBySession[session.id] ||
+          liveBySession[session.id] ||
+          runsBySession[session.id]?.status === "running" ||
+          modeStartLockSessionIds.has(session.id) ||
+          modePreparationSessionIds.has(session.id)),
+    );
+  const activeTaskRunning =
+    sessionTaskRunning(selectedSession) ||
+    (agentMode === "chat" && sessionTaskRunning(workspaceSession));
   const canEnterWorkspace = providers.some((provider) => provider.models.length > 0);
   const connectionCount = providers.filter((provider) => provider.keys.length > 0).length;
 
@@ -795,25 +1124,84 @@ export function App() {
   }, [browserRequest, selectedSessionId]);
 
   const createSessionFromDialog = (session: SessionView) => {
-    setSessions((current) => [session, ...current]);
-    setSelectedSessionId(session.id);
-    setMessages([]);
+    mergeSessions([session]);
+    if (applySessionSelection(session)) setMessages([]);
     setNewSessionOpen(false);
     setNewSessionWorkspace(null);
+    setNewChatOpen(false);
   };
 
   const openNewSession = (workspacePath: string | null) => {
+    if (!allowPlanNavigation(null)) return;
     setNewSessionWorkspace(workspacePath);
     setNewSessionOpen(true);
   };
 
+  const changeAgentMode = async (next: AgentMode) => {
+    if (next === agentMode || activeTaskRunning) return;
+    const previousUiMode = agentMode;
+    if (next === "chat") {
+      if (!allowPlanNavigation(chatSessionId)) return;
+      setNewSessionOpen(false);
+      setNewSessionWorkspace(null);
+      setAgentMode("chat");
+      if (!chatSessionId) {
+        const firstChat = sessions.find(
+          (session) => session.agentMode === "chat" && !session.archived,
+        );
+        setChatSessionId(firstChat?.id ?? null);
+        if (!firstChat) void loadAllChatSessions().catch(() => undefined);
+      }
+      return;
+    }
+    setNewChatOpen(false);
+    setNewChatGroupId(null);
+    setAgentMode(next);
+    if (!workspaceSession || sessionAgentMode(workspaceSession) === next) return;
+    const currentProfile = agentProfiles.find(
+      (profile) => profile.id === workspaceSession.agentProfileId,
+    );
+    const compatibleProfile =
+      currentProfile && profileSupportsAgentMode(currentProfile, next)
+        ? currentProfile
+        : (agentProfiles.find(
+            (profile) =>
+              profile.enabled &&
+              profile.id === "primary" &&
+              profileSupportsAgentMode(profile, next),
+          ) ??
+          agentProfiles.find(
+            (profile) => profile.enabled && profileSupportsAgentMode(profile, next),
+          ));
+    if (!compatibleProfile) {
+      setAgentMode(previousUiMode);
+      setBootError(tr("没有适用于 {0} 的 Agent 配置。", [next]));
+      return;
+    }
+    try {
+      const updated = await window.mingshen.updateSession({
+        sessionId: workspaceSession.id,
+        agentMode: next,
+        agentProfileId: compatibleProfile.id,
+      });
+      mergeSessions([updated]);
+    } catch (error) {
+      setAgentMode(previousUiMode);
+      setBootError(errorMessage(error));
+    }
+  };
+
   const createWorkspaceSession = async (workspacePath: string | null) => {
+    if (!allowPlanNavigation(null)) return;
     if (creatingWorkspaceSessionRef.current) return;
     creatingWorkspaceSessionRef.current = true;
     setCreatingWorkspaceSession(true);
     setWorkspaceSessionError("");
     try {
-      const session = await window.mingshen.createSessionInWorkspace(workspacePath);
+      const session = await window.mingshen.createSessionInWorkspace(
+        workspacePath,
+        agentMode === "work" ? "work" : "code",
+      );
       setSearch("");
       createSessionFromDialog(session);
     } catch (error) {
@@ -825,12 +1213,66 @@ export function App() {
   };
 
   const patchSession = async (input: SessionUpdateInput): Promise<SessionView> => {
+    if (input.archived) {
+      const ancestors = new Set<string>();
+      let ancestorId = workbenchSessionId;
+      while (ancestorId && !ancestors.has(ancestorId)) {
+        ancestors.add(ancestorId);
+        ancestorId =
+          sessionsRef.current.find((session) => session.id === ancestorId)?.parentSessionId ?? null;
+      }
+      if (ancestors.has(input.sessionId) && !allowPlanNavigation(null)) {
+        throw new Error(tr("请先保存或取消计划编辑，再切换会话或 ChatAgent。"));
+      }
+    }
     const updated = await window.mingshen.updateSession(input);
     setSessions((current) =>
       current.map((session) => (session.id === updated.id ? updated : session)),
     );
     if (input.archived !== undefined) await refreshAll();
     return updated;
+  };
+
+  const removeSessionCascade = async (sessionId: string) => {
+    await window.mingshen.removeSession(sessionId);
+    const removed = new Set([sessionId]);
+    let previousSize = 0;
+    while (previousSize !== removed.size) {
+      previousSize = removed.size;
+      for (const item of sessionsRef.current) {
+        if (item.parentSessionId && removed.has(item.parentSessionId)) removed.add(item.id);
+      }
+    }
+    composerDrafts.forget([...removed]);
+    setSessions((current) => current.filter((item) => !removed.has(item.id)));
+    if (workbenchSessionId && removed.has(workbenchSessionId)) setWorkbenchSessionId(null);
+    if (chatSessionId && removed.has(chatSessionId)) setChatSessionId(null);
+    await refreshAll();
+  };
+
+  const createChatGroup = async (name: string) => {
+    await window.mingshen.createChatGroup(name);
+    await loadChatGroups();
+  };
+
+  const renameChatGroup = async (groupId: string, name: string) => {
+    await window.mingshen.renameChatGroup(groupId, name);
+    await loadChatGroups();
+  };
+
+  const removeChatGroup = async (groupId: string) => {
+    await window.mingshen.removeChatGroup(groupId);
+    setChatGroups((current) => current.filter((group) => group.id !== groupId));
+    setSessions((current) =>
+      current.map((session) =>
+        session.chatGroupId === groupId ? { ...session, chatGroupId: null } : session,
+      ),
+    );
+  };
+
+  const openNewChat = (groupId: string | null = null) => {
+    setNewChatGroupId(groupId);
+    setNewChatOpen(true);
   };
 
   const sendMessage = async (
@@ -841,19 +1283,25 @@ export function App() {
     if (!selectedSessionId) {
       throw new Error(tr("\u8BF7\u5148\u9009\u62E9\u4F1A\u8BDD\u3002"));
     }
-    await window.mingshen.sendChat({
-      sessionId: selectedSessionId,
-      text,
-      attachments,
-      draftRevision,
-    });
+    updateModeStartLock(selectedSessionId, true);
+    try {
+      await window.mingshen.sendChat({
+        sessionId: selectedSessionId,
+        text,
+        attachments,
+        draftRevision,
+      });
+    } catch (error) {
+      updateModeStartLock(selectedSessionId, false);
+      throw error;
+    }
   };
 
   const forkSession = async (sessionId: string) => {
     const forked = await window.mingshen.forkSession(sessionId);
     await refreshAll();
     setSearch("");
-    setSelectedSessionId(forked.id);
+    await selectSession(forked.id);
   };
 
   const stopRun = async () => {
@@ -862,18 +1310,34 @@ export function App() {
     }
   };
 
+  const compactSession = async (sessionId: string) => {
+    updateModeStartLock(sessionId, true);
+    try {
+      return await window.mingshen.compactChat(sessionId);
+    } catch (error) {
+      updateModeStartLock(sessionId, false);
+      throw error;
+    }
+  };
+
   const rewriteMessage = useCallback(
     async (messageId: string, text: string) => {
       if (!selectedSessionId) {
         throw new Error(tr("\u8BF7\u5148\u9009\u62E9\u4F1A\u8BDD\u3002"));
       }
-      await window.mingshen.rewriteAndSendChat({
-        sessionId: selectedSessionId,
-        messageId,
-        text,
-      });
+      updateModeStartLock(selectedSessionId, true);
+      try {
+        await window.mingshen.rewriteAndSendChat({
+          sessionId: selectedSessionId,
+          messageId,
+          text,
+        });
+      } catch (error) {
+        updateModeStartLock(selectedSessionId, false);
+        throw error;
+      }
     },
-    [selectedSessionId],
+    [selectedSessionId, updateModeStartLock],
   );
 
   const openWorkspaceFromConversation = useCallback(() => {
@@ -934,6 +1398,92 @@ export function App() {
       }
       return { ...current, [selectedSessionId]: [...existing] };
     });
+  };
+
+  const toggleSessionBuiltinCapability = async (capabilityId: string, selected: boolean) => {
+    if (!selectedSessionId) {
+      throw new Error(tr("\u8BF7\u5148\u9009\u62E9\u4F1A\u8BDD\u3002"));
+    }
+    await window.mingshen.setSessionBuiltinCapability(selectedSessionId, capabilityId, selected);
+    setSessionBuiltinCapabilitiesBySession((current) => ({
+      ...current,
+      [selectedSessionId]: (current[selectedSessionId] ?? []).map((capability) =>
+        capability.id === capabilityId ? { ...capability, selected } : capability,
+      ),
+    }));
+  };
+
+  const requireSelectedWorkspaceSession = (): string => {
+    if (!selectedSessionId) throw new Error(tr("请先选择会话。"));
+    if (selectedSession?.parentSessionId) {
+      throw new Error(tr("SubAgent 不支持运行队列。"));
+    }
+    return selectedSessionId;
+  };
+
+  const addQueuedPromptForCurrentSession = async (
+    text: string,
+    attachments: ChatAttachmentInput[],
+  ): Promise<QueuedPromptView> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    const item = await window.mingshen.addQueuedPrompt({ sessionId, text, attachments });
+    await loadQueuedPrompts(sessionId);
+    return item;
+  };
+
+  const updateQueuedPromptForCurrentSession = async (
+    itemId: string,
+    text: string,
+  ): Promise<QueuedPromptView> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    const item = await window.mingshen.updateQueuedPrompt({ sessionId, itemId, text });
+    await loadQueuedPrompts(sessionId);
+    return item;
+  };
+
+  const replaceQueuedPromptAttachmentsForCurrentSession = async (
+    itemId: string,
+    text: string,
+    attachments: ChatAttachmentInput[],
+  ): Promise<QueuedPromptView> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    const item = await window.mingshen.updateQueuedPrompt({
+      sessionId,
+      itemId,
+      text,
+      attachments,
+    });
+    await loadQueuedPrompts(sessionId);
+    return item;
+  };
+
+  const beginQueuedPromptEditForCurrentSession = async (itemId: string): Promise<string> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    return await window.mingshen.beginQueuedPromptEdit(sessionId, itemId);
+  };
+
+  const endQueuedPromptEditForCurrentSession = async (
+    editId: string,
+    abandon?: boolean,
+  ): Promise<void> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    await window.mingshen.endQueuedPromptEdit(sessionId, editId, abandon);
+    scheduleQueuedPromptsRefresh(sessionId);
+  };
+
+  const removeQueuedPromptForCurrentSession = async (itemId: string): Promise<void> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    await window.mingshen.removeQueuedPrompt(sessionId, itemId);
+    await loadQueuedPrompts(sessionId);
+  };
+
+  const resumeQueuedPromptForCurrentSession = async (
+    itemId: string,
+  ): Promise<QueuedPromptContinueResult> => {
+    const sessionId = requireSelectedWorkspaceSession();
+    const result = await window.mingshen.continueQueuedPrompt(sessionId, itemId);
+    await loadQueuedPrompts(sessionId);
+    return result;
   };
 
   const importExtensions = async (): Promise<ExtensionImportResult | null> => {
@@ -1014,32 +1564,45 @@ export function App() {
   return (
     <>
       <div
-        className={`app-shell${optical ? " app-shell--orbit" : ""}`}
+        className={`app-shell${optical ? " app-shell--orbit" : ""}${agentMode === "chat" ? " app-shell--chat" : ""}`}
+        data-agent-mode={agentMode}
         data-layout={layout.mode}
         data-run-state={visualRunState}
       >
         {createPortal(
           <header
-            className={`app-topbar${optical ? " app-topbar--orbit" : ""}`}
+            className={`app-topbar${optical ? " app-topbar--orbit" : ""}${agentMode === "chat" ? " app-topbar--chat" : ""}`}
+            data-agent-mode={agentMode}
             data-run-state={visualRunState}
           >
-            {!optical ? (
+            {!optical || agentMode === "chat" ? (
               <button
                 className="icon-button sidebar-toggle"
                 type="button"
                 aria-label={
-                  sidebarOpen
-                    ? tr("\u6536\u8D77\u4F1A\u8BDD\u680F")
-                    : tr("\u5C55\u5F00\u4F1A\u8BDD\u680F")
+                  agentMode === "chat"
+                    ? chatSidebarOpen
+                      ? tr("收起对话栏")
+                      : tr("展开对话栏")
+                    : sidebarOpen
+                      ? tr("\u6536\u8D77\u4F1A\u8BDD\u680F")
+                      : tr("\u5C55\u5F00\u4F1A\u8BDD\u680F")
                 }
                 title={
-                  sidebarOpen
-                    ? tr("\u6536\u8D77\u4F1A\u8BDD\u680F")
-                    : tr("\u5C55\u5F00\u4F1A\u8BDD\u680F")
+                  agentMode === "chat"
+                    ? chatSidebarOpen
+                      ? tr("收起对话栏")
+                      : tr("展开对话栏")
+                    : sidebarOpen
+                      ? tr("\u6536\u8D77\u4F1A\u8BDD\u680F")
+                      : tr("\u5C55\u5F00\u4F1A\u8BDD\u680F")
                 }
-                onClick={() => setSidebarOpen((value) => !value)}
+                onClick={() => {
+                  if (agentMode === "chat") setChatSidebarOpen((value) => !value);
+                  else setSidebarOpen((value) => !value);
+                }}
               >
-                {sidebarOpen ? (
+                {(agentMode === "chat" ? chatSidebarOpen : sidebarOpen) ? (
                   <PanelLeftClose aria-hidden="true" size={17} />
                 ) : (
                   <PanelLeftOpen aria-hidden="true" size={17} />
@@ -1047,42 +1610,46 @@ export function App() {
               </button>
             ) : null}
             <Brand optical={optical} />
-            {optical ? (
-              <span className="orbit-style-mark">
-                <Orbit size={18} aria-hidden="true" />
-                {locale === "en" ? "Light Trails" : "光轨"}
-              </span>
-            ) : null}
+            <AgentModeSwitcher
+              value={agentMode}
+              running={activeTaskRunning}
+              onChange={(next) => void changeAgentMode(next)}
+            />
             {!optical ? (
               <div className="topbar-session">
                 <strong>{selectedSession?.title ?? tr("\u672A\u9009\u62E9\u4F1A\u8BDD")}</strong>
-                <span title={currentWorkspace ?? ""}>
-                  {currentWorkspace?.split(/[\\/]/).filter(Boolean).at(-1) ??
-                    selectedProvider?.name}
+                <span title={agentMode === "chat" ? "ChatAgent" : (currentWorkspace ?? "")}>
+                  {agentMode === "chat"
+                    ? tr("独立对话")
+                    : (currentWorkspace?.split(/[\\/]/).filter(Boolean).at(-1) ??
+                      selectedProvider?.name)}
                 </span>
               </div>
             ) : null}
             <div className="topbar-actions">
-              {optical ? (
+              {optical && agentMode !== "chat" ? (
                 <span className="orbit-topbar-state" title={visualRunLabel}>
                   <i aria-hidden="true" />
                   <span>{visualRunLabel}</span>
                 </span>
               ) : null}
-              {!optical ? <LayoutPicker value={layout.mode} onChange={changeLayout} /> : null}
-              <span className="connection-state">
-                <span
-                  className={
-                    connectionCount > 0
-                      ? "connection-state__dot"
-                      : "connection-state__dot connection-state__dot--empty"
-                  }
-                  aria-hidden="true"
-                />
-
-                {tr("{0} 个连接", [connectionCount])}
-              </span>
-              {!optical ? (
+              {!optical && agentMode !== "chat" ? (
+                <LayoutPicker value={layout.mode} onChange={changeLayout} />
+              ) : null}
+              {agentMode !== "chat" ? (
+                <span className="connection-state">
+                  <span
+                    className={
+                      connectionCount > 0
+                        ? "connection-state__dot"
+                        : "connection-state__dot connection-state__dot--empty"
+                    }
+                    aria-hidden="true"
+                  />
+                  {tr("{0} 个连接", [connectionCount])}
+                </span>
+              ) : null}
+              {!optical && agentMode !== "chat" ? (
                 <button
                   className="icon-button"
                   type="button"
@@ -1117,7 +1684,7 @@ export function App() {
                   <Sun aria-hidden="true" size={17} />
                 )}
               </button>
-              {!optical ? (
+              {!optical || agentMode === "chat" ? (
                 <button
                   className="icon-button"
                   type="button"
@@ -1146,9 +1713,11 @@ export function App() {
           className={[
             "app-body",
             optical ? "app-body--orbit" : "",
-            workspaceOpen ? "app-body--workspace" : "",
-            sidebarOpen ? "" : "app-body--sidebar-collapsed",
-            sidebarOpen ? "app-body--sidebar-open" : "",
+            agentMode === "chat" ? "app-body--chat" : "",
+            agentMode !== "chat" && workspaceOpen ? "app-body--workspace" : "",
+            agentMode !== "chat" && !sidebarOpen ? "app-body--sidebar-collapsed" : "",
+            agentMode !== "chat" && sidebarOpen ? "app-body--sidebar-open" : "",
+            agentMode === "chat" && !chatSidebarOpen ? "app-body--chat-sidebar-closed" : "",
           ]
             .filter(Boolean)
             .join(" ")}
@@ -1156,20 +1725,22 @@ export function App() {
             {
               "--sidebar-width": `${layout.sidebarWidth}px`,
               "--inspector-width": `${layout.inspectorWidth}px`,
+              "--orbit-task-height-override": layout.taskPanelHeight
+                ? `${layout.taskPanelHeight}px`
+                : undefined,
             } as CSSProperties
           }
           data-inspector-drawer={inspectorDrawer}
           data-sidebar-drawer={sidebarDrawer}
+          data-chat-sidebar-open={chatSidebarOpen}
+          data-task-collapsed={taskPanelCollapsed}
         >
-          {optical ? (
+          {optical && agentMode !== "chat" ? (
             <>
               <nav
                 className="orbit-tool-rail"
                 aria-label={locale === "en" ? "Workspace tools" : "工作区工具"}
               >
-                <div className="orbit-tool-rail__brand">
-                  <BrandMark size={32} />
-                </div>
                 <div className="orbit-tool-rail__main">
                   <button
                     type="button"
@@ -1261,9 +1832,6 @@ export function App() {
                   >
                     <Settings size={19} aria-hidden="true" />
                   </button>
-                  <span className="orbit-tool-rail__identity" title="Mingshen" aria-hidden="true">
-                    M
-                  </span>
                 </div>
               </nav>
               <header className="orbit-workspace-header">
@@ -1321,7 +1889,16 @@ export function App() {
               </footer>
             </>
           ) : null}
-          {(workspaceOpen && inspectorDrawer) || (sidebarOpen && sidebarDrawer) ? (
+          {agentMode === "chat" && chatSidebarOpen && chatSidebarDrawer ? (
+            <button
+              className="workbench-drawer-scrim chat-sidebar-scrim"
+              type="button"
+              aria-label={tr("关闭对话栏")}
+              onClick={() => setChatSidebarOpen(false)}
+            />
+          ) : null}
+          {agentMode !== "chat" &&
+          ((workspaceOpen && inspectorDrawer) || (sidebarOpen && sidebarDrawer)) ? (
             <button
               className="workbench-drawer-scrim"
               type="button"
@@ -1331,41 +1908,50 @@ export function App() {
               }
             />
           ) : null}
-          <div className="sidebar-host" hidden={!sidebarOpen}>
-            <SessionSidebar
-              sessions={sessions}
-              catalogGroups={sessionGroups}
-              onLoadSessions={mergeSessions}
-              unreadCompletions={completionNotifications?.unread || []}
-              selectedSessionId={selectedSessionId}
-              search={search}
-              onSearchChange={setSearch}
-              onSelect={setSelectedSessionId}
-              runs={runsBySession}
-              pendingQuestionSessionIds={Object.keys(questionsBySession)}
-              onPatch={patchSession}
-              onFork={forkSession}
-              onRemove={async (sessionId) => {
-                await window.mingshen.removeSession(sessionId);
-                const removed = new Set([sessionId]);
-                let previousSize = 0;
-                while (previousSize !== removed.size) {
-                  previousSize = removed.size;
-                  for (const item of sessions)
-                    if (item.parentSessionId && removed.has(item.parentSessionId))
-                      removed.add(item.id);
-                }
-                composerDrafts.forget([...removed]);
-                await refreshAll();
-              }}
-              onNewSession={openNewSession}
-              onNewWorkspaceSession={(path) => void createWorkspaceSession(path)}
-              creatingWorkspaceSession={creatingWorkspaceSession}
-              workspaceSessionError={workspaceSessionError}
-              onCollapse={() => setSidebarOpen(false)}
-            />
-          </div>
-          {sidebarOpen ? (
+          {agentMode === "chat" ? (
+            <div className="chat-sidebar-host" hidden={!chatSidebarOpen}>
+              <ChatSidebar
+                sessions={sessions}
+                groups={chatGroups}
+                selectedSessionId={chatSessionId}
+                onSelect={(sessionId) => {
+                  if (chatSidebarDrawer) setChatSidebarOpen(false);
+                  void selectSession(sessionId);
+                }}
+                onNewChat={openNewChat}
+                onLoadSessions={mergeSessions}
+                onPatch={patchSession}
+                onRemove={removeSessionCascade}
+                onCreateGroup={createChatGroup}
+                onRenameGroup={renameChatGroup}
+                onRemoveGroup={removeChatGroup}
+              />
+            </div>
+          ) : (
+            <div className="sidebar-host" hidden={!sidebarOpen}>
+              <SessionSidebar
+                sessions={sessions.filter((session) => session.agentMode !== "chat")}
+                catalogGroups={sessionGroups}
+                onLoadSessions={mergeSessions}
+                unreadCompletions={completionNotifications?.unread || []}
+                selectedSessionId={workbenchSessionId}
+                search={search}
+                onSearchChange={setSearch}
+                onSelect={(sessionId) => void selectSession(sessionId)}
+                runs={runsBySession}
+                pendingQuestionSessionIds={Object.keys(questionsBySession)}
+                onPatch={patchSession}
+                onFork={forkSession}
+                onRemove={removeSessionCascade}
+                onNewSession={openNewSession}
+                onNewWorkspaceSession={(path) => void createWorkspaceSession(path)}
+                creatingWorkspaceSession={creatingWorkspaceSession}
+                workspaceSessionError={workspaceSessionError}
+                onCollapse={() => setSidebarOpen(false)}
+              />
+            </div>
+          )}
+          {agentMode !== "chat" && sidebarOpen ? (
             <PanelResizeHandle
               side="left"
               value={layout.sidebarWidth}
@@ -1377,6 +1963,7 @@ export function App() {
           <ChatView
             key={selectedSessionId}
             notificationDraft={completionNotifications?.replyDraft ?? null}
+            agentMode={agentMode}
             session={selectedSession}
             providers={providers}
             agentProfiles={agentProfiles}
@@ -1384,6 +1971,14 @@ export function App() {
             activities={selectedSessionId ? (activitiesBySession[selectedSessionId] ?? []) : []}
             selectedExtensionIds={
               selectedSessionId ? (sessionExtensionsBySession[selectedSessionId] ?? []) : []
+            }
+            builtinCapabilities={
+              selectedSessionId
+                ? (sessionBuiltinCapabilitiesBySession[selectedSessionId] ?? [])
+                : []
+            }
+            queuedPrompts={
+              selectedSessionId ? (queuedPromptsBySession[selectedSessionId] ?? []) : []
             }
             messages={messages}
             live={selectedSessionId ? (liveBySession[selectedSessionId] ?? null) : null}
@@ -1395,15 +1990,31 @@ export function App() {
             allActivities={activitiesBySession}
             approval={selectedSessionId ? (approvalsBySession[selectedSessionId] ?? null) : null}
             question={selectedSessionId ? (questionsBySession[selectedSessionId] ?? null) : null}
-            onNewSession={() => openNewSession(selectedSession?.workspacePath ?? null)}
-            onSelectSession={setSelectedSessionId}
+            onNewSession={() => {
+              if (agentMode === "chat") openNewChat(null);
+              else openNewSession(selectedSession?.workspacePath ?? null);
+            }}
+            onSelectSession={(sessionId) => void selectSession(sessionId)}
             onSend={sendMessage}
             onRewriteMessage={rewriteMessage}
+            onModePreparationChange={updateModePreparationLock}
             onStop={stopRun}
             onFork={forkSession}
-            onCompact={(sessionId) => window.mingshen.compactChat(sessionId)}
+            onCompact={compactSession}
             onPatch={patchSession}
             onToggleExtension={toggleSessionExtension}
+            onToggleBuiltinCapability={toggleSessionBuiltinCapability}
+            {...(selectedSession && !selectedSession.parentSessionId
+              ? {
+                  onAddQueuedPrompt: addQueuedPromptForCurrentSession,
+                  onUpdateQueuedPrompt: updateQueuedPromptForCurrentSession,
+                  onBeginQueuedPromptEdit: beginQueuedPromptEditForCurrentSession,
+                  onEndQueuedPromptEdit: endQueuedPromptEditForCurrentSession,
+                  onRemoveQueuedPrompt: removeQueuedPromptForCurrentSession,
+                  onReplaceQueuedPromptAttachments: replaceQueuedPromptAttachmentsForCurrentSession,
+                  onResumeQueuedPrompt: resumeQueuedPromptForCurrentSession,
+                }
+              : {})}
             onImportExtensions={importExtensions}
             onOpenSettings={(section) => {
               setSettingsSection(section ?? "appearance");
@@ -1432,7 +2043,7 @@ export function App() {
             }}
           />
 
-          {workspaceOpen ? (
+          {agentMode !== "chat" && workspaceOpen ? (
             <PanelResizeHandle
               side="right"
               value={layout.inspectorWidth}
@@ -1441,7 +2052,7 @@ export function App() {
               onChange={(inspectorWidth) => setLayout({ inspectorWidth })}
             />
           ) : null}
-          <div className="inspector-host" hidden={!workspaceOpen}>
+          <div className="inspector-host" hidden={agentMode === "chat" || !workspaceOpen}>
             <div
               className="inspector-workspace"
               hidden={!optical && layout.mode === "agents" && inspectorView === "tasks"}
@@ -1480,11 +2091,21 @@ export function App() {
               />
             </div>
           </div>
+          {optical && agentMode !== "chat" && workspaceOpen && !taskPanelCollapsed ? (
+            <PanelResizeHandle
+              side="bottom"
+              value={taskPanelHeight}
+              min={160}
+              max={taskPanelMaxHeight}
+              onChange={(taskPanelHeight) => setLayout({ taskPanelHeight })}
+              onReset={() => setLayout({ taskPanelHeight: undefined })}
+            />
+          ) : null}
           <div
             className={`task-host${optical || (layout.mode === "agents" && workspaceOpen && inspectorView === "tasks") ? " task-host--docked" : ""}`}
-            hidden={optical && !workspaceOpen}
+            hidden={agentMode === "chat" || (optical && !workspaceOpen)}
           >
-            {selectedSession ? (
+            {agentMode !== "chat" && selectedSession ? (
               <TaskWorkbench
                 key={selectedSession.id}
                 docked={
@@ -1492,17 +2113,28 @@ export function App() {
                   (layout.mode === "agents" && workspaceOpen && inspectorView === "tasks")
                 }
                 viewRequest={taskViewRequest}
+                onEditingChange={setPlanEditing}
+                collapsed={taskPanelCollapsed}
+                {...(optical
+                  ? {
+                      onToggleCollapsed: () =>
+                        setLayout({ taskPanelCollapsed: !taskPanelCollapsed }),
+                    }
+                  : {})}
+                onReveal={() => {
+                  if (optical && taskPanelCollapsed) setLayout({ taskPanelCollapsed: false });
+                }}
                 session={selectedSession}
-                sessions={sessions}
+                sessions={sessions.filter((session) => session.agentMode !== "chat")}
                 activities={activitiesBySession}
                 liveBySession={liveBySession}
-                onSelect={setSelectedSessionId}
+                onSelect={(sessionId) => void selectSession(sessionId)}
                 onOpenFile={(path) => {
                   setInspectorView("workspace");
                   openFileFromConversation(path);
                 }}
               />
-            ) : optical ? (
+            ) : agentMode !== "chat" && optical ? (
               <div className="orbit-task-empty">
                 <strong>{tr("任务计划")}</strong>
                 <p>
@@ -1536,14 +2168,28 @@ export function App() {
         />
       ) : null}
 
-      {newSessionOpen ? (
+      {newSessionOpen && agentMode !== "chat" ? (
         <NewSessionDialog
           providers={providers}
           agentProfiles={agentProfiles}
+          initialAgentMode={agentMode}
           initialWorkspacePath={newSessionWorkspace}
           onClose={() => {
             setNewSessionOpen(false);
             setNewSessionWorkspace(null);
+          }}
+          onCreated={createSessionFromDialog}
+        />
+      ) : null}
+
+      {newChatOpen && agentMode === "chat" ? (
+        <NewChatDialog
+          providers={providers}
+          groups={chatGroups}
+          initialGroupId={newChatGroupId}
+          onClose={() => {
+            setNewChatOpen(false);
+            setNewChatGroupId(null);
           }}
           onCreated={createSessionFromDialog}
         />
