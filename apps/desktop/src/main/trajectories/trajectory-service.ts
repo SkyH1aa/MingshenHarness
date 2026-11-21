@@ -19,6 +19,8 @@ function summarize(event: ChatStreamEvent): string {
       return "已发送草稿";
     case "queued_prompts_updated":
       return "更新下一轮队列";
+    case "run_steering_updated":
+      return "更新运行中引导";
     case "run_started":
       return event.kind === "compaction" ? "开始手动压缩上下文" : "Agent 开始执行";
     case "user_message":
@@ -72,7 +74,8 @@ export class TrajectoryService {
       event.type === "question_state" ||
       event.type === "context_updated" ||
       event.type === "composer_draft_consumed" ||
-      event.type === "queued_prompts_updated"
+      event.type === "queued_prompts_updated" ||
+      event.type === "run_steering_updated"
     ) {
       return;
     }

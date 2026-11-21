@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseDocument } from "yaml";
 import type { ApprovalModelSettings, ApprovalRequest, ModelReference } from "../../shared/domain";
+import { isTextModel } from "../../shared/model-capabilities";
 import { MODEL_RETRY_SETTING, normalizeModelRetrySettings } from "../../shared/model-retry";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
 import { auxiliaryReasoning, sameModel } from "../providers/auxiliary-model";
@@ -138,7 +139,8 @@ export class AutomaticApprovalService {
       throw new Error("Invalid approval model settings.");
     const provider = settings.providerId ? this.repository.getProvider(settings.providerId) : null;
     const model = provider?.models.find(
-      (candidate) => candidate.id === settings.modelId && candidate.enabled,
+      (candidate) =>
+        candidate.id === settings.modelId && candidate.enabled && isTextModel(candidate),
     );
     if (!provider || !model)
       throw new Error("APPROVAL_MODEL_REQUIRED: 请先在设置的权限与安全中配置审批模型。");

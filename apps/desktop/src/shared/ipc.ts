@@ -1,4 +1,6 @@
+import type { AutoDriveResult } from "./autodrive";
 import type { ComposerDraft, SaveComposerDraftInput } from "./composer-draft";
+import type { CoordinationStateView } from "./coordination";
 import type {
   CompletionNotificationSettings,
   CompletionNotificationState,
@@ -68,11 +70,34 @@ import type {
   WorkspaceGitStatus,
 } from "./domain";
 import type {
+  DraftAssistSettings,
+  DraftPolishInput,
+  DraftPolishResult,
+  ProjectToneInput,
+  ProjectToneView,
+} from "./draft-assist";
+import type {
+  ImageStudioAssetData,
+  ImageStudioGenerateInput,
+  ImageStudioGenerateResult,
+  ImageStudioImportFile,
+  ImageStudioPolishInput,
+  ImageStudioReversePromptInput,
+  ImageStudioServiceResult,
+  ImageStudioWorkspace,
+} from "./image-studio";
+import type {
   LocalPluginInstallResult,
   LocalPluginMarketSource,
   LocalPluginMarketView,
   LocalPluginValidation,
 } from "./local-plugins";
+import type {
+  LocalReviewCommentsInput,
+  LocalReviewCommentsResult,
+  LocalReviewRequest,
+  LocalReviewSnapshot,
+} from "./local-review";
 import type {
   ModelCatalogPreferences,
   MoveCatalogProviderInput,
@@ -86,6 +111,11 @@ import type {
   ProjectMemorySelection,
   ProjectMemoryView,
 } from "./project-memory";
+import type {
+  SessionProjectContexts,
+  WorkspaceFileSearchInput,
+  WorkspaceFileSearchResult,
+} from "./project-navigation";
 import type {
   QueuedPromptAddInput,
   QueuedPromptContinueResult,
@@ -101,8 +131,14 @@ import type {
   QuickChatAction,
   QuickChatState,
 } from "./quick-chat";
+import type { RunSteeringInput, RunSteeringReceipt, RunSteeringState } from "./run-steering";
 import type { RendererErrorReport, RuntimeLogStatus } from "./runtime-log";
 import type { SessionBatchTarget } from "./session-catalog";
+import type {
+  InteractiveTerminalCreateInput,
+  InteractiveTerminalEvent,
+  InteractiveTerminalView,
+} from "./terminal";
 import type { TokenSaverSettings, TokenSaverSnapshot } from "./token-saver";
 import type { UiPreferences } from "./ui-preferences";
 
@@ -170,8 +206,18 @@ export const IPC_CHANNELS = {
   modelCreate: "model:create",
   modelUpdate: "model:update",
   modelRemove: "model:remove",
+  imageStudioGet: "image-studio:get",
+  imageStudioSave: "image-studio:save",
+  imageStudioAssetData: "image-studio:asset-data",
+  imageStudioImport: "image-studio:import",
+  imageStudioRemoveAsset: "image-studio:remove-asset",
+  imageStudioGenerate: "image-studio:generate",
+  imageStudioPolishPrompt: "image-studio:polish-prompt",
+  imageStudioReversePrompt: "image-studio:reverse-prompt",
+  imageStudioCancel: "image-studio:cancel",
   sessionCreate: "session:create",
   sessionCreateInWorkspace: "session:create-in-workspace",
+  sessionCreateInChatGroup: "session:create-in-chat-group",
   sessionFork: "session:fork",
   sessionOpenWorkspace: "session:open-workspace",
   sessionUpdate: "session:update",
@@ -179,15 +225,27 @@ export const IPC_CHANNELS = {
   sessionMessages: "session:messages",
   sessionOpened: "session:opened",
   sessionRunState: "session:run-state",
+  projectContexts: "project:contexts",
   sessionRetentionGet: "session:retention-get",
   sessionRetentionSet: "session:retention-set",
   chatSend: "chat:send",
+  runSteeringGet: "chat:steering-get",
+  runSteeringSend: "chat:steering-send",
+  autoDriveSuggest: "chat:autodrive-suggest",
+  autoDriveCancel: "chat:autodrive-cancel",
+  agentCoordinationGet: "chat:coordination-get",
   composerDraftGet: "composer:draft-get",
   composerDraftSave: "composer:draft-save",
   composerDraftClear: "composer:draft-clear",
   composerDraftChanged: "composer:draft-changed",
   composerDraftFlushRequest: "composer:draft-flush-request",
   composerDraftFlushAck: "composer:draft-flush-ack",
+  draftAssistSettingsGet: "draft-assist:settings-get",
+  draftAssistSettingsSet: "draft-assist:settings-set",
+  draftAssistPolish: "draft-assist:polish",
+  draftAssistCancel: "draft-assist:cancel",
+  projectToneGet: "draft-assist:project-tone-get",
+  projectToneSet: "draft-assist:project-tone-set",
   chatRewrite: "chat:rewrite",
   chatStop: "chat:stop",
   queuedPromptList: "chat:queue-list",
@@ -213,6 +271,7 @@ export const IPC_CHANNELS = {
   questionState: "question:state",
   runtimeEvent: "runtime:event",
   workspaceList: "workspace:list",
+  workspaceSearchFiles: "workspace:search-files",
   workspaceRead: "workspace:read",
   workspaceReadAbsolute: "workspace:read-absolute",
   workspaceWrite: "workspace:write",
@@ -223,6 +282,14 @@ export const IPC_CHANNELS = {
   gitDiscard: "git:discard",
   gitRestoreUndo: "git:restore-undo",
   workspaceRunCommand: "workspace:run-command",
+  localReviewGet: "local-review:get",
+  localReviewSubmit: "local-review:submit",
+  terminalList: "terminal:list",
+  terminalCreate: "terminal:create",
+  terminalInput: "terminal:input",
+  terminalResize: "terminal:resize",
+  terminalStop: "terminal:stop",
+  terminalEvent: "terminal:event",
   extensionsList: "extensions:list",
   extensionsChooseDirectory: "extensions:choose-directory",
   extensionsImport: "extensions:import",
@@ -439,6 +506,8 @@ export interface MingshenDesktopApi {
     ids: string[],
   ): Promise<import("./session-catalog").SessionCatalogDelta>;
   getSession(sessionId: string): Promise<SessionView | null>;
+  getProjectContexts(sessionIds: string[]): Promise<SessionProjectContexts>;
+  searchWorkspaceFiles(input: WorkspaceFileSearchInput): Promise<WorkspaceFileSearchResult>;
   listSessionGroups(): Promise<import("./session-catalog").SessionWorkspaceGroup[]>;
   listChatGroups(): Promise<import("./domain").ChatGroupView[]>;
   createChatGroup(name: string): Promise<import("./domain").ChatGroupView>;
@@ -464,11 +533,21 @@ export interface MingshenDesktopApi {
   createModel(input: ModelCreateInput): Promise<ProviderView>;
   updateModel(input: ModelUpdateInput): Promise<ProviderView>;
   removeModel(modelConfigId: string): Promise<ProviderView>;
+  getImageStudioWorkspace(): Promise<ImageStudioWorkspace>;
+  saveImageStudioWorkspace(workspace: ImageStudioWorkspace): Promise<ImageStudioWorkspace>;
+  getImageStudioAssetData(assetId: string): Promise<ImageStudioAssetData>;
+  importImageStudioAssets(files: ImageStudioImportFile[]): Promise<ImageStudioWorkspace>;
+  removeImageStudioAsset(assetId: string): Promise<ImageStudioWorkspace>;
+  generateImageStudioImage(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult>;
+  polishImageStudioPrompt(input: ImageStudioPolishInput): Promise<ImageStudioServiceResult>;
+  reverseImageStudioPrompt(input: ImageStudioReversePromptInput): Promise<ImageStudioServiceResult>;
+  cancelImageStudioRequest(requestId: string): Promise<void>;
   createSession(input: SessionCreateInput): Promise<SessionView>;
   createSessionInWorkspace(
     workspacePath: string | null,
     agentMode?: "code" | "work",
   ): Promise<SessionView>;
+  createChatSessionInGroup(groupId: string | null): Promise<SessionView>;
   forkSession(sessionId: string, messageId?: string): Promise<SessionView>;
   openSessionWorkspace(sessionId: string): Promise<void>;
   updateSession(input: SessionUpdateInput, expected?: SessionBatchTarget[]): Promise<SessionView>;
@@ -479,6 +558,11 @@ export interface MingshenDesktopApi {
   getSessionRetention(): Promise<SessionRetentionSettings>;
   setSessionRetention(settings: SessionRetentionSettings): Promise<SessionRetentionSettings>;
   sendChat(input: ChatSendInput): Promise<{ runId: string }>;
+  getRunSteering(sessionId: string): Promise<RunSteeringState | null>;
+  steerRun(input: RunSteeringInput): Promise<RunSteeringReceipt>;
+  getAutoDriveSuggestions(sessionId: string): Promise<AutoDriveResult>;
+  cancelAutoDrive(sessionId: string): Promise<void>;
+  getAgentCoordination(sessionId: string): Promise<CoordinationStateView | null>;
   getComposerDraft(sessionId: string): Promise<ComposerDraft | null>;
   saveComposerDraft(input: SaveComposerDraftInput): Promise<void>;
   clearComposerDraft(sessionId: string, revision: string): Promise<boolean>;
@@ -486,6 +570,12 @@ export interface MingshenDesktopApi {
     listener: (requestId: string, purpose: ComposerDraftFlushPurpose) => void,
   ): () => void;
   acknowledgeComposerDraftFlush(requestId: string, error?: string): void;
+  getDraftAssistSettings(): Promise<DraftAssistSettings>;
+  setDraftAssistSettings(settings: DraftAssistSettings): Promise<DraftAssistSettings>;
+  polishDraft(input: DraftPolishInput): Promise<DraftPolishResult>;
+  cancelDraftPolish(requestId: string): Promise<void>;
+  getProjectTone(sessionId: string): Promise<ProjectToneView>;
+  setProjectTone(input: ProjectToneInput): Promise<ProjectToneView>;
   onComposerDraftChanged(
     listener: (change: { sessionId: string; revision: string | null }) => void,
   ): () => void;
@@ -524,6 +614,14 @@ export interface MingshenDesktopApi {
   discardGitChanges(root: string, paths?: string[]): Promise<{ backupId: string; paths: string[] }>;
   restoreGitUndo(root: string, backupId: string): Promise<void>;
   runUserCommand(root: string, command: string): Promise<UserCommandResult>;
+  getLocalReview(input: LocalReviewRequest): Promise<LocalReviewSnapshot>;
+  submitLocalReviewComments(input: LocalReviewCommentsInput): Promise<LocalReviewCommentsResult>;
+  listTerminals(sessionId: string): Promise<InteractiveTerminalView[]>;
+  createTerminal(input: InteractiveTerminalCreateInput): Promise<InteractiveTerminalView>;
+  writeTerminal(terminalId: string, data: string): Promise<void>;
+  resizeTerminal(terminalId: string, cols: number, rows: number): Promise<InteractiveTerminalView>;
+  stopTerminal(terminalId: string): Promise<void>;
+  onTerminalEvent(listener: (event: InteractiveTerminalEvent) => void): () => void;
   listExtensions(): Promise<ExtensionView[]>;
   chooseExtensionDirectory(): Promise<string | null>;
   importExtensions(sourceDirectory: string): Promise<ExtensionImportResult>;

@@ -91,7 +91,13 @@ async function fixture(options: Partial<SessionView> = {}, native?: Partial<Nati
       decision: "allow_session" as const,
     })),
   };
-  const registry = native ? new ToolRegistry(native as NativeSandboxService) : new ToolRegistry();
+  const registry = native
+    ? new ToolRegistry({
+        cancelRun: vi.fn(async () => undefined),
+        shutdown: vi.fn(async () => undefined),
+        ...native,
+      } as unknown as NativeSandboxService)
+    : new ToolRegistry();
   registries.push(registry);
   return { root, context, registry };
 }
@@ -205,6 +211,7 @@ describe("paged file reads", () => {
       f.root,
       { operation: "read", path: "source.ts" },
       f.context.signal,
+      { sessionId: "session", runId: "run", toolCallId: "call" },
     );
   });
 
@@ -286,11 +293,19 @@ describe("image tool feedback", () => {
       expect(result.isError, result.output).toBe(false);
       expect(result.images?.[0]?.dataUrl).toBe(`data:image/png;base64,${png.toString("base64")}`);
       expect(f.context.requestApproval).toHaveBeenCalledOnce();
-      expect(fileOperation).toHaveBeenCalledWith(
-        f.root,
-        { operation: "read_binary", path: "capture.png" },
-        f.context.signal,
-      );
+      if (executionMode === "host")
+        expect(fileOperation).toHaveBeenCalledWith(
+          f.root,
+          { operation: "read_binary", path: "capture.png" },
+          f.context.signal,
+          { sessionId: "session", runId: "run", toolCallId: "call" },
+        );
+      else
+        expect(fileOperation).toHaveBeenCalledWith(
+          f.root,
+          { operation: "read_binary", path: "capture.png" },
+          f.context.signal,
+        );
     },
   );
 });

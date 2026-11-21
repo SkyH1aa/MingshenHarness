@@ -61,4 +61,20 @@ describe("main-process attachment validation", () => {
       ]),
     ).toThrow("不是有效的图片类型");
   });
+
+  it("rejects oversized attachment batches before parsing them", () => {
+    expect(() =>
+      validateChatAttachments(
+        Array.from({ length: 11 }, (_, index) => attachment({ name: `report-${index}.pdf` })),
+      ),
+    ).toThrow("一次最多发送 10 个附件");
+
+    expect(() =>
+      validateChatAttachments([
+        attachment({ size: 25 * 1024 * 1024 }),
+        attachment({ size: 25 * 1024 * 1024 }),
+        attachment({ size: 1 }),
+      ]),
+    ).toThrow("附件总大小不能超过 50 MiB");
+  });
 });

@@ -33,23 +33,21 @@ export class ToolResultCache {
     signal: AbortSignal,
   ): Promise<string> {
     signal.throwIfAborted();
-    key = `${this.generation}:${key}`;
-    const existing = this.inFlight.get(key);
+    const flightKey = `${this.generation}:${key}`;
+    const existing = this.inFlight.get(flightKey);
     if (existing)
       return await existing.then((result) => {
         signal.throwIfAborted();
         return result;
       });
-    const epoch = this.generation;
     const pending = execute();
-    this.inFlight.set(key, pending);
+    this.inFlight.set(flightKey, pending);
     try {
       const result = await pending;
       signal.throwIfAborted();
-      if (epoch === this.generation) this.put(key, result, 15000);
       return result;
     } finally {
-      if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
+      if (this.inFlight.get(flightKey) === pending) this.inFlight.delete(flightKey);
     }
   }
 }

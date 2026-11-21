@@ -14,6 +14,27 @@ const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const minimalJpeg = Buffer.from(
+  "ffd8ffc00011080001000103011100021100031100ffda000c03010002110311003f0000ffd9",
+  "hex",
+);
+
+function pngWithDimensions(width: number, height: number): Buffer {
+  const image = Buffer.from(onePixelPng);
+  image.writeUInt32BE(width, 16);
+  image.writeUInt32BE(height, 20);
+  image.writeUInt32BE(pngCrc32(image.subarray(12, 29)), 29);
+  return image;
+}
+
+function pngCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 describe("document authoring", () => {
   it("validates mutually exclusive document shapes and bounded input", () => {
@@ -535,8 +556,7 @@ describe("document authoring", () => {
     await expect(authorOfficeDocument(request, new Map([["large.png", hugeFile]]))).rejects.toThrow(
       "总大小",
     );
-    const hugeDimensions = Buffer.from(onePixelPng);
-    hugeDimensions.writeUInt32BE(65_535, 16);
+    const hugeDimensions = pngWithDimensions(65_535, 1);
     await expect(
       authorOfficeDocument(request, new Map([["large.png", hugeDimensions]])),
     ).rejects.toThrow("图片尺寸");
@@ -576,5 +596,31 @@ describe("document authoring", () => {
         () => undefined,
       ),
     ).rejects.toThrow("只支持 PNG 或 JPEG");
+  });
+
+  it("rejects truncated or corrupt PNG/JPEG bytes before authoring", async () => {
+    const request = documentAuthoringSchema.parse({
+      path: "images.pdf",
+      blocks: [{ type: "image", path: "image.png" }],
+    });
+    expect(() => renderDocumentHtml(request, new Map([["image.png", minimalJpeg]]))).not.toThrow();
+    expect(() =>
+      renderDocumentHtml(
+        request,
+        new Map([["image.png", minimalJpeg.subarray(0, minimalJpeg.length - 2)]]),
+      ),
+    ).toThrow("JPEG 图片损坏");
+    expect(() =>
+      renderDocumentHtml(
+        request,
+        new Map([["image.png", onePixelPng.subarray(0, onePixelPng.length - 12)]]),
+      ),
+    ).toThrow("PNG 图片损坏");
+    const corruptCrc = Buffer.from(onePixelPng);
+    const crcByte = corruptCrc[29] ?? 0;
+    corruptCrc[29] = crcByte ^ 0xff;
+    expect(() => renderDocumentHtml(request, new Map([["image.png", corruptCrc]]))).toThrow(
+      "PNG 图片损坏",
+    );
   });
 });

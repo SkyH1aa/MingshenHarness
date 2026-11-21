@@ -8,6 +8,7 @@ import type {
 } from "../../../shared/domain";
 import { tr } from "../i18n/index";
 import { runtimeText } from "../i18n/runtime";
+import { DraftAssistSettings } from "./DraftAssistSettings";
 import { ModelPicker } from "./ModelPicker";
 
 export function ContextSettings({
@@ -231,6 +232,7 @@ export function ContextSettings({
           </>
         ) : null}
       </section>
+      <DraftAssistSettings providers={providers} />
       <p className="form-note">
         {tr(
           "压缩会向选定模型发送较早的聊天和工具结果，可能产生 API 用量。原始记录仍保存在本地；当前指令和最近工具步骤会保留，压缩后自动继续。",

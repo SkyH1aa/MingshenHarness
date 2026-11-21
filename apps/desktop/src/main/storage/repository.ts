@@ -1,5 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import {
+  MAX_CHAT_ATTACHMENT_BYTES,
+  MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
+  MAX_CHAT_ATTACHMENTS,
+} from "../../shared/attachments";
 import {
   COMPOSER_DRAFT_CONFLICT_MESSAGE,
   type ComposerDraft,
@@ -61,6 +66,7 @@ type StoredComposerDraft = Omit<
 >;
 
 const composerDraftKey = (sessionId: string) => `composer.draft.${sessionId}`;
+const chatNetworkEnabledKey = (sessionId: string) => `chat.network.enabled.${sessionId}`;
 const composerAttachmentPrefix = (sessionId: string) => `composer.draft-attachment.${sessionId}.`;
 const composerAttachmentKey = (sessionId: string, id: string) =>
   `${composerAttachmentPrefix(sessionId)}${id}`;
@@ -462,6 +468,10 @@ export class Repository {
     }
   }
 
+  hasSetting(key: string): boolean {
+    return this.database.prepare("select 1 from app_settings where key = ?").get(key) !== undefined;
+  }
+
   setSetting(key: string, value: unknown): void {
     this.database
       .prepare(
@@ -476,6 +486,18 @@ export class Repository {
 
   removeSetting(key: string): void {
     this.database.prepare("delete from app_settings where key = ?").run(key);
+  }
+
+  runInSavepoint<T>(operation: () => T): T {
+    this.database.exec("savepoint mh_atomic_operation");
+    try {
+      const result = operation();
+      this.database.exec("release mh_atomic_operation");
+      return result;
+    } catch (error) {
+      this.database.exec("rollback to mh_atomic_operation; release mh_atomic_operation");
+      throw error;
+    }
   }
 
   private removeSettingsWithPrefix(prefix: string): void {
@@ -567,16 +589,36 @@ export class Repository {
       additions.some((attachment) => !keptIds.has(attachment.id))
     )
       throw new Error("Invalid composer draft attachment references.");
+    if (input.attachmentIds.length > MAX_CHAT_ATTACHMENTS)
+      throw new Error(`草稿最多保留 ${MAX_CHAT_ATTACHMENTS} 个附件。`);
     this.database.exec("savepoint save_composer_draft");
     try {
       if (!this.getSession(input.sessionId)) throw new Error("会话不存在。");
       const previous = this.composerDraftMetadata(input.sessionId);
       if (input.baseRevision !== undefined && input.baseRevision !== (previous?.revision ?? null))
         throw new Error(COMPOSER_DRAFT_CONFLICT_MESSAGE);
-      const exists = this.database.prepare("select 1 from app_settings where key = ?");
-      for (const id of input.attachmentIds)
-        if (!addedIds.has(id) && !exists.get(composerAttachmentKey(input.sessionId, id)))
-          throw new Error("Saved composer attachment is missing.");
+      const additionsById = new Map(additions.map((attachment) => [attachment.id, attachment]));
+      let attachmentBytes = 0;
+      for (const id of input.attachmentIds) {
+        const added = additionsById.get(id);
+        if (added) {
+          attachmentBytes += added.size;
+          continue;
+        }
+        const stored = this.getSetting(composerAttachmentKey(input.sessionId, id)) as {
+          size?: unknown;
+        } | null;
+        if (!stored) throw new Error("Saved composer attachment is missing.");
+        if (
+          !Number.isSafeInteger(stored.size) ||
+          (stored.size as number) < 0 ||
+          (stored.size as number) > MAX_CHAT_ATTACHMENT_BYTES
+        )
+          throw new Error("Saved composer attachment size is invalid.");
+        attachmentBytes += stored.size as number;
+      }
+      if (attachmentBytes > MAX_CHAT_ATTACHMENT_TOTAL_BYTES)
+        throw new Error("草稿附件总大小不能超过 50 MiB。");
       for (const attachment of additions)
         this.setSetting(composerAttachmentKey(input.sessionId, attachment.id), attachment);
       if (input.text.length || input.attachmentIds.length || input.notificationDraftIds.length)
@@ -790,7 +832,7 @@ export class Repository {
     todos: SessionTodo[],
     planMetadata?: unknown,
   ): SessionTodo[] {
-    this.database.exec("begin;");
+    this.database.exec("savepoint replace_session_todos");
     try {
       this.database.prepare("delete from session_todos where session_id = ?").run(sessionId);
       const updatedAt = new Date().toISOString();
@@ -810,9 +852,9 @@ export class Repository {
         );
       }
       if (planMetadata !== undefined) this.setSetting(`workbench.plan.${sessionId}`, planMetadata);
-      this.database.exec("commit;");
+      this.database.exec("release replace_session_todos");
     } catch (error) {
-      this.database.exec("rollback;");
+      this.database.exec("rollback to replace_session_todos; release replace_session_todos");
       throw error;
     }
     return this.listSessionTodos(sessionId);
@@ -1627,10 +1669,27 @@ export class Repository {
       removed: string[] = [];
     for (const change of changes) {
       const id = asString(change.session_id);
-      if (!selected.has(id)) continue;
       const session = this.getSession(id);
-      if (session) sessions.push(session);
-      else removed.push(id);
+      // A loaded row can be replaced in place. A new root can change catalog ordering, so the
+      // client must reload its page instead of advancing past data it cannot apply.
+      if (selected.has(id)) {
+        if (!session || session.archived)
+          return { revision, reset: true, sessions: [], removed: [] };
+        sessions.push(session);
+        continue;
+      }
+      if (!session || session.archived) continue;
+      if (session.agentMode === "chat") {
+        sessions.push(session);
+        continue;
+      }
+      if (session.parentSessionId) {
+        if (!selected.has(session.parentSessionId)) continue;
+        const parent = this.getSession(session.parentSessionId);
+        if (parent && !parent.archived && parent.agentMode !== "chat") sessions.push(session);
+        continue;
+      }
+      return { revision, reset: true, sessions: [], removed: [] };
     }
     return { revision, reset: false, sessions, removed };
   }
@@ -1776,6 +1835,8 @@ export class Repository {
         this.setSessionExtension(fork.id, extensionId, true);
       this.copyBuiltinCapabilitySelection(source.id, fork.id);
       // Copy durable conversation state only. Pending approvals, grants and tasks are independent.
+      if (source.agentMode === "chat" && source.chatNetworkEnabled === false)
+        this.setSetting(chatNetworkEnabledKey(fork.id), false);
       if (source.approvalMode === "automatic")
         this.setSetting(`permissions.approval.${fork.id}`, "automatic");
       if (source.compactionModel)
@@ -1944,6 +2005,7 @@ export class Repository {
     this.database
       .prepare("delete from app_settings where key = ?")
       .run(`permissions.approval.${sessionId}`);
+    this.removeSetting(chatNetworkEnabledKey(sessionId));
     for (const name of ["model", "checkpoint", "observation", "view", "snapshot", "basis"])
       this.removeSetting(`context.${name}.${sessionId}`);
     this.removeSetting(`workbench.plan.${sessionId}`);
@@ -1951,6 +2013,9 @@ export class Repository {
     this.removeSetting(`workbench.queued.${sessionId}`);
     this.removeSetting(`workbench.ledger.${sessionId}`);
     this.removeSetting(`workbench.recovery.${sessionId}`);
+    this.removeSetting(`coordination.state.${sessionId}`);
+    this.removeSetting(`runSteering.v1.${sessionId}`);
+    this.removeSetting(`session.project-context.${sessionId}`);
     this.removeSetting(`tokenSaver.report.${sessionId}`);
     this.removeSetting(`tokenSaver.usage.${sessionId}`);
     this.removeSetting(`tokenSaver.summary.${sessionId}`);
@@ -2115,6 +2180,38 @@ export class Repository {
   }
 
   deleteMessagesFromSeq(sessionId: string, fromSeq: number): void {
+    const deletedRows = this.database
+      .prepare("select parts_json from messages where session_id = ? and seq >= ?")
+      .all(sessionId, fromSeq) as Row[];
+    const deletedCallIds = new Set<string>();
+    for (const row of deletedRows) {
+      for (const part of parseMessageParts(row.parts_json)) {
+        if ("callId" in part && typeof part.callId === "string" && part.callId) {
+          deletedCallIds.add(part.callId);
+        }
+      }
+    }
+    if (deletedCallIds.size) {
+      const outputPrefix = `tool.output.${sessionId}.`;
+      const removedOutputIds = new Set(
+        [...deletedCallIds].map((callId) => createHash("sha256").update(callId).digest("hex")),
+      );
+      for (const outputId of removedOutputIds) this.removeSetting(`${outputPrefix}${outputId}`);
+      const index = this.getSetting(`${outputPrefix}index`);
+      if (Array.isArray(index)) {
+        const retained = index.filter(
+          (entry) =>
+            !(
+              entry &&
+              typeof entry === "object" &&
+              typeof (entry as { id?: unknown }).id === "string" &&
+              removedOutputIds.has((entry as { id: string }).id)
+            ),
+        );
+        if (retained.length) this.setSetting(`${outputPrefix}index`, retained);
+        else this.removeSetting(`${outputPrefix}index`);
+      }
+    }
     this.removeSetting(`tokenSaver.report.${sessionId}`);
     this.removeSetting(`tokenSaver.summary.${sessionId}`);
     this.removeSetting(`tokenSaver.input.${sessionId}`);
@@ -2135,6 +2232,30 @@ export class Repository {
     this.database
       .prepare("delete from messages where session_id = ? and seq >= ?")
       .run(sessionId, fromSeq);
+  }
+
+  replaceMessagesFromSeq(
+    sessionId: string,
+    fromSeq: number,
+    input: {
+      role: SessionMessage["role"];
+      parts: MessagePart[];
+      draftRevision?: string;
+      draftSessionId?: string;
+    },
+  ): SessionMessage {
+    this.database.exec("savepoint replace_conversation_tail");
+    try {
+      this.deleteMessagesFromSeq(sessionId, fromSeq);
+      const message = this.appendMessage({ sessionId, ...input });
+      this.database.exec("release replace_conversation_tail");
+      return message;
+    } catch (error) {
+      this.database.exec(
+        "rollback to replace_conversation_tail; release replace_conversation_tail",
+      );
+      throw error;
+    }
   }
 
   appendMessage(input: {
@@ -2376,6 +2497,7 @@ export class Repository {
       systemPrompt: asString(row.system_prompt),
       reasoningLevel: asNullableString(row.reasoning_level),
       permissionMode: asString(row.permission_mode) as PermissionMode,
+      chatNetworkEnabled: this.getSetting(chatNetworkEnabledKey(asString(row.id))) !== false,
       approvalMode:
         this.getSetting(`permissions.approval.${asString(row.id)}`) === "automatic"
           ? "automatic"

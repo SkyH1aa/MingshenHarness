@@ -15,6 +15,8 @@ import "./orbit-workbench.css";
 import "./model-catalog.css";
 import "./agent-modes.css";
 import "./quick-chat.css";
+import "./image-studio.css";
+import "./studio-navigation.css";
 
 const root = document.getElementById("root");
 const quickChatSurface =

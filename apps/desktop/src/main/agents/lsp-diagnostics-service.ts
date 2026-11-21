@@ -1,11 +1,12 @@
 import { type ChildProcess, execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { access } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { spawn } from "cross-spawn";
 import type { DiagnosticsReport, LspDiagnostic, ToolingServerStatus } from "../../shared/domain";
 import { APP_VERSION } from "../../shared/release";
+import { readGuardedFile } from "../workspace/guarded-workspace-io";
 import type { LspServerConfig } from "./project-config-service";
 
 interface LspMessage {
@@ -48,6 +49,9 @@ interface RuntimeServer {
   source: "builtin" | "project";
 }
 
+export const MAX_LSP_WORKSPACE_FILE_BYTES = 1024 * 1024;
+
+const LSP_CLOSE_TIMEOUT_MS = 5_000;
 const execFileAsync = promisify(execFile);
 
 async function exists(path: string): Promise<boolean> {
@@ -96,8 +100,31 @@ function messageText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function workspaceFile(
+  root: string,
+  input: string,
+): { absolutePath: string; relativePath: string } {
+  const normalizedRoot = resolve(root);
+  const absolutePath = resolve(normalizedRoot, input);
+  const local = relative(normalizedRoot, absolutePath);
+  if (!local || local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) {
+    throw new Error(`LSP 文件路径超出工作区：${input}`);
+  }
+  return {
+    absolutePath,
+    relativePath: local.replaceAll("\\", "/"),
+  };
+}
+
 class LspProcessClient {
   private readonly child: ChildProcess;
+  private readonly childClosed: Promise<void>;
+  private readonly failed: Promise<Error>;
+  private resolveFailure!: (error: Error) => void;
+  private terminalError: Error | null = null;
+  private processError: Error | null = null;
+  private closed = false;
+  private closing = false;
   private buffer = Buffer.alloc(0);
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
@@ -120,6 +147,16 @@ class LspProcessClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...server.environment },
     });
+    this.failed = new Promise((resolveFailure) => {
+      this.resolveFailure = resolveFailure;
+    });
+    this.childClosed = new Promise((resolveClose) => {
+      this.child.once("close", () => {
+        this.closed = true;
+        if (!this.closing) this.fail(new Error(`LSP ${server.id} 连接已关闭：${this.stderr}`));
+        resolveClose();
+      });
+    });
     this.child.stdout?.on("data", (chunk: Buffer) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.consume();
@@ -127,19 +164,34 @@ class LspProcessClient {
     this.child.stderr?.on("data", (chunk: Buffer) => {
       this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-12_000);
     });
-    this.child.on("error", (error) => this.fail(error));
+    this.child.on("error", (error) => {
+      this.processError ??= error;
+      this.fail(error);
+    });
     this.child.on("exit", (code) =>
       this.fail(new Error(`LSP ${server.id} 已退出 (${code})：${this.stderr}`)),
     );
-    this.child.stdin?.on("error", (error) => this.fail(error));
+    this.child.stdin?.on("error", (error) =>
+      this.fail(
+        new Error(`LSP ${server.id} 输入失败 (${command}): ${error.message}`, { cause: error }),
+      ),
+    );
   }
 
   private fail(error: Error): void {
+    if (!this.terminalError) {
+      this.terminalError = error;
+      this.resolveFailure(error);
+    }
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
-      request.reject(error);
+      request.reject(this.terminalError);
     }
     this.pending.clear();
+  }
+
+  private throwIfFailed(): void {
+    if (this.terminalError) throw this.terminalError;
   }
 
   async waitForDiagnostics(paths: string[]): Promise<void> {
@@ -148,6 +200,7 @@ class LspProcessClient {
     const expected = paths.map(normalizePath);
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
+      this.throwIfFailed();
       const received = new Set(
         [...this.diagnosticsByUri.keys()].map((uri) => normalizePath(uriToPath(uri))),
       );
@@ -156,13 +209,13 @@ class LspProcessClient {
         Date.now() - this.lastDiagnosticsAt >= 600
       )
         return;
-      if (this.child.exitCode !== null) throw new Error(`LSP 已退出：${this.stderr}`);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     }
     throw new Error(`LSP ${this.server.id} 未在 8 秒内发布所有文件诊断，不能确认检查通过。`);
   }
 
   async initialize(): Promise<void> {
+    this.throwIfFailed();
     if (this.initialized) {
       return;
     }
@@ -183,20 +236,40 @@ class LspProcessClient {
       initializationOptions: this.server.initialization,
       clientInfo: { name: "Mingshen Harness", version: APP_VERSION },
     });
+    this.throwIfFailed();
     this.notify("initialized", {});
     this.initialized = true;
   }
 
   async openFiles(paths: string[]): Promise<void> {
-    await this.initialize();
+    this.throwIfFailed();
+    const files = [];
     for (const path of paths) {
-      const content = await readFile(path, "utf8");
+      const target = workspaceFile(this.workspacePath, path);
+      const readController = new AbortController();
+      const guarded = await Promise.race([
+        readGuardedFile(this.workspacePath, target.relativePath, MAX_LSP_WORKSPACE_FILE_BYTES, {
+          signal: readController.signal,
+        }),
+        this.failed.then((error): never => {
+          readController.abort();
+          throw error;
+        }),
+      ]);
+      this.throwIfFailed();
+      files.push({
+        ...target,
+        content: new TextDecoder("utf-8", { fatal: true }).decode(guarded.buffer),
+      });
+    }
+    await this.initialize();
+    for (const file of files) {
       this.notify("textDocument/didOpen", {
         textDocument: {
-          uri: pathToFileURL(path).toString(),
-          languageId: languageId(path),
+          uri: pathToFileURL(file.absolutePath).toString(),
+          languageId: languageId(file.absolutePath),
           version: 1,
-          text: content,
+          text: file.content,
         },
       });
     }
@@ -215,19 +288,25 @@ class LspProcessClient {
     return this.stderr;
   }
 
+  failureText(error: unknown): string {
+    const message = messageText(error);
+    return this.processError && this.processError !== error
+      ? `${message}\n${this.processError.message}`
+      : message;
+  }
+
   async close(): Promise<void> {
-    for (const request of this.pending.values()) {
-      clearTimeout(request.timer);
-      request.reject(new Error("LSP connection closed."));
-    }
-    this.pending.clear();
-    const stopped =
-      this.child.exitCode !== null || this.child.signalCode !== null
-        ? Promise.resolve()
-        : new Promise<void>((done) => this.child.once("close", () => done()));
+    this.closing = true;
+    this.fail(new Error("LSP connection closed."));
     this.child.stdin?.end();
     let killed = Promise.resolve();
-    if (process.platform === "win32" && this.child.pid) {
+    if (
+      !this.closed &&
+      this.child.exitCode === null &&
+      this.child.signalCode === null &&
+      process.platform === "win32" &&
+      this.child.pid
+    ) {
       const killer = spawn("taskkill.exe", ["/PID", String(this.child.pid), "/T", "/F"], {
         windowsHide: true,
         stdio: "ignore",
@@ -239,13 +318,28 @@ class LspProcessClient {
         });
         killer.once("close", () => done());
       });
-    } else {
+    } else if (!this.closed && this.child.exitCode === null && this.child.signalCode === null) {
       this.child.kill();
     }
-    await Promise.all([stopped, killed]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([this.childClosed, killed]),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new Error(`LSP ${this.server.id} 清理未确认：进程或终止辅助进程尚未结束。`)),
+            LSP_CLOSE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
@@ -253,7 +347,11 @@ class LspProcessClient {
         rejectRequest(new Error(`LSP ${this.server.id} 请求 ${method} 超时。`));
       }, 15_000);
       this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -477,6 +575,18 @@ export class LspDiagnosticsService {
     configuredServers: LspServerConfig[] = [],
     onStart?: () => void,
   ): Promise<DiagnosticsReport | null> {
+    try {
+      for (const path of changedPaths) workspaceFile(workspacePath, path);
+    } catch (error) {
+      return {
+        ok: false,
+        engine: "workspace-path-guard",
+        servers: [],
+        durationMs: 0,
+        diagnostics: [],
+        error: messageText(error),
+      };
+    }
     const servers = await this.configuredRuntimeServers(workspacePath, configuredServers);
     const reports: Array<{
       server: RuntimeServer;
@@ -486,25 +596,34 @@ export class LspDiagnosticsService {
     const startedAt = Date.now();
 
     for (const server of servers) {
-      const files = changedPaths.filter((path) => matchesExtension(path, server.extensions));
+      const files = changedPaths
+        .filter((path) => matchesExtension(path, server.extensions))
+        .map((path) => workspaceFile(workspacePath, path).absolutePath);
       if (files.length === 0) {
         continue;
       }
       if (reports.length === 0) onStart?.();
       const client = new LspProcessClient(server, workspacePath);
+      let diagnostics: LspDiagnostic[] = [];
+      let failure: unknown = null;
+      let closeFailure: unknown = null;
       try {
         await client.openFiles(files);
         await client.waitForDiagnostics(files);
-        reports.push({ server, diagnostics: client.diagnostics(), error: null });
+        diagnostics = client.diagnostics();
       } catch (error) {
-        reports.push({
-          server,
-          diagnostics: [],
-          error: messageText(error) || client.stderrText(),
-        });
-      } finally {
-        await client.close();
+        failure = error;
       }
+      try {
+        await client.close();
+      } catch (error) {
+        closeFailure = error;
+      }
+      const errors = [
+        failure ? client.failureText(failure) || client.stderrText() : "",
+        closeFailure ? messageText(closeFailure) : "",
+      ].filter(Boolean);
+      reports.push({ server, diagnostics, error: errors.length > 0 ? errors.join("\n") : null });
     }
 
     if (reports.length === 0) {
@@ -530,25 +649,30 @@ export class LspDiagnosticsService {
     configuredServers: LspServerConfig[] = [],
   ): Promise<{ engine: string; result: unknown }> {
     const servers = await this.configuredRuntimeServers(workspacePath, configuredServers);
-    const target = resolve(workspacePath, input.path);
+    const target =
+      input.operation === "workspaceSymbol" ? null : workspaceFile(workspacePath, input.path);
     const server =
       input.operation === "workspaceSymbol"
         ? servers[0]
-        : servers.find((candidate) => matchesExtension(target, candidate.extensions));
+        : servers.find((candidate) =>
+            matchesExtension(target?.absolutePath ?? input.path, candidate.extensions),
+          );
     if (!server) {
-      throw new Error(`没有可用于 ${target} 的 LSP Server。`);
+      throw new Error(`没有可用于 ${target?.absolutePath ?? input.path} 的 LSP Server。`);
     }
     const client = new LspProcessClient(server, workspacePath);
+    let operationFailure: unknown = null;
+    let operationFailed = false;
+    let result: unknown;
     try {
-      if (input.operation !== "workspaceSymbol") await client.openFiles([target]);
+      if (target) await client.openFiles([target.absolutePath]);
       const position = {
         line: Math.max(0, (input.line ?? 1) - 1),
         character: Math.max(0, (input.column ?? 1) - 1),
       };
       const textDocument = {
-        uri: pathToFileURL(target).toString(),
+        uri: pathToFileURL(target?.absolutePath ?? input.path).toString(),
       };
-      let result: unknown;
       switch (input.operation) {
         case "definition":
           result = await client.query("textDocument/definition", {
@@ -586,10 +710,28 @@ export class LspDiagnosticsService {
           });
           break;
       }
-      return { engine: server.id, result };
-    } finally {
-      await client.close();
+    } catch (error) {
+      operationFailure = error;
+      operationFailed = true;
     }
+    try {
+      await client.close();
+    } catch (error) {
+      if (operationFailed) {
+        throw new Error(`${client.failureText(operationFailure)}\n${messageText(error)}`, {
+          cause: operationFailure,
+        });
+      }
+      throw error;
+    }
+    if (operationFailed) {
+      const message = client.failureText(operationFailure);
+      if (operationFailure instanceof Error && message === operationFailure.message) {
+        throw operationFailure;
+      }
+      throw new Error(message, { cause: operationFailure });
+    }
+    return { engine: server.id, result };
   }
 
   private async configuredRuntimeServers(

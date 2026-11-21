@@ -1,12 +1,14 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { explicitPreferences, isMemoryPath, ProjectMemoryService } from "./project-memory-service";
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -16,6 +18,31 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "mingshen-memory-"));
   roots.push(root);
   return { root, memory: new ProjectMemoryService() };
+}
+
+async function blockNextWrite(memory: ProjectMemoryService) {
+  const internal = memory as unknown as {
+    write: (root: string, file: string, text: string, expected?: string) => Promise<void>;
+  };
+  const original = internal.write.bind(memory);
+  let release: () => void = () => undefined;
+  let started: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let first = true;
+  vi.spyOn(internal, "write").mockImplementation(async (...args) => {
+    if (first) {
+      first = false;
+      started();
+      await gate;
+    }
+    await original(...args);
+  });
+  return { blocked, release };
 }
 
 describe("project memory service", () => {
@@ -84,6 +111,102 @@ describe("project memory service", () => {
     const view = await memory.view(root, true);
     expect(view.documents.index).toContain("manual-preferences");
     expect(view.documents.index).toContain("payment");
+  });
+
+  it.each(["disabled", "backend changed"] as const)(
+    "does not commit a queued append after the target becomes %s",
+    async (change) => {
+      const { root, memory } = await fixture();
+      const writer = await blockNextWrite(memory);
+      const first = memory.add(root, "memory", "Queue blocker decision.");
+      await writer.blocked;
+      let state = "enabled";
+      let checks = 0;
+      const second = memory.add(
+        root,
+        "memory",
+        "Queued memory must not be committed after the target changes.",
+        "decision",
+        undefined,
+        () => {
+          checks++;
+          return state === "enabled";
+        },
+      );
+      state = change === "disabled" ? "disabled" : "tencentdb";
+      writer.release();
+
+      await expect(second).resolves.toBeNull();
+      await first;
+      expect(checks).toBeGreaterThanOrEqual(2);
+      expect((await memory.view(root, true)).documents.memory).not.toContain(
+        "Queued memory must not be committed",
+      );
+    },
+  );
+
+  it.each(["timeout", "cancellation"] as const)(
+    "does not commit a queued append after %s",
+    async (stop) => {
+      const { root, memory } = await fixture();
+      const writer = await blockNextWrite(memory);
+      const first = memory.add(root, "memory", "Queue blocker decision.");
+      await writer.blocked;
+      const controller = new AbortController();
+      const signal =
+        stop === "timeout"
+          ? AbortSignal.any([controller.signal, AbortSignal.timeout(30)])
+          : controller.signal;
+      const second = memory.add(
+        root,
+        "memory",
+        "Queued memory must not be committed after the deadline.",
+        "decision",
+        signal,
+      );
+      try {
+        if (stop === "timeout") await delay(60);
+        else controller.abort();
+      } finally {
+        writer.release();
+      }
+
+      await expect(second).rejects.toMatchObject({
+        name: stop === "timeout" ? "TimeoutError" : "AbortError",
+      });
+      await first;
+      expect((await memory.view(root, true)).documents.memory).not.toContain(
+        "Queued memory must not be committed after the deadline.",
+      );
+    },
+  );
+
+  it("rechecks commit eligibility immediately before atomic replacement", async () => {
+    const { root, memory } = await fixture();
+    await memory.ensure(root);
+    const internal = memory as unknown as {
+      write: (
+        root: string,
+        file: string,
+        text: string,
+        expected?: string,
+        beforeCommit?: () => boolean,
+      ) => Promise<boolean>;
+    };
+    let checks = 0;
+    const pending = internal.write(
+      root,
+      "memory.md",
+      "# Project diary\n\nThis replacement must not commit.\n",
+      undefined,
+      () => ++checks < 2,
+    );
+
+    await expect(pending).resolves.toBe(false);
+    expect(checks).toBe(2);
+    expect(await readFile(join(root, ".harness-memory", "memory.md"), "utf8")).not.toContain(
+      "This replacement must not commit",
+    );
   });
 
   it("archives older summaries without truncating their conclusions", async () => {

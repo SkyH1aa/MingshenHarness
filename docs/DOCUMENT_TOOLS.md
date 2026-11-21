@@ -1,6 +1,6 @@
-# 1.3.3 文档工具能力与用法
+# 1.3.4 文档工具能力与用法
 
-首次联网核对：2026-11-10；最后更新：2026-11-17。本文描述当前源码支持的能力，不代表任意 Office 文档、完整 TeX 或所有排版场景都已验证。当前测试及未完成边界见 [1.3.3 验证记录](VALIDATION_1.3.3.md)，此前的文档工具验证见 [1.3.2 验证记录](VALIDATION_1.3.2.md)及 [1.3.1 验证记录](VALIDATION_1.3.1.md)。
+首次联网核对：2026-11-10；最后更新：2026-11-20。本文描述当前源码支持的能力，不代表任意 Office 文档、完整 TeX 或所有排版场景都已验证。1.3.4 当前验证见 [1.3.4 验证记录](VALIDATION_1.3.4.md)；文档工具功能基线见 [1.3.3 验证记录](VALIDATION_1.3.3.md)，更早验证见 [1.3.2 验证记录](VALIDATION_1.3.2.md)及 [1.3.1 验证记录](VALIDATION_1.3.1.md)。
 
 ## 工具选择
 
@@ -28,7 +28,9 @@ DOCX 的目录和页码属于真实字段，准确目录页码需要在 Word 中
 
 ## WorkAgent Office 文件操作
 
-`office_document` 将结构检查、结构化编辑和可选的宿主 Office 验证放在同一个受控工具中。所有路径都来自当前工作区并经过读取/写入审批、版本冲突检查、writer lease 和原子提交；不因为传入 Office 文件而增加任意本地路径权限。
+`office_document` 将结构检查、结构化编辑和可选的宿主 Office 验证放在同一个受控工具中。所有路径都来自当前工作区并经过读取/写入审批、版本冲突检查、writer lease、受控提交和失败恢复；不因为传入 Office 文件而增加任意本地路径权限。一次 Excel 请求的全部创建、范围、样式、合并、表格和版式操作共享累计工作量预算，不能通过拆分很多“看似合法”的 range 让主进程长时间处理。公式必须通过主动函数与外部引用策略检查；这是 defense-in-depth 静态防护，不是对任意公式安全的证明。未知函数、混淆表达式及 Office 自身行为仍须依赖包边界、可选 COM 验证和人工复核。
+
+宿主文档覆盖会固定旧目标句柄、拒绝外部写入和替换，在核对源 SHA-256 后把旧目标改名为同目录 `.bak`，再提交同目录新临时文件，并按请求路径重开核对 identity、大小和哈希。正常取消、超时或提交失败会调用 `recover-write` 尝试恢复旧内容；应用正在关闭时 worker 会按设计进入不可用状态，不能保证自动恢复，此时结果明确返回 `RECOVERY_STATE: unavailable` 和 `RECOVERY_BACKUP` 路径，旧 `.bak` 保留且不会返回成功写入回执。Windows 的分步重命名之间仍有一个极短 gap，断电/崩溃或绕过受保护句柄的外部进程竞争不在无间隙事务保证内，因此这里使用“受控提交与失败恢复”，不宣称断电级原子覆盖，也不宣称关机时始终自动恢复。
 
 ### 检查文件
 
@@ -80,7 +82,7 @@ DOCX 的目录和页码属于真实字段，准确目录页码需要在 Word 中
 }
 ```
 
-创建和编辑支持字体、填充、边框、对齐、数字格式、单元格公式、合并/取消合并、列宽/隐藏、冻结窗格、筛选及原生 Excel 表格。`workbook.design` 和 sheet 的 `presentation` 提供 `executive`、`consulting`、`editorial`、`minimal` 四种成套报表表面；`title_range/header_range/body_range` 分别设置标题、表头和正文区，另可关闭网格线、设置打印区域、重复标题行、页面方向和单页宽度适配。这些范围必须由调用者根据真实内容指定，生成器不会把空白区当成设计元素。公式对象中的 `formula` 会写入工作簿；调用者提供的 `result` 即使出现在文件中，也只是缓存初值，不能证明公式已由 Microsoft Excel 重算。
+创建和编辑支持字体、填充、边框、对齐、数字格式、单元格公式、合并/取消合并、列宽/隐藏、冻结窗格、筛选及原生 Excel 表格。单次请求最多计入 100,000 个工作表单元格工作量；多表创建、范围编辑、样式、合并、表格和版式范围都从同一预算扣除，超过后整次请求拒绝。`workbook.design` 和 sheet 的 `presentation` 提供 `executive`、`consulting`、`editorial`、`minimal` 四种成套报表表面；`title_range/header_range/body_range` 分别设置标题、表头和正文区，另可关闭网格线、设置打印区域、重复标题行、页面方向和单页宽度适配。这些范围必须由调用者根据真实内容指定，生成器不会把空白区当成设计元素。公式对象中的 `formula` 会写入工作簿；调用者提供的 `result` 即使出现在文件中，也只是缓存初值，不能证明公式已由 Microsoft Excel 重算。
 
 先 `inspect` 既有 XLSX，取得完整 SHA-256，再执行 SHA 绑定的编辑：
 
@@ -106,7 +108,7 @@ DOCX 的目录和页码属于真实字段，准确目录页码需要在 Word 中
 }
 ```
 
-支持的操作包括 `add_sheet`、`rename_sheet`、`delete_sheet`、`set_cells`、`set_range`、`append_rows`、`style_range`、`merge_range`、`unmerge_range`、`set_columns`、`freeze`、`filter`、`add_table` 和 `format_sheet`。源 SHA 不匹配会拒绝整次编辑。未参与 ExcelJS 编辑的其他 OOXML 部件按源字节恢复；宏、签名、ActiveX、OLE、外部连接、透视缓存、切片器和 Web Extension 会在编辑前拒绝，而不是静默破坏。
+支持的操作包括 `add_sheet`、`rename_sheet`、`delete_sheet`、`set_cells`、`set_range`、`append_rows`、`style_range`、`merge_range`、`unmerge_range`、`set_columns`、`freeze`、`filter`、`add_table` 和 `format_sheet`。源 SHA 不匹配会拒绝整次编辑。未参与 ExcelJS 编辑的其他 OOXML 部件按源字节恢复；宏、签名、ActiveX、OLE、外部连接、透视缓存、切片器和 Web Extension 会在编辑前拒绝，而不是静默破坏。公式还会拒绝 `WEBSERVICE`、RTD、`DDE`/`DDEAUTO`、classic DDE `app|topic!item`、`IMAGE`、`STOCKHISTORY`、`CUBE*`、EXEC、CALL、`EXTERNAL`、外部工作簿 `[book.xlsx]Sheet1!A1`、URL、UNC 或本机绝对引用，避免打开、重算或渲染触发主动外部行为。普通结构化表引用（例如 `SUM(Sales[Revenue])`、`[@Amount]`）和常规 `SUM`/`IF` 公式不受这条括号规则影响。
 
 ### PPTX 旧稿受控编辑
 
@@ -150,11 +152,11 @@ DOCX 的目录和页码属于真实字段，准确目录页码需要在 Word 中
 | `output_path` | 未设置 | 必须是 `.xlsx`，只用于保存重算后的工作簿 |
 | `overwrite` | `false` | PDF/XLSX 输出已存在时默认拒绝覆盖 |
 
-结构检查始终先执行。宿主 COM 只在 Windows、`full_access + host + WorkAgent + 非子 Agent` 时尝试；必须已安装对应 Microsoft Office，不在后台安装 Office，也不调用用户可见的浏览器或云端转换器。检测到同类 Office 已运行时直接降级并保留结构检查，不关闭用户现有 Office 会话。应用为每次 COM 验证创建独立临时副本，并在启动自动化前检查 OOXML 的非普通超链接外部关系、Word 跨 run 自动字段以及 XLSX 数据连接部件；命中时仍完成结构检查，但不打开 COM，避免在验证过程中解析外部模板、图片、数据或自动内容。普通超链接可保留，此预检只约束可选 COM 路径，不改变普通 `inspect/edit` 的既有支持范围。
+结构检查始终先执行。宿主 COM 只在 Windows、`full_access + host + WorkAgent + 非子 Agent` 时尝试；必须已安装对应 Microsoft Office，不在后台安装 Office，也不调用用户可见的浏览器或云端转换器。检测到同类 Office 已运行时直接降级并保留结构检查，不关闭用户现有 Office 会话。应用为每次 COM 验证创建独立临时副本，并在启动自动化前检查 OOXML 的非普通超链接外部关系、Word 主动字段以及 XLSX 数据连接部件；命中时仍完成结构检查，但不打开 COM，避免在验证过程中解析外部模板、图片、数据或自动内容。Word 字段会按 `fldChar begin/end` 聚合跨多个 `instrText` run 的原文且不插入额外空格，`fldSimple` 另行检查，因此被拆分到多个 run 的 `INCLUDETEXT`、`INCLUDEPICTURE`、`DDEAUTO`、`DATABASE`、`LINK`、`EMBED` 和 `MACROBUTTON` 仍会被拒绝。普通超链接可保留，此预检只约束可选 COM 路径，不改变普通 `inspect/edit` 的既有支持范围。嵌入式 XLSX 会在 COM 前递归检查包结构、危险公式和主动内容，并在解压前校验 ZIP 中央目录；它与其他嵌入包共享最多 64 个归档、4,000 个条目、100 MiB 声明解压量和四层递归预算。
 
 COM 实例的接管顺序是：创建隐藏实例、由 HWND 精确确认 PID/名称/可执行路径/创建时间和 `/Automation -Embedding` 命令行、检查 `Documents/Workbooks/Presentations.Count` 为零，全部成立后才写入可清理的 owner 记录并打开文档。实例非空或无法证明为空时不登记 owner，因此不会按该 PID 清理，也不会对其文档执行 `Close/Quit`；已有实例身份不匹配时同样不会按进程名结束。只有成功登记的本次实例会在正常退出、超时或取消后再次核对完整身份，再进行精确清理。失败与超时会移除隔离路径并报告脱敏后的最后阶段，例如创建实例、打开、重算或渲染，便于区分产品错误与 Office 权限、激活或隔离限制；阶段诊断本身不构成渲染通过。
 
-Excel 的真实重算结果会检查公式错误值和缺失缓存；只有 Microsoft Excel 返回并保存的工作簿才算重算证据。`render_path` 生成的是导出文件，仍需视觉能力逐页检查裁切、重叠、分页和字体替换。Word/PowerPoint 的实际渲染同样不能由 OOXML 结构检查替代；Office 未安装、正在使用、被权限/隔离策略阻止或超时，都必须在结果中标记“未验证”，不能报成渲染通过。
+验证结果包含独立的整体、渲染和重算状态。整体状态为 `verified / partial / unavailable / failed`，渲染为 `verified / not_requested / unavailable / failed`，重算另有 `partial`。只有三项请求都得到能复核的证据时整体才可为 `verified`；超过 2,000 个非空单元格导致公式扫描截断时为 `partial`，任何非 `verified` 的整体状态都会让工具结果明确判错。Excel 的真实重算结果会检查公式错误值和缺失缓存；只有 Microsoft Excel 返回并保存的工作簿才算重算证据。`render_path` 生成的是导出文件，仍需视觉能力逐页检查裁切、重叠、分页和字体替换。Word/PowerPoint 的实际渲染同样不能由 OOXML 结构检查替代；Office 未安装、正在使用、被权限/隔离策略阻止或超时，都必须在结果中标记 `unavailable`/`failed`，不能报成渲染通过。
 
 ### PPTX 原生排版
 
@@ -347,6 +349,8 @@ DOCX 和 PPTX 支持横向条形、柱形、折线与饼图，保留图表及内
 
 默认另存，原稿读取仍需独立权限及审批。行内修改/排版/删除只改变 `word/document.xml` 的内容，其余包内部件保留原始字节；插入新富内容时，必要的正文关系、样式、编号和脚注等部件可能更新，无关页眉、页脚、媒体、原图表和元数据按原部件保留。ZIP 与正文 XML 会重新序列化，不能承诺文件字节相同、任意 Office 扩展无损往返或改字后分页完全不变；复杂受保护结构会拒绝而非自动扁平化。
 
+受控 DOCX 编辑还会拒绝外部非普通超链接关系、附加模板、子文档、OLE/包对象、ActiveX、`altChunk` 以及 `INCLUDETEXT`、`INCLUDEPICTURE`、DDE、LINK、DATABASE、EMBED、MACROBUTTON 等主动字段。普通超链接、图表和受支持的嵌入 XLSX 仍可保留。新增 PNG/JPEG 会在写入包前检查分块、尺寸声明、CRC/结束标记或 JPEG 段与 EOI，明显截断和损坏图片会拒绝生成。
+
 ## 精细排版
 
 DOCX/PDF 的 `heading`、`paragraph`、`rich_paragraph`、`equation` 可传 `layout`，同一结构也用于旧稿 `format_paragraph`：
@@ -370,11 +374,14 @@ DOCX/PDF 的 `heading`、`paragraph`、`rich_paragraph`、`equation` 可传 `lay
 
 ## 容量和权限
 
-- 单次参数最多 1 MiB，文字最多 500,000 字符、内容块合计最多 1,000 个，输出最多 25 MiB，图片总计最多 20 MiB，PPTX 最多 100 张。
+- 单次参数最多 1 MiB，文字最多 500,000 字符、内容块合计最多 1,000 个，输出最多 25 MiB，图片总计最多 20 MiB，PPTX 最多 100 张。Excel 结构化请求的累计单元格工作量最多 100,000。
+- DOCX/XLSX/XLS/PPTX/ODT/PDF 解析在最多两个并发 worker 中执行，单个 worker 堆上限 384 MB，实际解析最多 180 秒并可取消。单个输入文件上限 25 MiB；ZIP 拒绝绝对路径、`..`、空段、反斜杠、ADS 冒号、NUL、重复条目和 Unix 符号链接，并限制 4,000 个条目、100 MiB 总解压量与 32 MiB 单条目。
+- XML 解析拒绝 `DOCTYPE/ENTITY`。PPTX 必须包含 `ppt/presentation.xml` 和至少一页；XLSX 提取最多 200 个工作表、5,000 行、256 列、50,000 个单元格和 120,000 个文本字符。PDF 视觉渲染达到 20 MiB 图片预算后停止处理后续页面，剩余页面明确标注未查看。
+- 文本附件以 fatal UTF-8 解码，并拒绝 NUL 和二进制控制字符；普通 ZIP 不能伪装成空 PPTX，损坏或截断的 PNG/JPEG 不能进入生成文档。
 - 每个结构化表格单元格最多 50 个块、合计 20,000 个文字字符；单元格内容计入文档总量，模板填充使用相同限制。
 - 单个 Markdown 块最多 100,000 字符、5,000 个解析节点、128 个公式；单公式最多 10,000 字符，花括号嵌套最多 64 层。
 - 图片只从经批准的工作区路径读取。生成不会从 Markdown/HTML 地址获取远程媒体。
-- 既有 Plan、patch-only、Agent profile、审批、隔离、writer lease、原子提交、版本冲突和取消边界保持。新增格式能力不扩大文件授权。
+- 既有 Plan、patch-only、Agent profile、审批、隔离、writer lease、受控提交与失败恢复、版本冲突和取消边界保持。新增格式能力不扩大文件授权。
 - 生成成功后回读实际文件。结构检查证明原生元素和关联存在；Word/PowerPoint 视觉及交互验收需用相应排版引擎另行验证，不能用 Mammoth HTML 或 XML 检查冒充。
 
 ## 开发验证

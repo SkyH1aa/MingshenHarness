@@ -328,6 +328,178 @@ describe("provider-native continuation state", () => {
     expect(replayProviderState(onlyUi, value.provider, value.model)).toBeNull();
   });
 
+  it("supplies an empty reasoning_content field for synthetic DeepSeek thinking tool turns", async () => {
+    const value = input("deepseek");
+    value.messages.push(
+      message("assistant", [
+        {
+          type: "tool_call",
+          callId: "synthetic-call",
+          name: "read_file",
+          arguments: '{"path":"file.ts"}',
+          status: "completed",
+        },
+      ]),
+      message("tool", [
+        {
+          type: "tool_result",
+          callId: "synthetic-call",
+          output: "Read contents",
+          isError: false,
+        },
+      ]),
+    );
+    const fetcher = mock([
+      chunk({ content: "Done", reasoning_content: "Final reasoning" }, "stop"),
+      "[DONE]",
+    ]);
+
+    await collect(value);
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1].body));
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.messages[2]).toMatchObject({
+      role: "assistant",
+      content: null,
+      reasoning_content: "",
+      tool_calls: [
+        {
+          id: "synthetic-call",
+          type: "function",
+          function: {
+            name: "read_file",
+            arguments: '{"path":"file.ts"}',
+          },
+        },
+      ],
+    });
+  });
+
+  it("does not add DeepSeek reasoning_content when thinking is disabled", async () => {
+    const value = input("deepseek");
+    value.reasoningLevel = "none";
+    value.messages.push(
+      message("assistant", [
+        {
+          type: "tool_call",
+          callId: "synthetic-call",
+          name: "read_file",
+          arguments: "{}",
+          status: "completed",
+        },
+      ]),
+      message("tool", [
+        {
+          type: "tool_result",
+          callId: "synthetic-call",
+          output: "Read contents",
+          isError: false,
+        },
+      ]),
+    );
+    const fetcher = mock([chunk({ content: "Done" }, "stop"), "[DONE]"]);
+
+    await collect(value);
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1].body));
+    expect(body.thinking).toEqual({ type: "disabled" });
+    expect(body.messages[2]).not.toHaveProperty("reasoning_content");
+  });
+
+  it("keeps DeepSeek default-mode tool history valid when reasoning level is null", async () => {
+    const value = input("deepseek");
+    value.reasoningLevel = null;
+    value.model.reasoningLevels = [];
+    value.messages.push(
+      message("assistant", [
+        {
+          type: "tool_call",
+          callId: "synthetic-call",
+          name: "read_file",
+          arguments: "{}",
+          status: "completed",
+        },
+      ]),
+      message("tool", [
+        {
+          type: "tool_result",
+          callId: "synthetic-call",
+          output: "Read contents",
+          isError: false,
+        },
+      ]),
+    );
+    const fetcher = mock([chunk({ content: "Done" }, "stop"), "[DONE]"]);
+
+    await collect(value);
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1].body));
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body.messages[2]).toMatchObject({
+      role: "assistant",
+      content: null,
+      reasoning_content: "",
+      tool_calls: [{ id: "synthetic-call" }],
+    });
+  });
+
+  it("collapses marked execution-chain steps into the root DeepSeek tool result", async () => {
+    const value = input("deepseek");
+    value.messages.push(
+      message("assistant", [
+        {
+          type: "tool_call",
+          callId: "chain-root",
+          name: "execute_tool_chain",
+          arguments: '{"steps":[]}',
+          status: "completed",
+        },
+      ]),
+      message("tool", [
+        {
+          type: "tool_result",
+          callId: "chain-root",
+          output: "Execution chain accepted",
+          isError: false,
+        },
+      ]),
+      message("assistant", [
+        {
+          type: "tool_call",
+          callId: "chain-step",
+          name: "read_file",
+          arguments: '{"path":"file.ts"}',
+          status: "completed",
+          synthetic: true,
+          chainRootCallId: "chain-root",
+        },
+      ]),
+      message("tool", [
+        {
+          type: "tool_result",
+          callId: "chain-step",
+          output: "Read contents",
+          isError: false,
+          synthetic: true,
+          chainRootCallId: "chain-root",
+        },
+      ]),
+    );
+    const fetcher = mock([chunk({ content: "Done" }, "stop"), "[DONE]"]);
+
+    await collect(value);
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1].body));
+    expect(body.messages).toHaveLength(4);
+    expect(JSON.stringify(body)).not.toContain("chain-step");
+    expect(body.messages[3]).toMatchObject({
+      role: "tool",
+      tool_call_id: "chain-root",
+      content: expect.stringContaining("Read contents"),
+    });
+  });
+
   it("ignores nullable DeepSeek reasoning placeholders after real thinking deltas", async () => {
     const value = input("deepseek");
     mock([

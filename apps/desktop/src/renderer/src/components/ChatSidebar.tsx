@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  LoaderCircle,
   MessageCircle,
   MoreHorizontal,
   Pencil,
@@ -28,7 +29,9 @@ interface ChatSidebarProps {
   groups: ChatGroupView[];
   selectedSessionId: string | null;
   onSelect: (sessionId: string) => void;
-  onNewChat: (groupId?: string | null) => void;
+  onNewChat: (groupId: string | null) => void;
+  creatingChatSession: boolean;
+  chatSessionError: string;
   onLoadSessions: (sessions: SessionView[]) => void;
   onPatch: (input: SessionUpdateInput) => Promise<SessionView>;
   onRemove: (sessionId: string) => Promise<void>;
@@ -85,6 +88,8 @@ export function ChatSidebar({
   selectedSessionId,
   onSelect,
   onNewChat,
+  creatingChatSession,
+  chatSessionError,
   onLoadSessions,
   onPatch,
   onRemove,
@@ -259,6 +264,17 @@ export function ChatSidebar({
     });
   };
 
+  const newChat = (groupId: string | null) => {
+    if (creatingChatSession) return;
+    setSearch("");
+    setCollapsed((current) => {
+      const next = new Set(current);
+      next.delete(groupId ?? "ungrouped");
+      return next;
+    });
+    onNewChat(groupId);
+  };
+
   return (
     <aside
       className="chat-sidebar"
@@ -277,26 +293,39 @@ export function ChatSidebar({
           aria-label={tr("新建对话")}
           title={tr("新建对话")}
           data-testid="new-chat"
-          onClick={() => onNewChat(null)}
+          disabled={creatingChatSession}
+          aria-busy={creatingChatSession}
+          onClick={() => newChat(null)}
         >
-          <Plus size={17} />
+          {creatingChatSession ? (
+            <LoaderCircle className="spin" size={17} aria-hidden="true" />
+          ) : (
+            <Plus size={17} aria-hidden="true" />
+          )}
         </button>
       </header>
-      <label className="chat-sidebar__search">
-        <Search size={14} aria-hidden="true" />
-        <input
-          type="search"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={tr("搜索对话")}
-          aria-label={tr("搜索对话")}
-        />
-        {search ? (
-          <button type="button" aria-label={tr("清除搜索")} onClick={() => setSearch("")}>
-            <X size={13} />
-          </button>
+      <div className="chat-sidebar__controls">
+        <label className="chat-sidebar__search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={tr("搜索对话")}
+            aria-label={tr("搜索对话")}
+          />
+          {search ? (
+            <button type="button" aria-label={tr("清除搜索")} onClick={() => setSearch("")}>
+              <X size={13} />
+            </button>
+          ) : null}
+        </label>
+        {chatSessionError ? (
+          <p className="chat-sidebar__error" role="alert">
+            {chatSessionError}
+          </p>
         ) : null}
-      </label>
+      </div>
       <div className="chat-sidebar__scroll">
         <button
           className="chat-group-create"
@@ -346,11 +375,24 @@ export function ChatSidebar({
                   type="button"
                   onClick={() => toggleGroup(group.id)}
                   aria-expanded={!groupCollapsed}
+                  title={group.name}
                 >
                   {groupCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
                   <Folder size={13} aria-hidden="true" />
                   <span>{group.name}</span>
                   <code>{rows.length}</code>
+                </button>
+                <button
+                  className="icon-button icon-button--small"
+                  type="button"
+                  aria-label={tr("在 {0} 中新建对话", [group.name])}
+                  title={tr("在 {0} 中新建对话", [group.name])}
+                  data-testid="chat-group-new"
+                  disabled={creatingChatSession}
+                  aria-busy={creatingChatSession}
+                  onClick={() => newChat(group.id)}
+                >
+                  <Plus size={14} aria-hidden="true" />
                 </button>
                 <button
                   className="icon-button icon-button--small"
@@ -390,18 +432,32 @@ export function ChatSidebar({
           );
         })}
 
-        <section className="chat-session-group">
-          <button
-            className="chat-session-group__heading"
-            type="button"
-            onClick={() => toggleGroup("ungrouped")}
-            aria-expanded={!collapsed.has("ungrouped")}
-          >
-            {collapsed.has("ungrouped") ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-            <MessageCircle size={13} aria-hidden="true" />
-            <span>{tr("未分组")}</span>
-            <code>{(grouped.get("") ?? []).length}</code>
-          </button>
+        <section className="chat-session-group" data-chat-group-id="">
+          <div className="chat-session-group__header chat-session-group__header--ungrouped">
+            <button
+              className="chat-session-group__heading"
+              type="button"
+              onClick={() => toggleGroup("ungrouped")}
+              aria-expanded={!collapsed.has("ungrouped")}
+            >
+              {collapsed.has("ungrouped") ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+              <MessageCircle size={13} aria-hidden="true" />
+              <span>{tr("未分组")}</span>
+              <code>{(grouped.get("") ?? []).length}</code>
+            </button>
+            <button
+              className="icon-button icon-button--small"
+              type="button"
+              aria-label={tr("在 {0} 中新建对话", [tr("未分组")])}
+              title={tr("在 {0} 中新建对话", [tr("未分组")])}
+              data-testid="chat-group-new"
+              disabled={creatingChatSession}
+              aria-busy={creatingChatSession}
+              onClick={() => newChat(null)}
+            >
+              <Plus size={14} aria-hidden="true" />
+            </button>
+          </div>
           {!collapsed.has("ungrouped")
             ? (grouped.get("") ?? []).map((session) => (
                 <ChatRow

@@ -2,11 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_CHAT_ATTACHMENT_BYTES, MAX_CHAT_ATTACHMENTS } from "../../shared/attachments";
 import type { ComposerDraftAttachment, SaveComposerDraftInput } from "../../shared/composer-draft";
 import {
   COMPOSER_DRAFT_CONFLICT_CODE,
   MAX_COMPOSER_ATTACHMENT_BYTES,
 } from "../../shared/composer-draft";
+import { ToolOutputStore } from "../chat/tool-output-store";
 import { openDatabase } from "./database";
 import { Repository } from "./repository";
 
@@ -63,6 +65,19 @@ describe("SQLite composer drafts", () => {
     repository = new Repository(database);
   });
   afterEach(() => database.close());
+
+  it("removes persisted workflow state for deleted conversations", () => {
+    const session = createSession(repository);
+    repository.setSetting(`coordination.state.${session.id}`, { status: "running" });
+    repository.setSetting(`session.project-context.${session.id}`, { branch: "fixture" });
+    repository.setSetting("coordination.state.other", { keep: true });
+
+    repository.removeSession(session.id);
+
+    expect(repository.getSetting(`coordination.state.${session.id}`)).toBeNull();
+    expect(repository.getSetting(`session.project-context.${session.id}`)).toBeNull();
+    expect(repository.getSetting("coordination.state.other")).toEqual({ keep: true });
+  });
 
   it("restores independent text, formatting and exact attachment bytes across database launches", async () => {
     const root = await mkdtemp(join(tmpdir(), "mingshen-composer-db-"));
@@ -251,6 +266,66 @@ describe("SQLite composer drafts", () => {
     expect(repository.getComposerDraft(second.id)).toBeNull();
   });
 
+  it("rejects more than ten final draft attachments without replacing the saved draft", () => {
+    const session = createSession(repository);
+    const original = attachment("original");
+    repository.saveComposerDraft(
+      draft(session.id, {
+        attachmentIds: [original.id],
+        addedAttachments: [original],
+      }),
+    );
+    const additions = Array.from({ length: MAX_CHAT_ATTACHMENTS + 1 }, (_, index) =>
+      attachment(`batch-${index}`, Buffer.alloc(0)),
+    );
+
+    expect(() =>
+      repository.saveComposerDraft(
+        draft(session.id, {
+          revision: "too-many",
+          attachmentIds: additions.map((file) => file.id),
+          addedAttachments: additions,
+        }),
+      ),
+    ).toThrow(new RegExp(`最多保留 ${MAX_CHAT_ATTACHMENTS} 个附件`));
+    expect(repository.getComposerDraft(session.id)).toMatchObject({
+      revision: "revision-1",
+      attachments: [original],
+    });
+    expect(repository.getSetting(`composer.draft-attachment.${session.id}.batch-0`)).toBeNull();
+  });
+
+  it("rejects a final draft attachment batch over 50 MiB without replacing stored metadata", () => {
+    const session = createSession(repository);
+    const original = attachment("original", Buffer.alloc(0));
+    repository.saveComposerDraft(
+      draft(session.id, {
+        attachmentIds: [original.id],
+        addedAttachments: [original],
+      }),
+    );
+    const ids = ["large-a", "large-b", "large-c"];
+    const originalGetSetting = repository.getSetting.bind(repository);
+    vi.spyOn(repository, "getSetting").mockImplementation((key) => {
+      if (ids.some((id) => key === `composer.draft-attachment.${session.id}.${id}`))
+        return { size: MAX_CHAT_ATTACHMENT_BYTES - 1 };
+      return originalGetSetting(key);
+    });
+
+    expect(() =>
+      repository.saveComposerDraft(
+        draft(session.id, {
+          revision: "too-large",
+          attachmentIds: ids,
+        }),
+      ),
+    ).toThrow(/总大小不能超过 50 MiB/);
+    expect(repository.getComposerDraft(session.id)).toMatchObject({
+      revision: "revision-1",
+      attachments: [original],
+    });
+  });
+
   it("rolls attachment additions and metadata back together after a SQLite write failure", () => {
     const session = createSession(repository);
     const old = attachment("old");
@@ -390,6 +465,130 @@ describe("SQLite composer drafts", () => {
     expect(repository.getSetting(`fixture.tool.output.${target.id}.call-1`)).toEqual({
       output: "unrelated",
     });
+  });
+
+  it("removes saved run guidance only for the deleted session", () => {
+    const target = createSession(repository);
+    const other = createSession(repository);
+    const savedGuidance = { text: "Keep the requested output format", status: "unapplied" };
+    repository.setSetting(`runSteering.v1.${target.id}`, savedGuidance);
+    repository.setSetting(`runSteering.v1.${other.id}`, savedGuidance);
+
+    repository.removeSession(target.id);
+
+    expect(repository.getSetting(`runSteering.v1.${target.id}`)).toBeNull();
+    expect(repository.getSetting(`runSteering.v1.${other.id}`)).toEqual(savedGuidance);
+  });
+
+  it("atomically replaces a conversation tail and clears only its retained tool outputs", () => {
+    const session = createSession(repository);
+    const keep = repository.appendMessage({
+      sessionId: session.id,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool_call",
+          callId: "keep-call",
+          name: "read_file",
+          arguments: "{}",
+          status: "completed",
+        },
+      ],
+    });
+    const replace = repository.appendMessage({
+      sessionId: session.id,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool_call",
+          callId: "replace-call",
+          name: "read_file",
+          arguments: "{}",
+          status: "completed",
+        },
+      ],
+    });
+    const outputs = new ToolOutputStore(repository);
+    outputs.save(session.id, "keep-call", "keep output");
+    outputs.save(session.id, "replace-call", "replace output");
+
+    const replacement = repository.replaceMessagesFromSeq(session.id, replace.seq, {
+      role: "user",
+      parts: [{ type: "text", text: "Replacement" }],
+    });
+
+    expect(replacement).toMatchObject({ seq: replace.seq, role: "user" });
+    expect(repository.getMessages(session.id)).toEqual([keep, replacement]);
+    expect(outputs.read(session.id, { call_id: "keep-call" })).toContain("keep output");
+    expect(() => outputs.read(session.id, { call_id: "replace-call" })).toThrow(
+      "TOOL_OUTPUT_NOT_FOUND",
+    );
+    expect(repository.getSetting(`tool.output.${session.id}.index`)).toEqual([
+      expect.objectContaining({ chars: 11 }),
+    ]);
+  });
+
+  it("rolls back message, plan and session metadata changes from a failed outer savepoint", () => {
+    const session = createSession(repository);
+    const kept = repository.appendMessage({
+      sessionId: session.id,
+      role: "user",
+      parts: [{ type: "text", text: "Keep this branch" }],
+    });
+    const removed = repository.appendMessage({
+      sessionId: session.id,
+      role: "assistant",
+      parts: [{ type: "text", text: "Discard this branch" }],
+    });
+    const todos = [
+      {
+        id: "active",
+        content: "Active step",
+        status: "in_progress" as const,
+        priority: "high" as const,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    repository.replaceSessionTodos(session.id, todos, {
+      revision: 3,
+      paused: false,
+      reviewRequired: true,
+      order: ["active"],
+      dependencies: { active: [] },
+      breakpoints: ["active"],
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const beforeMessages = repository.getMessages(session.id);
+    const beforeSession = repository.getSession(session.id);
+    const beforePlan = repository.getSetting(`workbench.plan.${session.id}`);
+
+    expect(() =>
+      repository.runInSavepoint(() => {
+        repository.replaceSessionTodos(session.id, [], {
+          revision: 4,
+          paused: false,
+          reviewRequired: false,
+          order: [],
+          dependencies: {},
+          breakpoints: [],
+          updatedAt: "2026-01-02T00:00:00.000Z",
+        });
+        repository.replaceMessagesFromSeq(session.id, removed.seq, {
+          role: "user",
+          parts: [{ type: "text", text: "Replacement" }],
+        });
+        repository.updateSession(session.id, { title: "Replacement", status: "running" });
+        throw new Error("Fixture rewrite failure");
+      }),
+    ).toThrow("Fixture rewrite failure");
+
+    expect(repository.getMessages(session.id)).toEqual(beforeMessages);
+    expect(repository.getSession(session.id)).toEqual(beforeSession);
+    expect(repository.listSessionTodos(session.id)).toEqual([
+      { ...todos[0], updatedAt: expect.any(String) },
+    ]);
+    expect(repository.getSetting(`workbench.plan.${session.id}`)).toEqual(beforePlan);
+    expect(repository.getMessage(session.id, kept.id)).toEqual(kept);
   });
 
   it("preserves unreadable metadata for recovery and rejects writes for missing sessions", () => {

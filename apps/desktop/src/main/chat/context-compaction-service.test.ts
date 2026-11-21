@@ -231,6 +231,37 @@ function serializedTextHistory(messages: SessionMessage[]): string {
 }
 
 describe("context compaction", () => {
+  it("rejects image-output compactors at configuration and falls back when a saved model changes", async () => {
+    const f = fixture();
+    const image = f.addModel("configured-summary");
+    const backup = f.addModel("text-backup");
+    const primary = { providerId: f.provider.id, modelId: image.id };
+    const fallback = { providerId: f.provider.id, modelId: backup.id };
+    const fetcher = vi.fn(async (_url: string, _options: RequestInit) =>
+      response("openai_responses", "Summary with constraints."),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      f.service.setGlobalModel(primary);
+      f.service.setFallbackModel(fallback);
+      f.repository.updateModel(image.id, { ...image, outputModalities: ["image"] });
+      expect(() => f.service.setGlobalModel(primary)).toThrow("压缩模型不存在");
+      expect(() =>
+        f.sessionService.update({
+          sessionId: f.session.id,
+          compactionModel: { mode: "custom", ...primary },
+        }),
+      ).toThrow("压缩模型不存在");
+
+      f.service.recordResponse(f.input, { inputTokens: 17000, outputTokens: 0 });
+      await f.service.prepare(f.input);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+      expect(body.model).toBe("text-backup");
+    } finally {
+      f.database.close();
+    }
+  });
   it("compacts with native Gemini using native contents and preserves source history", async () => {
     const f = fixture("gemini_generate_content");
     const bodies: Record<string, unknown>[] = [];

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { MAX_TOOL_ROUNDS } from "../../shared/agent-limits";
 import { ADDITIONAL_BUILTIN_AGENTS } from "../../shared/builtin-agents";
@@ -11,10 +11,106 @@ import type {
   AgentProfileSaveInput,
   AgentProfileView,
 } from "../../shared/domain";
+import { isTextModel } from "../../shared/model-capabilities";
 import type { Repository } from "../storage/repository";
+import { readGuardedFile } from "../workspace/guarded-workspace-io";
 
 const AGENT_DIRECTORIES = [".mingshen/agents", ".opencode/agents"];
 const AGENT_ALIAS_DIRECTORIES = [".mingshen/agent", ".opencode/agent"];
+const MAX_AGENT_SOURCE_BYTES = 256 * 1024;
+const MAX_AGENT_PROMPT_BYTES = 64 * 1024;
+
+const BUILTIN_PROFILE_DEFAULTS: Record<string, AgentProfileSaveInput> = {
+  primary: {
+    name: "Mingshen",
+    description: "默认执行 Agent，可读取、编辑、运行命令和调用工具。",
+    role: "primary",
+    instructions: "",
+    modelId: null,
+    readOnly: false,
+    enabled: true,
+  },
+  plan: {
+    name: "Plan",
+    description: "只读规划 Agent，先调查代码与约束，再输出可执行计划，不修改文件。",
+    role: "plan",
+    instructions:
+      "You are the read-only planning agent. Inspect available evidence, identify risks and dependencies, and return a concrete implementation plan. Do not modify files or system state.",
+    modelId: null,
+    readOnly: true,
+    enabled: true,
+  },
+  general: {
+    name: "General",
+    description: "通用子 Agent，适合复杂检索和多步骤任务。",
+    role: "subagent",
+    instructions:
+      "You are a general-purpose subagent. Complete the assigned task, use tools when available, and report concise findings with evidence.",
+    modelId: null,
+    readOnly: false,
+    enabled: true,
+  },
+  explore: {
+    name: "Explore",
+    description: "快速只读探索代码库的子 Agent。",
+    role: "subagent",
+    instructions:
+      "You are a read-only exploration subagent. Search and inspect the codebase, then return concise evidence and relevant paths.",
+    modelId: null,
+    readOnly: true,
+    enabled: true,
+  },
+  ...Object.fromEntries(ADDITIONAL_BUILTIN_AGENTS.map((profile) => [profile.id, profile] as const)),
+};
+
+interface AgentSource {
+  path: string;
+  workspace: boolean;
+}
+
+function normalizedPath(path: string): string {
+  const resolved = resolve(path);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isInsideWorkspace(workspacePath: string, path: string): boolean {
+  const candidate = relative(normalizedPath(workspacePath), normalizedPath(path));
+  return (
+    candidate === "" ||
+    (candidate !== ".." && !candidate.startsWith(`..${sep}`) && !isAbsolute(candidate))
+  );
+}
+
+function sourceFilePath(sourcePath: string): string {
+  const marker = sourcePath.lastIndexOf("#agent:");
+  return marker >= 0 ? sourcePath.slice(0, marker) : sourcePath;
+}
+
+async function readBoundedUserText(path: string, maxBytes: number): Promise<string | null> {
+  try {
+    const metadata = await stat(path);
+    if (!metadata.isFile() || metadata.size > maxBytes) return null;
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function readBoundedWorkspaceText(
+  workspacePath: string,
+  path: string,
+  maxBytes: number,
+): Promise<string | null> {
+  try {
+    if (!isInsideWorkspace(workspacePath, path)) return null;
+    const relativePath = relative(resolve(workspacePath), resolve(path));
+    if (!relativePath) return null;
+    const result = await readGuardedFile(workspacePath, relativePath, maxBytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(result.buffer);
+  } catch {
+    return null;
+  }
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -95,9 +191,16 @@ function stripJsonComments(input: string): string {
   return output;
 }
 
-async function readJsonConfig(path: string): Promise<Record<string, unknown> | null> {
+async function readJsonConfig(
+  path: string,
+  workspacePath?: string,
+): Promise<Record<string, unknown> | null> {
   try {
-    const parsed: unknown = JSON.parse(stripJsonComments(await readFile(path, "utf8")));
+    const content = workspacePath
+      ? await readBoundedWorkspaceText(workspacePath, path, MAX_AGENT_SOURCE_BYTES)
+      : await readBoundedUserText(path, MAX_AGENT_SOURCE_BYTES);
+    if (content === null) return null;
+    const parsed: unknown = JSON.parse(stripJsonComments(content));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
@@ -113,7 +216,11 @@ function configRole(value: unknown): AgentProfileRole {
   return "all";
 }
 
-async function configPrompt(value: unknown, configPath: string): Promise<string> {
+async function configPrompt(
+  value: unknown,
+  configPath: string,
+  workspacePath?: string,
+): Promise<string> {
   if (typeof value !== "string" || !value.trim()) {
     return "";
   }
@@ -121,9 +228,14 @@ async function configPrompt(value: unknown, configPath: string): Promise<string>
   if (!fileMatch?.[1]) {
     return value.trim();
   }
-  const path = isAbsolute(fileMatch[1]) ? fileMatch[1] : resolve(dirname(configPath), fileMatch[1]);
   try {
-    return (await readFile(path, "utf8")).trim().slice(0, 40_000);
+    const referencedPath = isAbsolute(fileMatch[1])
+      ? fileMatch[1]
+      : resolve(dirname(configPath), fileMatch[1]);
+    const content = workspacePath
+      ? await readBoundedWorkspaceText(workspacePath, referencedPath, MAX_AGENT_PROMPT_BYTES)
+      : await readBoundedUserText(referencedPath, MAX_AGENT_PROMPT_BYTES);
+    return content?.trim().slice(0, 40_000) ?? "";
   } catch {
     return "";
   }
@@ -196,7 +308,7 @@ function normalizeApplicableModes(value: unknown): Array<"code" | "work"> {
 
 function syncedApplicableModes(
   value: unknown,
-  existing: AgentProfileView | null,
+  existing: Pick<AgentProfileView, "applicableModes"> | null,
 ): Array<"code" | "work"> {
   return value === undefined
     ? (existing?.applicableModes ?? ["code", "work"])
@@ -233,6 +345,18 @@ function normalize(input: AgentProfileSaveInput): AgentProfileSaveInput {
 
 export class AgentProfileService {
   constructor(private readonly repository: Repository) {
+    for (const profile of repository.listAgentProfiles()) {
+      const defaults = BUILTIN_PROFILE_DEFAULTS[profile.id];
+      if (!profile.builtin || !profile.sourcePath || !defaults) continue;
+      repository.saveAgentProfile({
+        ...defaults,
+        id: profile.id,
+        modelId: defaults.modelId ?? null,
+        builtin: true,
+        sourcePath: null,
+        contentHash: null,
+      });
+    }
     for (const profile of ADDITIONAL_BUILTIN_AGENTS) {
       if (!repository.getAgentProfile(profile.id)) {
         repository.saveAgentProfile({ ...profile, modelId: null, builtin: true });
@@ -248,19 +372,37 @@ export class AgentProfileService {
     if (!workspacePath) {
       return;
     }
-    const roots = [
+    const workspaceRoot = resolve(workspacePath);
+    const trusted = this.repository.isProjectTrusted(workspaceRoot);
+    const userRoots = [
       join(homedir(), ".config", "opencode", "agents"),
       join(homedir(), ".config", "opencode", "agent"),
       join(homedir(), ".mingshen", "agents"),
       join(homedir(), ".mingshen", "agent"),
-      ...[...AGENT_DIRECTORIES, ...AGENT_ALIAS_DIRECTORIES].map((directory) =>
-        join(workspacePath, directory),
-      ),
     ];
-    const files = (await Promise.all(roots.map((root) => markdownFiles(root)))).flat();
+    const workspaceRoots = [...AGENT_DIRECTORIES, ...AGENT_ALIAS_DIRECTORIES].map((directory) =>
+      join(workspaceRoot, directory),
+    );
+    const userSources: AgentSource[] = (
+      await Promise.all(userRoots.map((root) => markdownFiles(root)))
+    )
+      .flat()
+      .map((path) => ({ path, workspace: false }));
+    const workspaceSources: AgentSource[] = trusted
+      ? (await Promise.all(workspaceRoots.map((root) => markdownFiles(root))))
+          .flat()
+          .map((path) => ({ path, workspace: true }))
+      : [];
+    const files = [...userSources, ...workspaceSources];
+    const expectedWorkspaceSources = new Set<string>();
     const models = this.repository.listProviders().flatMap((provider) => provider.models);
-    for (const file of files) {
-      const content = await readFile(file, "utf8");
+    for (const source of files) {
+      const content = source.workspace
+        ? await readBoundedWorkspaceText(workspaceRoot, source.path, MAX_AGENT_SOURCE_BYTES)
+        : await readBoundedUserText(source.path, MAX_AGENT_SOURCE_BYTES);
+      if (content === null) continue;
+      if (source.workspace) expectedWorkspaceSources.add(source.path);
+      const file = source.path;
       const parsed = frontmatter(content);
       const metadata = parsed.metadata;
       const mode = typeof metadata.mode === "string" ? metadata.mode : "subagent";
@@ -280,9 +422,10 @@ export class AgentProfileService {
       const modelValue = typeof metadata.model === "string" ? metadata.model.trim() : "";
       const model = models.find(
         (item) =>
-          item.id === modelValue ||
-          item.modelId === modelValue ||
-          modelValue.endsWith(`/${item.modelId}`),
+          isTextModel(item) &&
+          (item.id === modelValue ||
+            item.modelId === modelValue ||
+            modelValue.endsWith(`/${item.modelId}`)),
       );
       const hash = createHash("sha256").update(content).digest("hex");
       const existing = this.repository.findAgentProfileBySource(file);
@@ -321,13 +464,15 @@ export class AgentProfileService {
       });
     }
 
-    const configCandidates = [
+    const userConfigCandidates = [
       join(homedir(), ".config", "opencode", "opencode.json"),
       join(homedir(), ".config", "opencode", "opencode.jsonc"),
       join(homedir(), ".config", "opencode", "config.json"),
       join(homedir(), ".config", "opencode", "config.jsonc"),
       join(homedir(), ".mingshen", "config.json"),
       join(homedir(), ".mingshen", "config.jsonc"),
+    ];
+    const workspaceConfigCandidates = [
       join(workspacePath, "opencode.json"),
       join(workspacePath, "opencode.jsonc"),
       join(workspacePath, ".opencode", "opencode.json"),
@@ -335,11 +480,18 @@ export class AgentProfileService {
       join(workspacePath, ".mingshen", "config.json"),
       join(workspacePath, ".mingshen", "config.jsonc"),
     ];
-    for (const file of configCandidates) {
+    const trustedWorkspaceConfigCandidates = trusted ? workspaceConfigCandidates : [];
+    const workspaceConfigs = new Set(
+      workspaceConfigCandidates.map((candidate) => resolve(candidate)),
+    );
+    for (const file of [...userConfigCandidates, ...trustedWorkspaceConfigCandidates]) {
       if (!(await fileExists(file))) {
         continue;
       }
-      const config = await readJsonConfig(file);
+      const config = await readJsonConfig(
+        file,
+        workspaceConfigs.has(resolve(file)) ? workspaceRoot : undefined,
+      );
       const agentMap =
         config?.agent && typeof config.agent === "object" && !Array.isArray(config.agent)
           ? (config.agent as Record<string, unknown>)
@@ -350,6 +502,7 @@ export class AgentProfileService {
         }
         const entry = raw as Record<string, unknown>;
         const sourcePath = `${file}#agent:${name}`;
+        if (workspaceConfigs.has(resolve(file))) expectedWorkspaceSources.add(sourcePath);
         const permissions = normalizePermissions(entry.permission);
         if (entry.tools && typeof entry.tools === "object" && !Array.isArray(entry.tools)) {
           for (const [toolName, enabled] of Object.entries(
@@ -370,31 +523,40 @@ export class AgentProfileService {
         const modelValue = typeof entry.model === "string" ? entry.model.trim() : "";
         const model = models.find(
           (item) =>
-            item.id === modelValue ||
-            item.modelId === modelValue ||
-            modelValue.endsWith(`/${item.modelId}`),
+            isTextModel(item) &&
+            (item.id === modelValue ||
+              item.modelId === modelValue ||
+              modelValue.endsWith(`/${item.modelId}`)),
         );
-        const instructions = await configPrompt(entry.prompt, file);
+        const instructions = await configPrompt(
+          entry.prompt,
+          file,
+          workspaceConfigs.has(resolve(file)) ? workspacePath : undefined,
+        );
         const contentHash = createHash("sha256")
           .update(JSON.stringify(entry))
           .update(instructions)
           .digest("hex");
-        const builtin =
-          name === "build"
-            ? this.repository.getAgentProfile("primary")
-            : this.repository.getAgentProfile(name);
-        const existing = this.repository.findAgentProfileBySource(sourcePath) ?? builtin;
+        const builtinDefaults =
+          name === "build" ? BUILTIN_PROFILE_DEFAULTS.primary : BUILTIN_PROFILE_DEFAULTS[name];
+        const existing = this.repository.findAgentProfileBySource(sourcePath);
         const applicableModes = syncedApplicableModes(
           entry.applicable_modes ?? entry.applicableModes,
-          existing,
+          existing ??
+            (builtinDefaults?.applicableModes
+              ? { applicableModes: builtinDefaults.applicableModes }
+              : null),
         );
         this.repository.saveAgentProfile({
           ...(existing ? { id: existing.id } : {}),
           name,
           description: typeof entry.description === "string" ? entry.description.trim() : "",
-          role: entry.mode === undefined && builtin ? builtin.role : configRole(entry.mode),
+          role:
+            entry.mode === undefined && builtinDefaults
+              ? builtinDefaults.role
+              : configRole(entry.mode),
           instructions,
-          modelId: model?.id ?? existing?.modelId ?? null,
+          modelId: model?.id ?? existing?.modelId ?? builtinDefaults?.modelId ?? null,
           readOnly:
             permissions.edit === "deny" ||
             permissions.write === "deny" ||
@@ -412,16 +574,31 @@ export class AgentProfileService {
               ? entry.steps
               : typeof entry.maxSteps === "number"
                 ? entry.maxSteps
-                : null,
-          color: typeof entry.color === "string" ? entry.color : null,
+                : (builtinDefaults?.maxSteps ?? null),
+          color: typeof entry.color === "string" ? entry.color : (builtinDefaults?.color ?? null),
           applicableModes,
         });
+      }
+    }
+
+    for (const profile of this.repository.listAgentProfiles()) {
+      if (profile.builtin || !profile.sourcePath) continue;
+      const file = sourceFilePath(profile.sourcePath);
+      if (
+        isInsideWorkspace(workspaceRoot, file) &&
+        !expectedWorkspaceSources.has(profile.sourcePath)
+      ) {
+        this.repository.removeAgentProfile(profile.id);
       }
     }
   }
 
   save(input: AgentProfileSaveInput): AgentProfileView {
     const normalized = normalize(input);
+    const model = normalized.modelId ? this.repository.getModel(normalized.modelId) : null;
+    if (model && !isTextModel(model)) {
+      throw new Error("子 Agent 模型必须支持文本输入和输出。");
+    }
     return this.repository.saveAgentProfile({
       ...normalized,
       modelId: normalized.modelId ?? null,

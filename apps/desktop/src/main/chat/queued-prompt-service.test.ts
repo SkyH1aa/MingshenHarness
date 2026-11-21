@@ -8,6 +8,7 @@ import {
   MAX_QUEUED_PROMPTS,
   QUEUED_PROMPT_CONFIGURATION_CHANGED,
   QUEUED_PROMPT_REQUIRES_ACTIVE_RUN,
+  QUEUED_PROMPT_STORAGE_CORRUPT,
   QUEUED_PROMPT_UNSUPPORTED_SUBAGENT,
   queuedPromptSettingKey,
 } from "../../shared/queued-prompt";
@@ -798,6 +799,79 @@ describe("queued prompts", () => {
     expect(service.list(session.id).map((item) => item.id)).toEqual([first.id]);
   });
 
+  it("persists each queue item's temporary instruction and preserves it on partial edits", () => {
+    const session = createSession(repository);
+    const service = new QueuedPromptService(repository, runtime(true));
+    const queued = service.add({
+      sessionId: session.id,
+      text: "Inspect the migration",
+      temporaryInstruction: "  only report risks this run  ",
+    });
+
+    expect(queued.temporaryInstruction).toBe("only report risks this run");
+    const stored = repository.getSetting(queuedPromptSettingKey(session.id)) as {
+      items: Array<{ temporaryInstruction?: string }>;
+    };
+    expect(stored.items[0]?.temporaryInstruction).toBe("only report risks this run");
+
+    expect(
+      service.update({
+        sessionId: session.id,
+        itemId: queued.id,
+        text: "Inspect the migration and tests",
+      }),
+    ).toMatchObject({
+      text: "Inspect the migration and tests",
+      temporaryInstruction: "only report risks this run",
+    });
+
+    const cleared = service.update({
+      sessionId: session.id,
+      itemId: queued.id,
+      text: "Inspect the migration and tests",
+      temporaryInstruction: "   ",
+    });
+    expect(cleared).not.toHaveProperty("temporaryInstruction");
+    const storedAfterClear = repository.getSetting(queuedPromptSettingKey(session.id)) as {
+      items: Array<{ temporaryInstruction?: string }>;
+    };
+    expect(storedAfterClear.items[0]).not.toHaveProperty("temporaryInstruction");
+  });
+
+  it("sends only the current item's temporary instruction and removes it after acceptance", async () => {
+    const session = createSession(repository);
+    const active = runtime(true);
+    const service = new QueuedPromptService(repository, active);
+    const first = service.add({
+      sessionId: session.id,
+      text: "First queued message",
+      temporaryInstruction: "use the first instruction once",
+    });
+    const second = service.add({
+      sessionId: session.id,
+      text: "Second queued message",
+      temporaryInstruction: "use the second instruction once",
+    });
+
+    active.setBusy(false);
+    await service.continue(session.id, first.id);
+    await service.continue(session.id, second.id);
+
+    expect(active.send.mock.calls[0]?.[0]).toEqual({
+      sessionId: session.id,
+      text: "First queued message",
+      attachments: [],
+      temporaryInstruction: "use the first instruction once",
+    });
+    expect(active.send.mock.calls[1]?.[0]).toEqual({
+      sessionId: session.id,
+      text: "Second queued message",
+      attachments: [],
+      temporaryInstruction: "use the second instruction once",
+    });
+    expect(service.list(session.id)).toEqual([]);
+  });
+
   it("allows exactly 50 MiB of queued attachments and rejects the next byte", () => {
     vi.spyOn(attachmentValidation, "validateChatAttachments").mockImplementation(
       (value) => value?.map((attachment) => ({ ...attachment })) ?? [],
@@ -884,6 +958,26 @@ describe("queued prompts", () => {
       service.reorder({ sessionId: session.id, itemId: second.id, targetIndex: 0 }),
     ).toThrow(/不支持调整顺序/);
     expect(service.list(session.id).map((item) => item.id)).toEqual([first.id, second.id]);
+  });
+
+  it("rejects legacy queue records with more than ten attachments without overwriting them", () => {
+    const session = createSession(repository);
+    const service = new QueuedPromptService(repository, runtime(true));
+    service.add({ sessionId: session.id, text: "Legacy batch" });
+    const key = queuedPromptSettingKey(session.id);
+    const stored = repository.getSetting(key) as {
+      items: Array<{ attachments: ChatAttachmentInput[] }>;
+    };
+    const item = stored.items[0];
+    expect(item).toBeDefined();
+    if (!item) throw new Error("Queue fixture was not stored.");
+    item.attachments = Array.from({ length: 11 }, (_, index) => ({
+      ...fileAttachment(`attachment-${index}.bin`),
+    }));
+    repository.setSetting(key, stored);
+
+    expect(() => service.list(session.id)).toThrow(QUEUED_PROMPT_STORAGE_CORRUPT);
+    expect(repository.getSetting(key)).toEqual(stored);
   });
 
   it("enforces the ten-item cap and rejects continuation while busy or archived", () => {

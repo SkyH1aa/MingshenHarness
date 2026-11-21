@@ -153,6 +153,32 @@ describe("conversation forks", () => {
     expect(repository.forkSession(source.id).parentSessionId).toBeNull();
     expect(repository.listSessions()).toHaveLength(3);
   });
+  it("preserves disabled ChatAgent internet access in a conversation fork", () => {
+    const source = repository.insertSession({
+      title: "Offline chat",
+      agentMode: "chat",
+      chatGroupId: null,
+      providerId: "provider",
+      modelId: "model",
+      agentProfileId: "primary",
+      workspacePath: null,
+      systemPrompt: "",
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+      executionMode: "host",
+      patchOnly: false,
+    });
+    repository.setSetting(`chat.network.enabled.${source.id}`, false);
+    repository.appendMessage({
+      sessionId: source.id,
+      role: "user",
+      parts: [{ type: "text", text: "offline conversation" }],
+    });
+
+    const fork = repository.forkSession(source.id);
+
+    expect(fork).toMatchObject({ agentMode: "chat", chatNetworkEnabled: false });
+  });
   it("rolls back the whole copy if a durable state write fails", () => {
     const source = create();
     repository.appendMessage({

@@ -91,6 +91,7 @@ export class HeadlessServerService {
 
   constructor(
     private readonly repository: Repository,
+    private readonly sessionService: SessionService,
     private readonly chatService: ChatService,
     private readonly agentProfileService: AgentProfileService,
     private readonly customCommandService: CustomCommandService,
@@ -274,29 +275,49 @@ export class HeadlessServerService {
     }
     if (request.method === "POST" && url.pathname === "/session") {
       const input = await body(request);
+      const requestsDerivedSession = [input.parentSessionId, input.forkedFromMessageId].some(
+        (value) =>
+          value !== undefined &&
+          value !== null &&
+          (typeof value !== "string" || value.trim().length > 0),
+      );
+      if (requestsDerivedSession) {
+        json(response, 400, {
+          error: "POST /session creates root sessions only; use /session/{id}/fork for branches.",
+        });
+        return;
+      }
       const providerId = String(input.providerId ?? "");
       const modelId = String(input.modelId ?? "");
       if (!providerId || !modelId) {
         json(response, 400, { error: "providerId and modelId are required" });
         return;
       }
-      const created = this.repository.insertSession({
-        title: String(input.title ?? "无头会话"),
-        parentSessionId: typeof input.parentSessionId === "string" ? input.parentSessionId : null,
-        forkedFromMessageId: null,
-        providerId,
-        modelId,
-        agentProfileId: String(input.agentProfileId ?? "primary"),
-        workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null,
-        systemPrompt: typeof input.systemPrompt === "string" ? input.systemPrompt : "",
-        reasoningLevel: typeof input.reasoningLevel === "string" ? input.reasoningLevel : null,
-        permissionMode: input.permissionMode === "full_access" ? "full_access" : "request_approval",
-        executionMode:
-          input.executionMode === "worktree" || input.executionMode === "docker"
-            ? input.executionMode
-            : "host",
-        patchOnly: input.patchOnly === true,
-      });
+      let created: ReturnType<SessionService["create"]>;
+      try {
+        created = this.sessionService.create({
+          title: String(input.title ?? "无头会话"),
+          providerId,
+          modelId,
+          agentProfileId: String(input.agentProfileId ?? "primary"),
+          agentMode: input.agentMode === "work" ? "work" : "code",
+          workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null,
+          systemPrompt: typeof input.systemPrompt === "string" ? input.systemPrompt : "",
+          reasoningLevel: typeof input.reasoningLevel === "string" ? input.reasoningLevel : null,
+          permissionMode:
+            input.permissionMode === "full_access" ? "full_access" : "request_approval",
+          executionMode:
+            input.executionMode === "worktree" || input.executionMode === "docker"
+              ? input.executionMode
+              : "host",
+          patchOnly: input.patchOnly === true,
+        });
+      } catch (cause) {
+        json(response, 400, {
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+        return;
+      }
       this.emit({ type: "session_updated", session: created });
       json(response, 201, created);
       return;
@@ -539,7 +560,11 @@ ${rendered || "<p>会话没有消息。</p>"}</main></body></html>`,
         "/provider": { get: { summary: "List providers and models" } },
         "/session": {
           get: { summary: "List sessions" },
-          post: { summary: "Create session" },
+          post: {
+            summary: "Create a root session",
+            description:
+              "Creates a new root session. Use POST /session/{id}/fork to branch an existing session.",
+          },
         },
         "/session/{id}": {
           get: { summary: "Get session" },

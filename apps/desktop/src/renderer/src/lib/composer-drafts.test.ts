@@ -32,8 +32,16 @@ function fixture() {
       else records.delete(input.sessionId);
     }),
     clearComposerDraft: vi.fn(async (id: string, revision: string) => {
-      if (records.get(id)?.revision !== revision) return false;
-      records.delete(id);
+      const existing = records.get(id);
+      if (existing?.revision !== revision) return false;
+      if (existing.notificationDraftIds.length)
+        records.set(id, {
+          ...existing,
+          text: "",
+          formatted: false,
+          attachments: [],
+        });
+      else records.delete(id);
       return true;
     }),
   };
@@ -223,7 +231,7 @@ describe("composer draft persistence", () => {
   });
 
   it("preserves newer drafts when an older send finishes after switching back", async () => {
-    const { store } = fixture();
+    const { store, api } = fixture();
     await Promise.all([store.load("a"), store.load("b")]);
     store.update("a", (value) => ({ ...value, text: "submitted" }));
     await store.flush("a");
@@ -234,7 +242,9 @@ describe("composer draft persistence", () => {
     expect(store.state("a").value.text).toBe("new after send");
     expect(store.state("b").value.text).toBe("other chat");
     await store.flushAll();
-    await store.accepted("a", store.state("a").value.revision);
+    const latest = store.state("a").value.revision;
+    await api.clearComposerDraft("a", latest);
+    await store.accepted("a", latest);
     expect(store.state("a").value.text).toBe("");
     expect(store.state("b").value.text).toBe("other chat");
   });
@@ -253,7 +263,7 @@ describe("composer draft persistence", () => {
     expect(store.state("a").error).toBeNull();
   });
 
-  it("reuploads attachment bytes for newer text after a delayed accepted-send reply", async () => {
+  it("retains newer text after a clear until an ambiguous conflict is explicitly resolved", async () => {
     const { store, records } = fixture();
     await store.load("a");
     store.update("a", (value) => ({
@@ -267,9 +277,428 @@ describe("composer draft persistence", () => {
     store.update("a", (value) => ({ ...value, text: "newer text with the same attachment" }));
     await expect(store.flush("a")).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_CODE);
     await store.accepted("a", submitted);
+    expect(store.state("a")).toMatchObject({ conflict: true });
+    expect(records.has("a")).toBe(false);
+    await store.resolveConflict("a", "overwrite");
     expect(store.state("a").error).toBeNull();
     expect(records.get("a")?.text).toBe("newer text with the same attachment");
     expect(records.get("a")?.attachments[0]?.dataUrl).toBe("data:text/plain;base64,aGVsbG8=");
+  });
+
+  it("keeps the saved newer revision and attachment cache after an older acceptance", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      attachments: [{ id: "file", file: new File(["hello"], "notes.txt"), kind: "file" }],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    store.update("a", (value) => ({ ...value, text: "newer" }));
+    await store.flush("a");
+    const newer = store.state("a").value.revision;
+
+    expect(await api.clearComposerDraft("a", submitted)).toBe(false);
+    await store.accepted("a", submitted);
+    store.update("a", (value) => ({ ...value, text: "newest" }));
+    await store.flush("a");
+
+    expect(api.saveComposerDraft.mock.calls[2]?.[0]).toMatchObject({ baseRevision: newer });
+    expect(api.saveComposerDraft.mock.calls[2]?.[0].addedAttachments).toBeUndefined();
+    expect(records.get("a")?.text).toBe("newest");
+    expect(records.get("a")?.attachments).toHaveLength(1);
+    expect(store.state("a")).toMatchObject({ conflict: false, error: null });
+  });
+
+  it("uses the retained notification record revision after an accepted send", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      notificationDraftIds: ["notification"],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    expect(await api.clearComposerDraft("a", submitted)).toBe(true);
+    expect(records.get("a")).toMatchObject({ revision: submitted, text: "" });
+
+    await store.accepted("a", submitted);
+    expect(store.state("a").value).toMatchObject({
+      text: "",
+      notificationDraftIds: ["notification"],
+    });
+    store.update("a", (value) => ({ ...value, text: "after send" }));
+    await store.flush("a");
+
+    expect(api.saveComposerDraft.mock.calls[1]?.[0].baseRevision).toBe(submitted);
+    expect(records.get("a")).toMatchObject({
+      text: "after send",
+      notificationDraftIds: ["notification"],
+    });
+  });
+
+  it.each([{ notificationDraftIds: [] }, { notificationDraftIds: ["notification"] }])(
+    "reconciles a pending attachment save after clear with notification IDs $notificationDraftIds",
+    async ({ notificationDraftIds }) => {
+      const { store, api, records } = fixture();
+      await store.load("a");
+      store.update("a", (value) => ({
+        ...value,
+        text: "submitted",
+        attachments: [{ id: "file", file: new File(["hello"], "notes.txt"), kind: "file" }],
+        notificationDraftIds,
+      }));
+      await store.flush("a");
+      const submitted = store.state("a").value.revision;
+      const blocked = deferred();
+      const started = deferred();
+      const save = api.saveComposerDraft.getMockImplementation();
+      api.saveComposerDraft.mockImplementationOnce(async (input) => {
+        started.resolve();
+        await blocked.promise;
+        await save?.(input);
+      });
+      store.update("a", (value) => ({ ...value, text: "newer" }));
+      await started.promise;
+      expect(await api.clearComposerDraft("a", submitted)).toBe(true);
+      const accepting = store.accepted("a", submitted);
+      blocked.resolve();
+      await accepting;
+
+      if (!notificationDraftIds.length) {
+        expect(store.state("a")).toMatchObject({ conflict: true, value: { text: "newer" } });
+        expect(records.has("a")).toBe(false);
+        await store.resolveConflict("a", "overwrite");
+      }
+
+      expect(api.saveComposerDraft.mock.calls[2]?.[0]).toMatchObject({
+        baseRevision: notificationDraftIds.length ? submitted : null,
+        addedAttachments: [expect.objectContaining({ id: "file" })],
+      });
+      expect(records.get("a")).toMatchObject({
+        text: "newer",
+        notificationDraftIds,
+        attachments: [expect.objectContaining({ id: "file" })],
+      });
+      expect(store.state("a")).toMatchObject({ conflict: false, error: null });
+    },
+  );
+
+  it("keeps a conflicting local edit when another window has a newer revision", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({ ...value, text: "submitted" }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    const blocked = deferred();
+    const started = deferred();
+    const save = api.saveComposerDraft.getMockImplementation();
+    api.saveComposerDraft.mockImplementationOnce(async (input) => {
+      started.resolve();
+      await blocked.promise;
+      await save?.(input);
+    });
+    store.update("a", (value) => ({ ...value, text: "local edit" }));
+    await started.promise;
+    records.set("a", {
+      sessionId: "a",
+      revision: "remote-newer",
+      text: "other window",
+      formatted: false,
+      attachments: [],
+      notificationDraftIds: [],
+    });
+    const accepting = store.accepted("a", submitted);
+    blocked.resolve();
+    await accepting;
+
+    expect(store.state("a")).toMatchObject({
+      conflict: true,
+      error: expect.stringContaining(COMPOSER_DRAFT_CONFLICT_CODE),
+      value: { text: "local edit" },
+    });
+    expect(records.get("a")).toMatchObject({ revision: "remote-newer", text: "other window" });
+    expect(api.saveComposerDraft).toHaveBeenCalledTimes(2);
+    await expect(store.flush("a")).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_CODE);
+  });
+
+  it("does not resurrect a draft after another window writes and deletes a newer revision", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({ ...value, text: "submitted" }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    const blocked = deferred();
+    const started = deferred();
+    const save = api.saveComposerDraft.getMockImplementation();
+    api.saveComposerDraft.mockImplementationOnce(async (input) => {
+      started.resolve();
+      await blocked.promise;
+      await save?.(input);
+    });
+    store.update("a", (value) => ({ ...value, text: "local edit" }));
+    await started.promise;
+    records.set("a", {
+      sessionId: "a",
+      revision: "other-window",
+      text: "newer then deleted",
+      formatted: false,
+      attachments: [],
+      notificationDraftIds: [],
+    });
+    expect(await api.clearComposerDraft("a", submitted)).toBe(false);
+    blocked.resolve();
+    await expect(store.flush("a")).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_CODE);
+    records.delete("a");
+
+    await store.accepted("a", submitted);
+    await store.accepted("a", submitted);
+    expect(records.has("a")).toBe(false);
+    expect(api.saveComposerDraft).toHaveBeenCalledTimes(2);
+    expect(store.state("a")).toMatchObject({ conflict: true, value: { text: "local edit" } });
+  });
+
+  it("preserves a newer saved edit that arrives while acceptance reads the cleared draft", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      notificationDraftIds: ["notification"],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    await api.clearComposerDraft("a", submitted);
+    const blocked = deferred();
+    const started = deferred();
+    api.getComposerDraft.mockImplementationOnce(async (id) => {
+      const snapshot = records.get(id) ?? null;
+      started.resolve();
+      await blocked.promise;
+      return snapshot;
+    });
+    const accepting = store.accepted("a", submitted);
+    await started.promise;
+    store.update("a", (value) => ({ ...value, text: "newer" }));
+    await api.saveComposerDraft.mock.results[1]?.value;
+    const newer = store.state("a").value.revision;
+    blocked.resolve();
+    await accepting;
+    store.update("a", (value) => ({ ...value, text: "newest" }));
+    await store.flush("a");
+
+    expect(api.saveComposerDraft.mock.calls[2]?.[0].baseRevision).toBe(newer);
+    expect(records.get("a")?.text).toBe("newest");
+  });
+
+  it("uses CAS if another window writes after the acceptance read", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      attachments: [{ id: "file", file: new File(["hello"], "notes.txt"), kind: "file" }],
+      notificationDraftIds: ["notification"],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    await api.clearComposerDraft("a", submitted);
+    store.update("a", (value) => ({ ...value, text: "local edit" }));
+    await expect(store.flush("a")).rejects.toThrow("Missing attachment");
+    api.getComposerDraft.mockImplementationOnce(async () => {
+      const snapshot = records.get("a") ?? null;
+      records.set("a", {
+        sessionId: "a",
+        revision: "remote-after-read",
+        text: "other window",
+        formatted: false,
+        attachments: [],
+        notificationDraftIds: [],
+      });
+      return snapshot;
+    });
+
+    await expect(store.accepted("a", submitted)).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_CODE);
+    expect(records.get("a")).toMatchObject({ revision: "remote-after-read", text: "other window" });
+    expect(store.state("a")).toMatchObject({ conflict: true, value: { text: "local edit" } });
+  });
+
+  it("handles duplicate consumed events and a response without resetting a later edit", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      notificationDraftIds: ["notification"],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    await api.clearComposerDraft("a", submitted);
+    const blocked = deferred();
+    const started = deferred();
+    api.getComposerDraft.mockImplementationOnce(async (id) => {
+      const snapshot = records.get(id) ?? null;
+      started.resolve();
+      await blocked.promise;
+      return snapshot;
+    });
+    const first = store.accepted("a", submitted);
+    await started.promise;
+    const duplicate = store.accepted("a", submitted);
+    blocked.resolve();
+    await Promise.all([first, duplicate]);
+    store.update("a", (value) => ({ ...value, text: "newer" }));
+    await store.flush("a");
+    const newer = store.state("a").value.revision;
+    await store.accepted("a", submitted);
+    store.update("a", (value) => ({ ...value, text: "newest" }));
+    await store.flush("a");
+
+    expect(api.getComposerDraft).toHaveBeenCalledTimes(2);
+    expect(api.saveComposerDraft.mock.calls[2]?.[0].baseRevision).toBe(newer);
+    expect(records.get("a")?.text).toBe("newest");
+  });
+
+  it("retains the submitted draft when the acceptance read fails and allows retry", async () => {
+    const { store, api } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({ ...value, text: "submitted" }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    await api.clearComposerDraft("a", submitted);
+    api.getComposerDraft.mockRejectedValueOnce(new Error("read failed"));
+
+    await expect(store.accepted("a", submitted)).rejects.toThrow("read failed");
+    expect(store.state("a")).toMatchObject({ error: "read failed", value: { text: "submitted" } });
+    expect(store.hasPending()).toBe(true);
+    api.getComposerDraft.mockRejectedValueOnce(new Error("still unavailable"));
+    await expect(store.flush("a")).rejects.toThrow("still unavailable");
+    expect(store.state("a").value.text).toBe("submitted");
+    await store.flush("a");
+    expect(store.state("a")).toMatchObject({ error: null, value: { text: "" } });
+    expect(store.hasPending()).toBe(false);
+  });
+
+  it("ignores a failed acceptance read made stale by a newer saved edit", async () => {
+    const { store, api } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({
+      ...value,
+      text: "submitted",
+      notificationDraftIds: ["notification"],
+    }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    await api.clearComposerDraft("a", submitted);
+    const blocked = deferred();
+    const started = deferred();
+    api.getComposerDraft.mockImplementationOnce(async () => {
+      started.resolve();
+      await blocked.promise;
+      throw new Error("stale read failed");
+    });
+    const accepting = store.accepted("a", submitted);
+    await started.promise;
+    store.update("a", (value) => ({ ...value, text: "newer" }));
+    await api.saveComposerDraft.mock.results[1]?.value;
+    blocked.resolve();
+    await accepting;
+    expect(store.state("a")).toMatchObject({ error: null, value: { text: "newer" } });
+  });
+
+  it("loads another window's newer draft when the accepted local draft is clean", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({ ...value, text: "submitted" }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+    records.set("a", {
+      sessionId: "a",
+      revision: "other-window",
+      text: "new remote draft",
+      formatted: true,
+      attachments: [],
+      notificationDraftIds: [],
+    });
+
+    await store.accepted("a", submitted);
+    expect(store.state("a")).toMatchObject({
+      conflict: false,
+      value: { revision: "other-window", text: "new remote draft", formatted: true },
+    });
+    store.update("a", (value) => ({ ...value, text: "continued" }));
+    await store.flush("a");
+    expect(api.saveComposerDraft.mock.calls[1]?.[0].baseRevision).toBe("other-window");
+    expect(records.get("a")?.text).toBe("continued");
+  });
+
+  it("does not erase a submitted revision if the stored draft was not consumed", async () => {
+    const { store } = fixture();
+    await store.load("a");
+    store.update("a", (value) => ({ ...value, text: "still stored" }));
+    await store.flush("a");
+    const submitted = store.state("a").value.revision;
+
+    await store.accepted("a", submitted);
+    expect(store.state("a")).toMatchObject({
+      conflict: true,
+      value: { revision: submitted, text: "still stored" },
+    });
+  });
+
+  it("does not recreate a forgotten entry while its acceptance is queued", async () => {
+    const { store, api } = fixture();
+    store.state("a");
+    const accepting = store.accepted("a", "submitted");
+    store.forget(["a"]);
+    await accepting;
+
+    expect(api.getComposerDraft).not.toHaveBeenCalled();
+    expect(store.hasPending()).toBe(false);
+  });
+
+  it("waits for an acceptance added to another session during flushAll", async () => {
+    const { store, api, records } = fixture();
+    await store.load("a");
+    const blockedSave = deferred();
+    const startedSave = deferred();
+    const save = api.saveComposerDraft.getMockImplementation();
+    api.saveComposerDraft.mockImplementationOnce(async (input) => {
+      startedSave.resolve();
+      await blockedSave.promise;
+      await save?.(input);
+    });
+    store.update("a", (value) => ({ ...value, text: "pending a" }));
+    await startedSave.promise;
+    let finished = false;
+    const flushing = store.flushAll().then(() => {
+      finished = true;
+    });
+    await store.load("b");
+    store.update("b", (value) => ({ ...value, text: "submitted b" }));
+    await store.flush("b");
+    const submitted = store.state("b").value.revision;
+    await api.clearComposerDraft("b", submitted);
+    const blockedRead = deferred();
+    const startedRead = deferred();
+    api.getComposerDraft.mockImplementationOnce(async (id) => {
+      const snapshot = records.get(id) ?? null;
+      startedRead.resolve();
+      await blockedRead.promise;
+      return snapshot;
+    });
+    const accepting = store.accepted("b", submitted);
+    await startedRead.promise;
+    blockedSave.resolve();
+    await api.saveComposerDraft.mock.results[0]?.value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(finished).toBe(false);
+    blockedRead.resolve();
+    await Promise.all([flushing, accepting]);
+    expect(store.state("b").value.text).toBe("");
+    expect(store.hasPending()).toBe(false);
   });
 
   it("waits for new session entries created while a previous session is flushing", async () => {

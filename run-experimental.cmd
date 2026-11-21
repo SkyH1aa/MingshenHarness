@@ -47,11 +47,9 @@ if not defined PNPM_CMD (
   goto :error
 )
 
-if not exist "apps\desktop\resources\native\codex-sandbox.exe" (
-  echo Preparing the verified native Windows sandbox runtime...
-  "%NODE_EXE%" scripts\provision-native-runtime.mjs
-  if errorlevel 1 goto :error
-)
+echo Verifying the pinned native Windows sandbox runtime...
+"%NODE_EXE%" scripts\provision-native-runtime.mjs
+if errorlevel 1 goto :error
 
 if not exist "node_modules" (
   echo Installing dependencies...
@@ -66,9 +64,8 @@ if not exist "node_modules" (
 "%NODE_EXE%" scripts\provision-electron-runtime.cjs
 if errorlevel 1 goto :error
 
-if exist "apps\desktop\out\main\index.js" goto :launch
-
-echo Building Mingshen Harness experimental version...
+:build
+echo Building the current Mingshen Harness experimental version...
 if defined PNPM_COREPACK (
   call "%PNPM_CMD%" pnpm build
 ) else (
@@ -77,7 +74,7 @@ if defined PNPM_COREPACK (
 if errorlevel 1 goto :error
 
 :launch
-echo Starting Mingshen Harness 1.3.3 experimental build...
+echo Starting Mingshen Harness 1.3.4 experimental build...
 "%NODE_EXE%" scripts\prepare-experimental-runtime.cjs --launch
 if errorlevel 1 goto :error
 exit /b 0

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { OpenDialogOptions } from "electron";
+import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import {
   app,
   BrowserWindow,
@@ -11,6 +11,7 @@ import {
   ipcMain,
   nativeImage,
   screen,
+  session,
   shell,
   webContents,
 } from "electron";
@@ -20,6 +21,7 @@ import { IPC_CHANNELS } from "../shared/ipc";
 import { localizeError } from "../shared/localized-errors";
 import type { QuickChatAction, QuickChatState } from "../shared/quick-chat";
 import type { SessionBatchTarget } from "../shared/session-catalog";
+import type { InteractiveTerminalCreateInput } from "../shared/terminal";
 import { normalizeUiPreferences } from "../shared/ui-preferences";
 import {
   canonicalProjectMemoryRoot,
@@ -30,6 +32,7 @@ import {
 import type { AppServices } from "./app-services";
 import { createAppServices } from "./app-services";
 import { ApprovalNotifications } from "./desktop/approval-notifications";
+import { settleWithin } from "./desktop/bounded-cleanup";
 import { CompletionNotifications } from "./desktop/completion-notifications";
 import { flushComposerDrafts } from "./desktop/composer-draft-flush";
 import { DesktopController } from "./desktop/desktop-controller";
@@ -87,11 +90,31 @@ let backgroundStarted = false;
 let completions: CompletionNotifications | null = null;
 let runtimeLogs: RuntimeLogService | null = null;
 let updateInstaller: string | null = null;
+const guardedBrowserPartitions = new Set<string>();
 
 function applicationWindows(): BrowserWindow[] {
   return [mainWindow, quickChatWindow].filter((window): window is BrowserWindow =>
     Boolean(window && !window.isDestroyed()),
   );
+}
+
+function ensureBrowserFileRequestGuard(partition: string): void {
+  if (guardedBrowserPartitions.has(partition)) return;
+  const browserPartition = session.fromPartition(partition);
+  browserPartition.webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) => {
+    const browserService = services?.browserService;
+    if (!browserService) {
+      callback({ cancel: true });
+      return;
+    }
+    void browserService
+      .isApprovedLocalFileRequest(details.webContentsId, details.url, details.resourceType)
+      .then(
+        (approved) => callback({ cancel: !approved }),
+        () => callback({ cancel: true }),
+      );
+  });
+  guardedBrowserPartitions.add(partition);
 }
 
 async function flushApplicationDrafts(
@@ -409,12 +432,23 @@ function createMainWindow(): BrowserWindow {
     webPreferences.nodeIntegration = false;
     webPreferences.contextIsolation = true;
     webPreferences.sandbox = true;
-    if (!/^persist:mingshen-(chrome|edge)$/.test(webPreferences.partition ?? "")) {
+    const partition = /^persist:mingshen-(chrome|edge)$/.exec(webPreferences.partition ?? "");
+    if (!partition) {
+      event.preventDefault();
+      return;
+    }
+    try {
+      ensureBrowserFileRequestGuard(`persist:mingshen-${partition[1]}`);
+    } catch {
       event.preventDefault();
       return;
     }
     const source = params.src ?? "about:blank";
-    if (source !== "about:blank" && !/^https?:\/\//i.test(source)) {
+    if (
+      source !== "about:blank" &&
+      !/^https?:\/\//i.test(source) &&
+      !services?.browserService.isApprovedLocalFileUrl(source, partition[1] as "chrome" | "edge")
+    ) {
       event.preventDefault();
     }
   });
@@ -426,7 +460,11 @@ function createMainWindow(): BrowserWindow {
     guest.session.on("will-download", (event) => event.preventDefault());
     guest.setWindowOpenHandler(() => ({ action: "deny" }));
     guest.on("will-navigate", (event, url) => {
-      if (url !== "about:blank" && !/^https?:\/\//i.test(url)) {
+      if (
+        url !== "about:blank" &&
+        !/^https?:\/\//i.test(url) &&
+        !services?.browserService.isApprovedLocalFileUrl(url, undefined, guest.id)
+      ) {
         event.preventDefault();
       }
     });
@@ -456,6 +494,19 @@ function requireServices(): AppServices {
     throw new Error("Application services are not ready.");
   }
   return services;
+}
+
+function requireMainWindowSender(event: IpcMainInvokeEvent): number {
+  const window = mainWindow;
+  if (
+    !window ||
+    window.isDestroyed() ||
+    event.sender.id !== window.webContents.id ||
+    event.senderFrame !== event.sender.mainFrame
+  ) {
+    throw new Error("本地终端仅允许主窗口操作。");
+  }
+  return event.sender.id;
 }
 
 function registerIpcHandlers(): void {
@@ -915,6 +966,15 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.sessionGet, (_event, id: string) =>
     requireServices().repository.getSession(id),
   );
+  ipcMain.handle(IPC_CHANNELS.projectContexts, (_event, sessionIds: unknown) => {
+    if (
+      !Array.isArray(sessionIds) ||
+      sessionIds.length > 2_000 ||
+      sessionIds.some((id) => typeof id !== "string" || !id || id.length > 200)
+    )
+      throw new Error("Invalid project-context session list.");
+    return requireServices().projectNavigationService.list(sessionIds);
+  });
   ipcMain.handle(IPC_CHANNELS.sessionGroups, () => requireServices().repository.sessionGroups());
   ipcMain.handle(IPC_CHANNELS.chatGroupsList, () =>
     requireServices().sessionService.listChatGroups(),
@@ -1007,6 +1067,34 @@ function registerIpcHandlers(): void {
     return requireServices().providerService.removeModel(modelConfigId);
   });
 
+  ipcMain.handle(IPC_CHANNELS.imageStudioGet, () =>
+    requireServices().imageStudioService.getWorkspace(),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioSave, (_event, workspace: unknown) =>
+    requireServices().imageStudioService.saveWorkspace(workspace),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioAssetData, (_event, assetId: unknown) =>
+    requireServices().imageStudioService.getAssetData(assetId),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioImport, (_event, files: unknown) =>
+    requireServices().imageStudioService.importAssets(files),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemoveAsset, (_event, assetId: unknown) =>
+    requireServices().imageStudioService.removeAsset(assetId),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioGenerate, (_event, input) =>
+    requireServices().imageStudioService.generate(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioPolishPrompt, (_event, input) =>
+    requireServices().imageStudioService.polishPrompt(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioReversePrompt, (_event, input) =>
+    requireServices().imageStudioService.reversePrompt(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioCancel, (_event, requestId: unknown) => {
+    requireServices().imageStudioService.cancelRequest(requestId);
+  });
+
   ipcMain.handle(IPC_CHANNELS.sessionCreate, (_event, input) => {
     return requireServices().sessionService.create(input);
   });
@@ -1016,6 +1104,9 @@ function registerIpcHandlers(): void {
     (_event, workspacePath: string | null, agentMode?: "code" | "work") => {
       return requireServices().sessionService.createInWorkspace(workspacePath, agentMode);
     },
+  );
+  ipcMain.handle(IPC_CHANNELS.sessionCreateInChatGroup, (_event, groupId: string | null) =>
+    requireServices().sessionService.createChatSessionInGroup(groupId),
   );
   ipcMain.handle(IPC_CHANNELS.sessionOpenWorkspace, (_event, sessionId: string) => {
     if (!desktop) throw new Error("Application services are not ready.");
@@ -1036,6 +1127,8 @@ function registerIpcHandlers(): void {
         current.repository.listChildSessions(id).some((child) => isBusy(child.id));
       if (input.archived === true && isBusy(input.sessionId))
         throw new Error("请先停止会话及其子任务，再归档。");
+      if (input.chatNetworkEnabled !== undefined && isBusy(input.sessionId))
+        throw new Error("任务运行期间不能切换 ChatAgent 联网状态，请等待结束或手动停止。");
       const session = current.repository.getSession(input.sessionId);
       if (
         session &&
@@ -1059,8 +1152,39 @@ function registerIpcHandlers(): void {
         current.chatService.setSessionApprovalMode(input.sessionId, approvalMode);
       if (permissionMode !== undefined)
         current.chatService.setSessionPermission(input.sessionId, permissionMode);
+      if (
+        session &&
+        (input.workspacePath !== undefined ||
+          input.executionMode !== undefined ||
+          input.patchOnly === true ||
+          input.agentMode === "chat" ||
+          permissionMode === "request_approval" ||
+          approvalMode === "automatic")
+      ) {
+        const invalidated = current.repository
+          .listSessions()
+          .filter(
+            (candidate) =>
+              candidate.id === session.id ||
+              (candidate.permissionMode !== "full_access" &&
+                projectKey(candidate.workspacePath) === projectKey(session.workspacePath)),
+          );
+        const results = await Promise.allSettled(
+          invalidated.map((candidate) => current.terminalService.disposeSession(candidate.id)),
+        );
+        const failures = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+        if (failures.length)
+          throw new AggregateError(
+            failures,
+            "权限或工作区已更新，但部分终端清理未确认，请重试关闭。",
+          );
+      }
       await current.chatService.restoreContext(input.sessionId);
-      return current.repository.getSession(input.sessionId);
+      const updated = current.repository.getSession(input.sessionId);
+      if (updated) emitRuntimeEvent({ type: "session_updated", session: updated });
+      return updated;
     },
   );
 
@@ -1097,6 +1221,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.chatSend, (_event, input) => {
     return requireServices().chatService.send(input);
   });
+  ipcMain.handle(IPC_CHANNELS.runSteeringGet, (_event, sessionId: string) =>
+    requireServices().chatService.getRunSteering(sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.runSteeringSend, (_event, input) =>
+    requireServices().chatService.steerRun(input),
+  );
   ipcMain.handle(IPC_CHANNELS.composerDraftGet, (_event, sessionId: string) =>
     requireServices().chatService.getComposerDraft(sessionId),
   );
@@ -1109,10 +1239,38 @@ function registerIpcHandlers(): void {
     if (cleared) emitComposerDraftChanged(event.sender.id, sessionId, null);
     return cleared;
   });
+  ipcMain.handle(IPC_CHANNELS.draftAssistSettingsGet, () =>
+    requireServices().draftAssistService.settings(),
+  );
+  ipcMain.handle(IPC_CHANNELS.draftAssistSettingsSet, (_event, input) =>
+    requireServices().draftAssistService.configure(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.draftAssistPolish, (_event, input) =>
+    requireServices().draftAssistService.polish(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.draftAssistCancel, (_event, requestId: unknown) => {
+    requireServices().draftAssistService.cancelRequest(requestId);
+  });
+  ipcMain.handle(IPC_CHANNELS.projectToneGet, (_event, sessionId: string) =>
+    requireServices().draftAssistService.getProjectTone(sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.projectToneSet, (_event, input) =>
+    requireServices().draftAssistService.setProjectTone(input),
+  );
 
   ipcMain.handle(IPC_CHANNELS.chatRewrite, (_event, input) => {
     return requireServices().chatService.rewriteAndSend(input);
   });
+
+  ipcMain.handle(IPC_CHANNELS.autoDriveSuggest, (_event, sessionId: string) =>
+    requireServices().chatService.suggestAutoDrive(sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.autoDriveCancel, (_event, sessionId: string) => {
+    requireServices().chatService.cancelAutoDrive(sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.agentCoordinationGet, (_event, sessionId: string) =>
+    requireServices().chatService.getCoordinationState(sessionId),
+  );
 
   ipcMain.handle(IPC_CHANNELS.chatStop, (_event, sessionId: string) => {
     requireServices().chatService.stop(sessionId);
@@ -1161,6 +1319,25 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.workspaceList, (_event, root: string, relativePath: string) => {
     return requireServices().workspaceService.list(root, relativePath);
   });
+  ipcMain.handle(
+    IPC_CHANNELS.workspaceSearchFiles,
+    (_event, input: import("../shared/project-navigation").WorkspaceFileSearchInput) => {
+      if (
+        !input ||
+        typeof input !== "object" ||
+        Array.isArray(input) ||
+        typeof input.sessionId !== "string" ||
+        !input.sessionId ||
+        input.sessionId.length > 200 ||
+        typeof input.query !== "string" ||
+        (input.limit !== undefined &&
+          (!Number.isFinite(input.limit) || input.limit < 1 || input.limit > 100))
+      )
+        throw new Error("Invalid workspace file search.");
+      const current = requireServices();
+      return current.workspaceSearchService.findSessionFiles(current.repository, input);
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.workspaceRead, (_event, root: string, relativePath: string) => {
     return requireServices().workspaceService.readFile(root, relativePath);
@@ -1199,6 +1376,60 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.workspaceRunCommand, (_event, root: string, command: string) => {
     return requireServices().workspaceService.runCommand(root, command);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.localReviewGet,
+    (_event, input: import("../shared/local-review").LocalReviewRequest) =>
+      requireServices().localReviewService.get(input),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.localReviewSubmit,
+    (_event, input: import("../shared/local-review").LocalReviewCommentsInput) =>
+      requireServices().localReviewService.submit(input),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.terminalList, (event, sessionId: unknown) => {
+    const ownerId = requireMainWindowSender(event);
+    if (typeof sessionId !== "string") throw new Error("无效的会话标识。");
+    return requireServices().terminalService.list(ownerId, sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.terminalCreate, (event, input: unknown) => {
+    const ownerId = requireMainWindowSender(event);
+    if (!input || typeof input !== "object") throw new Error("无效的终端创建请求。");
+    const value = input as Record<string, unknown>;
+    if (typeof value.sessionId !== "string") throw new Error("无效的会话标识。");
+    const normalized: InteractiveTerminalCreateInput = {
+      sessionId: value.sessionId,
+      ...(typeof value.cols === "number" ? { cols: value.cols } : {}),
+      ...(typeof value.rows === "number" ? { rows: value.rows } : {}),
+    };
+    return requireServices().terminalService.create(ownerId, normalized);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.terminalInput, (event, terminalId: unknown, data: unknown) => {
+    const ownerId = requireMainWindowSender(event);
+    if (typeof terminalId !== "string" || typeof data !== "string") {
+      throw new Error("无效的终端输入。");
+    }
+    return requireServices().terminalService.input(ownerId, terminalId, data);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.terminalResize,
+    (event, terminalId: unknown, cols: unknown, rows: unknown) => {
+      const ownerId = requireMainWindowSender(event);
+      if (typeof terminalId !== "string" || typeof cols !== "number" || typeof rows !== "number") {
+        throw new Error("无效的终端尺寸。");
+      }
+      return requireServices().terminalService.resize(ownerId, terminalId, cols, rows);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.terminalStop, (event, terminalId: unknown) => {
+    const ownerId = requireMainWindowSender(event);
+    if (typeof terminalId !== "string") throw new Error("无效的终端标识。");
+    return requireServices().terminalService.stop(ownerId, terminalId);
   });
 
   ipcMain.handle(IPC_CHANNELS.extensionsList, () => {
@@ -1433,8 +1664,27 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.projectTrustSet,
-    (_event, workspacePath: string, trusted: boolean) => {
-      requireServices().repository.setProjectTrusted(resolve(workspacePath), trusted);
+    async (_event, workspacePath: string, trusted: boolean) => {
+      const current = requireServices();
+      const root = resolve(workspacePath);
+      current.repository.setProjectTrusted(root, trusted);
+      if (!trusted) {
+        const key = canonicalProjectMemoryRoot(root);
+        const results = await Promise.allSettled(
+          current.repository
+            .listSessions()
+            .filter(
+              (session) =>
+                session.workspacePath && canonicalProjectMemoryRoot(session.workspacePath) === key,
+            )
+            .map((session) => current.terminalService.disposeSession(session.id)),
+        );
+        const failures = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+        if (failures.length)
+          throw new AggregateError(failures, "项目信任已撤销，但部分终端清理未确认，请重试关闭。");
+      }
     },
   );
 
@@ -1950,6 +2200,12 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
           }
           emitRuntimeEvent(event);
         },
+        emitTerminal: (ownerId, event) => {
+          const window = mainWindow;
+          if (window && !window.isDestroyed() && window.webContents.id === ownerId) {
+            window.webContents.send(IPC_CHANNELS.terminalEvent, event);
+          }
+        },
       });
       quickChat = new QuickChatController({
         repository: services.repository,
@@ -2042,7 +2298,11 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
         approvalNotifications,
         questionNotifications,
       );
+      const mainWindowWebContentsId = mainWindow.webContents.id;
       mainWindow.on("closed", () => {
+        void services?.terminalService
+          .disposeOwner(mainWindowWebContentsId)
+          .catch((cause) => recordRuntimeError("terminal.window-close", cause));
         mainWindow = null;
       });
 
@@ -2055,6 +2315,28 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
     .catch((cause) => {
       recordRuntimeError("desktop.startup", cause);
       console.error("Application startup failed:", cause);
+      completions?.dispose();
+      shortcuts?.stop();
+      updates?.stop();
+      for (const window of applicationWindows()) {
+        if (!window.isDestroyed()) window.destroy();
+      }
+      const startupServices = services;
+      services = null;
+      quickChat = null;
+      desktop = null;
+      updates = null;
+      dependencies = null;
+      void settleWithin([startupServices?.dispose(), runtimeLogs?.flush()], 10_000)
+        .then((result) => {
+          if (result === "timed_out") {
+            recordRuntimeError("desktop.startup-cleanup", "Startup cleanup exceeded 10 seconds.");
+          }
+        })
+        .finally(() => {
+          disposed = true;
+          app.exit(1);
+        });
     });
 
   app.on("window-all-closed", () => {

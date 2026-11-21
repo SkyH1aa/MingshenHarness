@@ -17,6 +17,108 @@ vi.mock("electron", () => ({
 }));
 
 describe("McpService", () => {
+  it("merges partial credential updates without dropping untouched secrets", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const secretStore = new SecretStore(database);
+    const service = new McpService(repository, secretStore, "1.3.4");
+    try {
+      const server = await service.save({
+        name: "Credential merge fixture",
+        description: "test",
+        transport: "http",
+        enabled: false,
+        url: "https://example.invalid/mcp",
+        headerKeys: ["AUTHORIZATION", "X-UNCHANGED"],
+        envKeys: ["FIRST_TOKEN", "SECOND_TOKEN"],
+        headers: {
+          AUTHORIZATION: "old-authorization",
+          "X-UNCHANGED": "keep-this",
+        },
+        env: {
+          FIRST_TOKEN: "old-first",
+          SECOND_TOKEN: "keep-this-too",
+        },
+      });
+      await service.save({
+        id: server.id,
+        name: server.name,
+        description: server.description,
+        transport: server.transport,
+        enabled: true,
+        url: server.url,
+        headerKeys: ["AUTHORIZATION", "X-UNCHANGED"],
+        envKeys: ["FIRST_TOKEN", "SECOND_TOKEN"],
+        headers: {
+          AUTHORIZATION: "new-authorization",
+          "X-BLANK": "",
+        },
+        env: {
+          FIRST_TOKEN: "new-first",
+        },
+      });
+
+      const stored = secretStore.read(repository.getMcpServerSecretRef(server.id) ?? "");
+      expect(JSON.parse(stored)).toMatchObject({
+        headers: {
+          AUTHORIZATION: "new-authorization",
+          "X-UNCHANGED": "keep-this",
+        },
+        env: {
+          FIRST_TOKEN: "new-first",
+          SECOND_TOKEN: "keep-this-too",
+        },
+      });
+      expect(JSON.parse(stored).headers).not.toHaveProperty("X-BLANK");
+
+      const removed = await service.save({
+        id: server.id,
+        name: server.name,
+        description: server.description,
+        transport: server.transport,
+        enabled: true,
+        url: server.url,
+        headerKeys: ["AUTHORIZATION"],
+        envKeys: ["FIRST_TOKEN"],
+      });
+      expect(removed.headerKeys).toEqual(["AUTHORIZATION"]);
+      expect(removed.envKeys).toEqual(["FIRST_TOKEN"]);
+      const afterRemoval = JSON.parse(
+        secretStore.read(repository.getMcpServerSecretRef(server.id) ?? ""),
+      );
+      expect(afterRemoval.headers).toEqual({ AUTHORIZATION: "new-authorization" });
+      expect(afterRemoval.env).toEqual({ FIRST_TOKEN: "new-first" });
+
+      await expect(
+        service.save({
+          id: server.id,
+          name: server.name,
+          description: server.description,
+          transport: server.transport,
+          enabled: true,
+          url: server.url,
+          headerKeys: ["AUTHORIZATION"],
+          headers: { "X-UNDECLARED": "must-not-store" },
+        }),
+      ).rejects.toThrow("未声明的 MCP Header 密钥");
+      await expect(
+        service.save({
+          id: server.id,
+          name: server.name,
+          description: server.description,
+          transport: server.transport,
+          enabled: true,
+          url: server.url,
+          envKeys: ["FIRST_TOKEN"],
+          env: { UNDECLARED_TOKEN: "must-not-store" },
+        }),
+      ).rejects.toThrow("未声明的 MCP 环境变量密钥");
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
+
   it("reconciles plugin MCP declarations while preserving enabled state and user credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "mingshen-plugin-mcp-reconcile-"));
     const database = openDatabase(join(root, "test.db"));
@@ -446,6 +548,89 @@ describe("McpService", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it.each([307, 308])(
+    "rejects OAuth token endpoint HTTP %i redirects without forwarding the POST",
+    async (statusCode) => {
+      let redirectedRequests = 0;
+      const authServer = createServer(async (request, response) => {
+        const origin = `http://127.0.0.1:${(authServer.address() as { port: number }).port}`;
+        if (request.url === "/.well-known/oauth-protected-resource/mcp") {
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              authorization_servers: [origin],
+              resource: `${origin}/mcp`,
+            }),
+          );
+          return;
+        }
+        if (request.url === "/.well-known/oauth-authorization-server") {
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              authorization_endpoint: `${origin}/authorize`,
+              token_endpoint: `${origin}/token`,
+            }),
+          );
+          return;
+        }
+        if (request.url === "/token") {
+          response.writeHead(statusCode, { Location: `${origin}/redirect-target` });
+          response.end();
+          return;
+        }
+        if (request.url === "/redirect-target") {
+          redirectedRequests += 1;
+          for await (const _chunk of request) {
+            // Drain the body so a leaked POST is observable even if the test later fails.
+          }
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify({ access_token: "must-not-arrive" }));
+          return;
+        }
+        response.writeHead(404, { "Content-Type": "application/json" });
+        response.end("{}");
+      });
+      await new Promise<void>((resolveListen) =>
+        authServer.listen(0, "127.0.0.1", () => resolveListen()),
+      );
+      const port = (authServer.address() as { port: number }).port;
+      const database = openDatabase(":memory:");
+      const service = new McpService(new Repository(database), new SecretStore(database), "1.3.4");
+      try {
+        const server = await service.save({
+          name: "OAuth redirect fixture",
+          description: "test",
+          transport: "http",
+          enabled: true,
+          url: `http://127.0.0.1:${port}/mcp`,
+          oauthEnabled: true,
+          oauthClientId: "fixture-client",
+          oauthClientSecret: "fixture-client-secret",
+        });
+        const started = await service.startOAuth(server.id);
+        const authorization = new URL(started.authorizationUrl);
+        const callback = new URL(authorization.searchParams.get("redirect_uri") ?? "");
+        callback.searchParams.set("code", "fixture-code");
+        callback.searchParams.set("state", authorization.searchParams.get("state") ?? "");
+
+        const completed = await fetch(callback);
+        expect(completed.status).toBe(400);
+        expect(await completed.text()).toContain("OAuth failed:");
+        expect(redirectedRequests).toBe(0);
+        expect(service.list().find((entry) => entry.id === server.id)?.oauthAuthenticated).toBe(
+          false,
+        );
+      } finally {
+        service.dispose();
+        database.close();
+        authServer.closeAllConnections();
+        await new Promise<void>((resolveClose) => authServer.close(() => resolveClose()));
+      }
+    },
+    20_000,
+  );
 
   it.each([
     { padding: 6000, truncated: false },

@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
+import { stopGuardedWorkspaceIo } from "../workspace/guarded-workspace-io";
 import { AgentProfileService } from "./agent-profile-service";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  await stopGuardedWorkspaceIo();
   for (const root of temporaryDirectories.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -20,6 +22,7 @@ describe("AgentProfileService", () => {
     temporaryDirectories.push(root);
     const database = openDatabase(join(root, "test.db"));
     const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
     const agents = join(root, ".opencode", "agents");
     await mkdir(agents, { recursive: true });
     await writeFile(
@@ -63,6 +66,7 @@ describe("AgentProfileService", () => {
     temporaryDirectories.push(root);
     const database = openDatabase(join(root, "test.db"));
     const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
     await mkdir(join(root, "prompts"), { recursive: true });
     await writeFile(join(root, "prompts", "review.txt"), "Review code without editing.", "utf8");
     await writeFile(
@@ -94,6 +98,188 @@ describe("AgentProfileService", () => {
         topP: 0.8,
       });
       expect(reviewer?.instructions).toBe("Review code without editing.");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("ignores project agent configuration until the workspace is trusted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-trust-"));
+    temporaryDirectories.push(root);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    await writeFile(
+      join(root, "opencode.json"),
+      JSON.stringify({
+        agent: {
+          reviewer: {
+            prompt: "Review only trusted workspace changes.",
+          },
+        },
+      }),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      expect(service.list().some((profile) => profile.name === "reviewer")).toBe(false);
+
+      repository.setProjectTrusted(root, true);
+      await service.syncWorkspace(root);
+      expect(service.list().find((profile) => profile.name === "reviewer")).toMatchObject({
+        instructions: "Review only trusted workspace changes.",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("ignores project Markdown agents until the workspace is trusted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-markdown-trust-"));
+    temporaryDirectories.push(root);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    const agents = join(root, ".opencode", "agents");
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, "review.md"),
+      ["---", "name: Project reviewer", "---", "Review project changes."].join("\n"),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      expect(service.list().some((profile) => profile.name === "Project reviewer")).toBe(false);
+
+      repository.setProjectTrusted(root, true);
+      await service.syncWorkspace(root);
+      expect(service.list().some((profile) => profile.name === "Project reviewer")).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("removes project-sourced agents when trust is revoked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-untrust-"));
+    temporaryDirectories.push(root);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
+    await writeFile(
+      join(root, "opencode.json"),
+      JSON.stringify({
+        agent: {
+          projectOnly: { prompt: "Project-scoped instructions." },
+        },
+      }),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      expect(service.list().some((profile) => profile.name === "projectOnly")).toBe(true);
+
+      repository.setProjectTrusted(root, false);
+      await service.syncWorkspace(root);
+      expect(service.list().some((profile) => profile.name === "projectOnly")).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps project build overrides separate from the built-in primary profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-primary-"));
+    temporaryDirectories.push(root);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
+    await writeFile(
+      join(root, "opencode.json"),
+      JSON.stringify({
+        agent: {
+          build: {
+            prompt: "Treat this repository as untrusted project data.",
+            permission: { "*": "allow" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      const primary = repository.getAgentProfile("primary");
+      const projectBuild = service
+        .list()
+        .find(
+          (profile) =>
+            profile.name === "build" &&
+            profile.sourcePath?.toLowerCase().startsWith(root.toLowerCase()),
+        );
+      expect(primary).toMatchObject({
+        name: "Mingshen",
+        instructions: "",
+        sourcePath: null,
+      });
+      expect(primary?.permissions).toEqual({});
+      expect(projectBuild).toMatchObject({
+        instructions: "Treat this repository as untrusted project data.",
+        role: "primary",
+      });
+      expect(projectBuild?.id).not.toBe("primary");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("repairs built-in profiles polluted by an earlier project config sync", () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    try {
+      const primary = repository.getAgentProfile("primary");
+      if (!primary) throw new Error("Primary profile is missing.");
+      repository.saveAgentProfile({
+        ...primary,
+        instructions: "Injected project instructions.",
+        permissions: { "*": "allow" },
+        sourcePath: "C:\\untrusted\\opencode.json#agent:build",
+      });
+      const service = new AgentProfileService(repository);
+      expect(service.list().find((profile) => profile.id === "primary")).toMatchObject({
+        name: "Mingshen",
+        instructions: "",
+        sourcePath: null,
+        permissions: {},
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("does not let trusted project prompts read files outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-agent-boundary-"));
+    const outside = await mkdtemp(join(tmpdir(), "mingshen-agent-secret-"));
+    temporaryDirectories.push(root, outside);
+    const database = openDatabase(join(root, "test.db"));
+    const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
+    const secret = join(outside, "secret.txt");
+    await writeFile(secret, "Do not inject this external content.", "utf8");
+    await writeFile(
+      join(root, "opencode.json"),
+      JSON.stringify({
+        agent: {
+          reviewer: {
+            prompt: `{file:${secret}}`,
+          },
+        },
+      }),
+      "utf8",
+    );
+    try {
+      const service = new AgentProfileService(repository);
+      await service.syncWorkspace(root);
+      expect(service.list().find((profile) => profile.name === "reviewer")?.instructions).toBe("");
     } finally {
       database.close();
     }
@@ -140,6 +326,52 @@ describe("AgentProfileService", () => {
     }
   });
 
+  it("rejects a known image-output model when saving a profile", () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    try {
+      const provider = repository.insertProvider({
+        name: "Fixture",
+        baseUrl: "https://example.com/v1",
+        protocol: "openai_responses",
+        authMode: "bearer",
+        customHeaderName: null,
+      });
+      repository.insertModel({
+        providerId: provider.id,
+        modelId: "image",
+        displayName: "Image",
+        contextWindow: 10000,
+        maxOutputTokens: 1000,
+        inputModalities: ["text"],
+        outputModalities: ["image"],
+        toolCalls: false,
+        parallelToolCalls: false,
+        reasoningLevels: [],
+        anthropicNoneBehavior: "disabled",
+      });
+      const image = repository
+        .getProvider(provider.id)
+        ?.models.find((item) => item.modelId === "image");
+      if (!image) throw new Error("Missing image fixture model");
+      const service = new AgentProfileService(repository);
+      expect(() =>
+        service.save({
+          name: "Image worker",
+          description: "",
+          role: "subagent",
+          instructions: "",
+          modelId: image.id,
+          readOnly: false,
+          enabled: true,
+        }),
+      ).toThrow("文本输入和输出");
+      expect(service.list().some((profile) => profile.name === "Image worker")).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it("defaults existing profiles to both workbench modes and validates explicit applicability", () => {
     const database = openDatabase(":memory:");
     try {
@@ -176,6 +408,7 @@ describe("AgentProfileService", () => {
     temporaryDirectories.push(root);
     const database = openDatabase(join(root, "test.db"));
     const repository = new Repository(database);
+    repository.setProjectTrusted(root, true);
     const agents = join(root, ".opencode", "agents");
     await mkdir(agents, { recursive: true });
     const markdownPath = join(agents, "office.md");

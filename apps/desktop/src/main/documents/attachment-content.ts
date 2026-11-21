@@ -11,6 +11,7 @@ import { extractDocumentBuffer, type PdfReadMode } from "./document-extractor";
 
 const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_TEXT = 120_000;
+const ALLOWED_TEXT_CONTROL_CHARACTERS = new Set([9, 10, 13]);
 const cache = new Map<
   string,
   {
@@ -23,6 +24,26 @@ export function pdfReadMode(protocol: ProviderProtocol, model: ModelConfig): Pdf
   if (protocol !== "openai_chat_completions" && model.inputModalities?.includes("file"))
     return "native";
   return model.inputModalities?.includes("image") ? "vision" : "ocr";
+}
+
+function decodeTextAttachment(bytes: Buffer): string {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("The text attachment is not valid UTF-8 and was not parsed as text.");
+  }
+  let containsBinaryControl = false;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if ((codePoint < 32 && !ALLOWED_TEXT_CONTROL_CHARACTERS.has(codePoint)) || codePoint === 127) {
+      containsBinaryControl = true;
+      break;
+    }
+  }
+  if (containsBinaryControl)
+    throw new Error("The text attachment contains binary control characters and was not parsed.");
+  return text;
 }
 
 export async function prepareAttachment(
@@ -61,7 +82,7 @@ export async function prepareAttachment(
       try {
         const result = documentName
           ? await extractDocumentBuffer(bytes, documentName, signal, pdfMode)
-          : { text: bytes.toString("utf8"), format: "TEXT", warnings: [] };
+          : { text: decodeTextAttachment(bytes), format: "TEXT", warnings: [] };
         return {
           extractedContent: {
             text: result.text.slice(0, MAX_TEXT),

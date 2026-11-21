@@ -43,6 +43,14 @@ describe("uploaded document extraction", () => {
     expect(result.extractedContent?.text).toHaveLength(120000);
     expect(extractedAttachmentText(result)).toContain("truncated");
   });
+  it.each([
+    ["null bytes", Buffer.from([0x61, 0x00, 0x62])],
+    ["invalid UTF-8", Buffer.from([0xc3, 0x28])],
+  ])("rejects %s disguised as a text attachment", async (_label, bytes) => {
+    const result = await prepareAttachment(attachment("disguised.txt", bytes));
+    expect(result.extractedContent?.text).toBe("");
+    expect(result.extractedContent?.error).toBeTruthy();
+  });
   it("preserves explicit parser errors instead of claiming unsupported input or success", async () => {
     const result = await prepareAttachment(attachment("broken.PDF", Buffer.from("not pdf")));
     expect(result.mimeType).toBe("application/pdf");

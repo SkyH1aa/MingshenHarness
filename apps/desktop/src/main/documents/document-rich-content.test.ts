@@ -8,6 +8,7 @@ import { documentAuthoringSchema } from "./document-authoring-schema";
 import { extractDocumentBuffer } from "./document-extractor";
 import { documentMarkdown, equationSource, nativeEquation } from "./document-rich-content";
 import { validateTemplatePlaceholders } from "./document-template";
+import { embedWorkbookInDocx, xlsxWithExternalLinkFixture } from "./office-package-test-fixtures";
 
 const xml = (bytes: Buffer, path = "word/document.xml") =>
   strFromU8(unzipSync(bytes)[path] ?? new Uint8Array());
@@ -322,6 +323,105 @@ describe("expanded document authoring", () => {
   });
 
   it.each([
+    {
+      label: "external image relationship",
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+      target: "https://example.com/tracker.png",
+      external: true,
+      error: "DOCX_EXTERNAL_RELATIONSHIP_UNSUPPORTED",
+    },
+    {
+      label: "external image with missing TargetMode",
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+      target: "https://example.com/tracker.png",
+      external: false,
+      error: "DOCX_EXTERNAL_RELATIONSHIP_UNSUPPORTED",
+    },
+    {
+      label: "attached template relation",
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate",
+      target: "file:///C:/outside/template.docx",
+      external: true,
+      error: "DOCX_ACTIVE_CONTENT_UNSUPPORTED",
+    },
+    {
+      label: "OLE package relation",
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package",
+      target: "embeddings/oleObject1.bin",
+      external: false,
+      error: "DOCX_ACTIVE_CONTENT_UNSUPPORTED",
+    },
+    {
+      label: "altChunk relation",
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk",
+      target: "afchunk.html",
+      external: false,
+      error: "DOCX_ACTIVE_CONTENT_UNSUPPORTED",
+    },
+  ])("rejects unsafe DOCX $label", async ({ type, target, external, error }) => {
+    const archive = unzipSync(await generate([{ type: "paragraph", text: "{{body}}" }]));
+    const relationshipPath = "word/_rels/document.xml.rels";
+    const relationshipBytes = archive[relationshipPath];
+    if (!relationshipBytes) throw new Error("Missing generated relationships.");
+    const relationships = new DOMParser().parseFromString(strFromU8(relationshipBytes), "text/xml");
+    const relationship = relationships.createElementNS(
+      "http://schemas.openxmlformats.org/package/2006/relationships",
+      "Relationship",
+    );
+    relationship.setAttribute("Id", "rIdUnsafeFixture");
+    relationship.setAttribute("Type", type);
+    relationship.setAttribute("Target", target);
+    if (external) relationship.setAttribute("TargetMode", "External");
+    relationships.documentElement.appendChild(relationship);
+    archive[relationshipPath] = strToU8(relationships.toString());
+    await expect(
+      validateTemplatePlaceholders(Buffer.from(zipSync(archive)), ["body"]),
+    ).rejects.toThrow(error);
+  });
+
+  it.each([
+    ["OLE object element", "<w:p><w:r><w:object/></w:r></w:p>"],
+    ["altChunk element", '<w:altChunk r:id="rIdUnsafeFixture"/>'],
+    [
+      "external-content field",
+      '<w:p><w:fldSimple w:instr="INCLUDETEXT &quot;https://example.com/remote.doc&quot;"/></w:p>',
+    ],
+  ])("rejects DOCX %s outside editable paragraphs", async (_label, unsafeXml) => {
+    const archive = unzipSync(await generate([{ type: "paragraph", text: "{{body}}" }]));
+    const content = xml(Buffer.from(zipSync(archive)));
+    archive["word/document.xml"] = strToU8(content.replace("</w:body>", `${unsafeXml}</w:body>`));
+    await expect(
+      validateTemplatePlaceholders(Buffer.from(zipSync(archive)), ["body"]),
+    ).rejects.toThrow("DOCX_ACTIVE_");
+  });
+
+  it.each([
+    ["INCLUDE", "TEXT"],
+    ["INCLUDE", "PICTURE"],
+    ["DDE", "AUTO"],
+    ["DATA", "BASE"],
+    ["LI", "NK"],
+    ["EM", "BED"],
+    ["MACRO", "BUTTON"],
+  ])("rejects an active DOCX field split as %s%s across instruction runs", async (left, right) => {
+    const archive = unzipSync(await generate([{ type: "paragraph", text: "{{body}}" }]));
+    const content = xml(Buffer.from(zipSync(archive)));
+    const splitField =
+      "<w:p>" +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      `<w:r><w:instrText xml:space="preserve"> ${left}</w:instrText></w:r>` +
+      `<w:r><w:instrText xml:space="preserve">${right} &quot;fixture&quot;</w:instrText></w:r>` +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      "<w:r><w:t>Field</w:t></w:r>" +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+      "</w:p>";
+    archive["word/document.xml"] = strToU8(content.replace("</w:body>", `${splitField}</w:body>`));
+    await expect(
+      validateTemplatePlaceholders(Buffer.from(zipSync(archive)), ["body"]),
+    ).rejects.toThrow("DOCX_ACTIVE_FIELD_UNSUPPORTED");
+  });
+
+  it.each([
     ["content-type", "application/vnd.ms-word.document.macroEnabled.main+xml"],
     ["content-type", "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml"],
     ["relationship", "http://schemas.microsoft.com/office/2006/relationships/vbaProject"],
@@ -355,6 +455,16 @@ describe("expanded document authoring", () => {
     await expect(
       validateTemplatePlaceholders(Buffer.from(zipSync(archive)), ["body"]),
     ).rejects.toThrow("Signed or macro-enabled templates");
+  });
+
+  it("rejects external-link workbooks before validating DOCX template placeholders", async () => {
+    const template = embedWorkbookInDocx(
+      await generate([{ type: "paragraph", text: "{{body}}" }]),
+      xlsxWithExternalLinkFixture(),
+    );
+    await expect(validateTemplatePlaceholders(template, ["body"])).rejects.toThrow(
+      "OFFICE_UNSUPPORTED_PART",
+    );
   });
 
   it.each(["docx", "pptx"])("labels pie categories with a native legend in %s", async (format) => {

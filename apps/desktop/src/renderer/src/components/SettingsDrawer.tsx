@@ -457,7 +457,7 @@ function AppearanceSettings({
           </select>
         </label>
         <label className="settings-row">
-          <span>{tr("粘贴时显示 Markdown 和公式格式")}</span>
+          <span>{tr("在输入区显示 Markdown 和公式预览开关")}</span>
           <input
             type="checkbox"
             checked={preferences.composerRichPaste}

@@ -63,7 +63,7 @@ export class SessionWorkbenchService {
     };
   }
 
-  prepareTurn(sessionId: string, resume = false): SessionPlan {
+  prepareTurn(sessionId: string, resume = false, emitUpdates = true): SessionPlan {
     const plan = this.state(sessionId).plan;
     if (!plan.steps.length)
       return plan.paused || plan.reviewRequired
@@ -71,6 +71,7 @@ export class SessionWorkbenchService {
             { sessionId, revision: plan.revision, paused: false, steps: [] },
             false,
             false,
+            emitUpdates,
           )
         : plan;
     if (plan.steps.every((step) => ["completed", "cancelled"].includes(step.status)))
@@ -78,12 +79,14 @@ export class SessionWorkbenchService {
         { sessionId, revision: plan.revision, steps: [], paused: false, breakpoints: [] },
         false,
         false,
+        emitUpdates,
       );
     if (resume && !plan.paused && !plan.reviewRequired) return plan;
     return this.update(
       { sessionId, revision: plan.revision, ...(resume ? { paused: false } : {}) },
       false,
       !resume,
+      emitUpdates,
     );
   }
 
@@ -109,7 +112,12 @@ export class SessionWorkbenchService {
     );
   }
 
-  update(input: PlanUpdateInput, fromAgent = false, reviewRequired?: boolean): SessionPlan {
+  update(
+    input: PlanUpdateInput,
+    fromAgent = false,
+    reviewRequired?: boolean,
+    emitUpdates = true,
+  ): SessionPlan {
     const current = this.state(input.sessionId).plan;
     if (current.revision !== input.revision) throw new Error("计划已更新，请刷新后再保存。");
     const raw = input.steps ?? current.steps;
@@ -185,9 +193,14 @@ export class SessionWorkbenchService {
       dependencies: Object.fromEntries(steps.map((step) => [step.id, step.dependsOn])),
       updatedAt: now,
     });
-    this.emit({ type: "session_todos_updated", sessionId: input.sessionId, todos: steps });
-    this.changed(input.sessionId);
+    if (emitUpdates) this.publishState(input.sessionId);
     return this.state(input.sessionId).plan;
+  }
+
+  publishState(sessionId: string): void {
+    const state = this.state(sessionId);
+    this.emit({ type: "session_todos_updated", sessionId, todos: state.plan.steps });
+    this.emit({ type: "workbench_updated", sessionId, state });
   }
 
   checkpoint(sessionId: string, checkpoint: ExecutionCheckpoint): void {

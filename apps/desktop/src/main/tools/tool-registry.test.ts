@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionView } from "../../shared/domain";
 import { PermissionStore } from "../permissions/permission-store";
 import { isDangerousCommand, ToolRegistry } from "./tool-registry";
@@ -16,6 +16,88 @@ afterEach(async () => {
 });
 
 describe("ToolRegistry document reading", () => {
+  it("skips per-request web approval only for an enabled ChatAgent and hard-blocks disabled access", async () => {
+    const registry = new ToolRegistry();
+    const requestApproval = vi.fn(async () => ({
+      approvalId: "approval",
+      decision: "allow_once" as const,
+    }));
+    const context = {
+      session: {
+        id: "chat-session",
+        agentMode: "chat",
+        chatNetworkEnabled: true,
+        workspacePath: null,
+        permissionMode: "request_approval",
+        executionMode: "host",
+      } as SessionView,
+      runId: "run",
+      toolCallId: "call",
+      toolName: "web_fetch",
+      signal: new AbortController().signal,
+      permissions: new PermissionStore(),
+      requestApproval,
+    };
+
+    const enabled = await registry.execute("web_fetch", { url: "https://localhost/" }, context);
+    expect(enabled.isError).toBe(true);
+    expect(enabled.output).toContain("Private network targets are blocked");
+    expect(requestApproval).not.toHaveBeenCalled();
+
+    const disabled = await registry.execute(
+      "web_fetch",
+      { url: "https://localhost/" },
+      { ...context, session: { ...context.session, chatNetworkEnabled: false } },
+    );
+    expect(disabled).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("CHAT_NETWORK_DISABLED"),
+    });
+    expect(requestApproval).not.toHaveBeenCalled();
+
+    const coding = await registry.execute(
+      "web_fetch",
+      { url: "https://localhost/" },
+      {
+        ...context,
+        session: { ...context.session, agentMode: "code", chatNetworkEnabled: true },
+      },
+    );
+    expect(coding.isError).toBe(true);
+    expect(requestApproval).toHaveBeenCalledOnce();
+  });
+
+  it("hard-blocks a forged ChatAgent web_search call when internet access is disabled", async () => {
+    const requestApproval = vi.fn();
+    const registry = new ToolRegistry();
+    const result = await registry.execute(
+      "web_search",
+      { query: "must not run" },
+      {
+        session: {
+          id: "offline-chat",
+          agentMode: "chat",
+          chatNetworkEnabled: false,
+          workspacePath: null,
+          permissionMode: "request_approval",
+          executionMode: "host",
+        } as SessionView,
+        runId: "run",
+        toolCallId: "call",
+        toolName: "web_search",
+        signal: new AbortController().signal,
+        permissions: new PermissionStore(),
+        requestApproval,
+      },
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("CHAT_NETWORK_DISABLED"),
+    });
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
   it("permits project format commands while blocking disk formatting", () => {
     expect(isDangerousCommand("pnpm format")).toBeNull();
     expect(isDangerousCommand("ruff format src")).toBeNull();

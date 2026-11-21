@@ -452,6 +452,7 @@ describe("Tool argument compatibility", () => {
       },
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{}" } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "}" } }] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
       "[DONE]",
     ]);
     expect(decodedCalls(await collect(input("openai_chat_completions")))).toEqual([
@@ -527,7 +528,7 @@ describe("Model protocol streaming", () => {
           ? [{ type: "response.completed", response: {} }]
           : protocol === "anthropic_messages"
             ? [{ type: "message_stop" }]
-            : ["[DONE]"],
+            : [{ choices: [{ delta: {}, finish_reason: "stop" }] }, "[DONE]"],
       );
       const value = input(protocol);
       value.model.inputModalities =
@@ -913,6 +914,49 @@ describe("Model protocol streaming", () => {
       await expect(collect(input(protocol))).rejects.toThrow(/stream|流/i);
     },
   );
+  it("does not accept non-empty Chat Completions text when [DONE] has no finish_reason", async () => {
+    fixture([{ choices: [{ delta: { content: "Partial" } }] }, "[DONE]"]);
+    await expect(collect(input("openai_chat_completions"))).rejects.toMatchObject({
+      name: "ModelRequestError",
+      retryable: true,
+      message: expect.stringContaining("without finish_reason"),
+    });
+  });
+  it("does not release a complete Chat Completions tool call when [DONE] has no finish_reason", async () => {
+    fixture([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_1",
+                  function: {
+                    name: "run_command",
+                    arguments: JSON.stringify({ command: "Write-Output truncated" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+    await expect(collect(input("openai_chat_completions"))).rejects.toMatchObject({
+      name: "ModelRequestError",
+      retryable: true,
+      message: expect.stringContaining("without finish_reason"),
+    });
+  });
+  it("accepts Chat Completions text after an explicit finish_reason", async () => {
+    fixture([{ choices: [{ delta: { content: "Complete" }, finish_reason: "stop" }] }, "[DONE]"]);
+    expect(await collect(input("openai_chat_completions"))).toContainEqual({
+      type: "text_delta",
+      text: "Complete",
+    });
+  });
 });
 
 describe("explicit model output limits", () => {

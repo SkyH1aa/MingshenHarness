@@ -1,18 +1,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { lstat, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import type {
   ApprovalDecision,
@@ -25,7 +14,6 @@ import { APP_VERSION } from "../../shared/release";
 import { CodeIndexService, type IndexSnapshot } from "../agents/code-index-service";
 import { isMemoryPath, MEMORY_DIRECTORY } from "../agents/project-memory-service";
 import { chatToolRejection } from "../chat/agent-mode-policy";
-import { recordRuntimeError } from "../diagnostics/runtime-log";
 import { authorOfficeDocument, renderDocumentHtml } from "../documents/document-author";
 import {
   documentAssetPaths,
@@ -37,16 +25,31 @@ import {
 import { readDocxStructure } from "../documents/document-edit";
 import { extractDocumentBuffer, isDocumentPath } from "../documents/document-extractor";
 import { printDocumentPdf } from "../documents/document-pdf";
-import { executeOfficeDocument, officeDocumentAssets } from "../documents/office-document";
+import {
+  executeOfficeDocument,
+  type OfficeDocumentResult,
+  officeDocumentAssets,
+} from "../documents/office-document";
 import { officeDocumentSchema } from "../documents/office-document-schema";
 import type { PermissionStore } from "../permissions/permission-store";
 import { publicFetch } from "../security/network-policy";
 import { dockerExecutable } from "../workspace/docker-path";
 import { DOCKER_SECURITY_ARGS, DockerService } from "../workspace/docker-service";
 import { createFileDiff } from "../workspace/file-diff";
-import { NativeSandboxService } from "../workspace/native-sandbox-service";
+import {
+  listGuardedDirectory,
+  readGuardedFile,
+  statGuardedPath,
+  writeGuardedFile,
+} from "../workspace/guarded-workspace-io";
+import {
+  isNativeSandboxCleanupUnconfirmedError,
+  type NativeCommandScope,
+  NativeSandboxService,
+} from "../workspace/native-sandbox-service";
 import { safeFilePath } from "../workspace/safe-file-path";
 import { BoundedOutput } from "./bounded-output";
+import { HostCommandService, isHostCommandCleanupUnconfirmedError } from "./host-command-service";
 import {
   type CommandLaunch,
   type CommandSessionInfo,
@@ -90,6 +93,8 @@ export interface ToolExecutionResult {
   /** Internal capture for paginated recovery; removed before sending to a provider. */
   fullOutput?: string;
   isError: boolean;
+  cleanupUnconfirmed?: boolean;
+  officeVerification?: OfficeDocumentResult["verification"];
   fileChange?: FileChange;
   fileChanges?: FileChange[];
   images?: ToolResultImage[];
@@ -1408,11 +1413,14 @@ function applyUpdatePatch(content: string, body: string[]): string {
 export class ToolRegistry {
   private readonly codeIndex = new CodeIndexService();
   private readonly cache = new ToolResultCache();
-  private readonly commands = new PersistentCommandService();
+  constructor(
+    private readonly nativeSandbox = new NativeSandboxService(),
+    private readonly commands = new PersistentCommandService(),
+    private readonly hostCommands = new HostCommandService(),
+  ) {}
   invalidateCache(): void {
     this.cache.clear();
   }
-  constructor(private readonly nativeSandbox = new NativeSandboxService()) {}
   descriptors(): ToolDescriptor[] {
     return TOOL_DESCRIPTORS;
   }
@@ -1422,15 +1430,67 @@ export class ToolRegistry {
   }
 
   hasRunningCommands(runId: string): boolean {
-    return this.commandSessions(runId).some((command) => command.running);
+    return (
+      this.commandSessions(runId).some((command) => command.running) ||
+      this.hostCommands.hasRunningCommands(runId)
+    );
   }
 
   async cancelRun(runId: string): Promise<void> {
-    await this.commands.cancelRun(runId);
+    await this.settleCleanup(
+      [
+        this.commands.cancelRun(runId),
+        this.nativeSandbox.cancelRun(runId),
+        this.hostCommands.cancelRun(runId),
+      ],
+      `Cleanup for run ${runId} could not be fully confirmed.`,
+    );
   }
 
   async shutdown(): Promise<void> {
-    await this.commands.shutdown();
+    await this.settleCleanup(
+      [this.commands.shutdown(), this.nativeSandbox.shutdown(), this.hostCommands.shutdown()],
+      "Tool cleanup could not be fully confirmed during shutdown.",
+    );
+  }
+
+  confirmRunStopped(runId: string): void {
+    const failures: unknown[] = [];
+    for (const confirm of [
+      () => this.commands.confirmRunStopped(runId),
+      () => this.nativeSandbox.confirmRunStopped(runId),
+      () => this.hostCommands.confirmRunStopped(runId),
+    ]) {
+      try {
+        confirm();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(
+        failures,
+        `Cleanup confirmation for run ${runId} could not be fully applied.`,
+      );
+  }
+
+  private nativeScope(context: ToolExecutionContext): NativeCommandScope {
+    return {
+      sessionId: context.session.id,
+      runId: context.runId,
+      toolCallId: context.toolCallId,
+    };
+  }
+
+  private async settleCleanup(operations: Promise<void>[], message: string): Promise<void> {
+    const results = await Promise.allSettled(operations);
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length === 0) return;
+    if (failures.length === 1) throw failures[0];
+    throw new AggregateError(failures, message);
   }
 
   async execute(
@@ -1576,9 +1636,13 @@ export class ToolRegistry {
         typeof error.capturedOutput === "string"
           ? error.capturedOutput
           : undefined;
+      const cleanupUnconfirmed =
+        isNativeSandboxCleanupUnconfirmedError(error) ||
+        isHostCommandCleanupUnconfirmedError(error);
       return {
         output: errorText(error),
         isError: true,
+        ...(cleanupUnconfirmed ? { cleanupUnconfirmed: true } : {}),
         ...(captured ? { fullOutput: `${errorText(error)}\n${captured}` } : {}),
       };
     }
@@ -1617,7 +1681,12 @@ export class ToolRegistry {
       maxEntries?: number;
     }) =>
       native
-        ? await this.nativeSandbox.fileOperation(root, request, context.signal)
+        ? await this.nativeSandbox.fileOperation(
+            root,
+            request,
+            context.signal,
+            this.nativeScope(context),
+          )
         : await new DockerService().fileOperation(
             context.dockerImage ?? "mcr.microsoft.com/powershell:lts-alpine",
             root,
@@ -1729,6 +1798,7 @@ export class ToolRegistry {
               ...(depth ? { depth } : {}),
             },
             context.signal,
+            this.nativeScope(context),
           )
         : await docker.fileOperation(
             context.dockerImage as string,
@@ -1788,6 +1858,7 @@ export class ToolRegistry {
                   root,
                   { operation: "read_binary", path: local },
                   context.signal,
+                  this.nativeScope(context),
                 )
               : await docker.fileOperation(
                   context.dockerImage as string,
@@ -2100,7 +2171,12 @@ export class ToolRegistry {
               request,
               context.signal,
             )
-          : await this.nativeSandbox.fileOperation(root, request, context.signal);
+          : await this.nativeSandbox.fileOperation(
+              root,
+              request,
+              context.signal,
+              this.nativeScope(context),
+            );
       if (typeof base64 !== "string" || base64.length > Math.ceil(maxBytes / 3) * 4)
         throw new Error("view_image exceeds the 20 MiB image limit.");
       bytes = Buffer.from(base64, "base64");
@@ -2205,6 +2281,7 @@ export class ToolRegistry {
               root,
               { operation: "read_binary", path: local },
               context.signal,
+              this.nativeScope(context),
             ),
           ),
           "base64",
@@ -2213,13 +2290,14 @@ export class ToolRegistry {
         context.observeFile?.(absolute, createHash("sha256").update(bytes).digest("hex"));
         return bytes;
       }
-      const metadata = await stat(absolute);
-      if (!metadata.isFile()) throw new Error(`Office 源不是普通文件：${absolute}`);
-      if (metadata.size > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
-      const bytes = await readFile(absolute);
-      if (bytes.length > MAX_DOCUMENT_BYTES) throw new Error("Office 文件超过 25 MiB 限制。");
-      context.observeFile?.(absolute, createHash("sha256").update(bytes).digest("hex"));
-      return bytes;
+      const guarded = await readGuardedFile(
+        root,
+        relative(root, absolute).replaceAll("\\", "/"),
+        MAX_DOCUMENT_BYTES,
+        { signal: context.signal },
+      );
+      context.observeFile?.(absolute, guarded.sha256);
+      return guarded.buffer;
     };
     const assets = new Map<string, Buffer>();
     for (const path of officeDocumentAssets(args)) {
@@ -2246,21 +2324,21 @@ export class ToolRegistry {
                 request,
                 context.signal,
               )
-            : await this.nativeSandbox.fileOperation(root, request, context.signal),
+            : await this.nativeSandbox.fileOperation(
+                root,
+                request,
+                context.signal,
+                this.nativeScope(context),
+              ),
         );
       }
-      try {
-        await locate(path);
-        const metadata = await stat(path);
-        if (!metadata.isFile() || metadata.size > MAX_DOCUMENT_BYTES)
-          throw new Error("Office 输出目标必须是小于 25 MiB 的普通文件。");
-        return createHash("sha256")
-          .update(await readFile(path))
-          .digest("hex");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-        throw error;
-      }
+      await locate(path);
+      const metadata = await statGuardedPath(root, local, { signal: context.signal });
+      if (metadata.state === "missing") return "missing";
+      if (metadata.directory || metadata.size > MAX_DOCUMENT_BYTES)
+        throw new Error("Office 输出目标必须是小于 25 MiB 的普通文件。");
+      return (await readGuardedFile(root, local, MAX_DOCUMENT_BYTES, { signal: context.signal }))
+        .sha256;
     };
     for (const path of outputPaths) {
       const absolute = await locate(path),
@@ -2339,29 +2417,14 @@ export class ToolRegistry {
               expectedHash,
             },
             context.signal,
+            this.nativeScope(context),
           );
         }
       } else {
-        await mkdir(dirname(outputPath), { recursive: true });
-        const temporary = await safeFilePath(root, `${outputPath}.${randomUUID()}.tmp`);
-        try {
-          const handle = await open(temporary, "wx");
-          try {
-            await handle.writeFile(bytes);
-            await handle.sync();
-          } finally {
-            await handle.close();
-          }
-          context.signal.throwIfAborted();
-          if ((await hashTarget(outputPath, local)) !== expectedHash)
-            throw new Error(
-              "EXTERNAL_FILE_CHANGED: Office 输出在准备期间发生变化，本次结果未写入。",
-            );
-          if (existing) await rename(temporary, outputPath);
-          else await link(temporary, outputPath);
-        } finally {
-          await rm(temporary, { force: true, maxRetries: 3, retryDelay: 100 });
-        }
+        await writeGuardedFile(root, local, bytes, expectedHash, {
+          signal: context.signal,
+          createParents: true,
+        });
       }
       context.observeFile?.(outputPath, createHash("sha256").update(bytes).digest("hex"));
       fileChanges.push({
@@ -2382,7 +2445,8 @@ export class ToolRegistry {
         ...warnings.map((warning) => `WARNING: ${warning}`),
         ...fileChanges.map((change) => `已写入 ${change.path}。`),
       ].join("\n"),
-      isError: false,
+      isError: Boolean(result.verification && result.verification.status !== "verified"),
+      ...(result.verification ? { officeVerification: result.verification } : {}),
       ...(fileChanges.length === 1 && fileChanges[0] ? { fileChange: fileChanges[0] } : {}),
       ...(fileChanges.length ? { fileChanges } : {}),
     };
@@ -2428,7 +2492,12 @@ export class ToolRegistry {
           context.signal,
         );
       }
-      return await this.nativeSandbox.fileOperation(root, request, context.signal);
+      return await this.nativeSandbox.fileOperation(
+        root,
+        request,
+        context.signal,
+        this.nativeScope(context),
+      );
     };
     const readBinary = async (path: string): Promise<Buffer> => {
       const approved = await this.approvePath(
@@ -2448,31 +2517,25 @@ export class ToolRegistry {
           "base64",
         );
       }
-      const metadata = await stat(path);
-      if (!metadata.isFile()) throw new Error(`文档或图片不是普通文件：${path}`);
-      if (metadata.size > MAX_AUTHORED_DOCUMENT_BYTES)
-        throw new Error(`文档或图片超过 25 MiB：${path}`);
-      const bytes = await readFile(path);
-      if (bytes.length > MAX_AUTHORED_DOCUMENT_BYTES)
-        throw new Error(`文档或图片超过 25 MiB：${path}`);
-      return bytes;
+      return (
+        await readGuardedFile(root, local, MAX_AUTHORED_DOCUMENT_BYTES, { signal: context.signal })
+      ).buffer;
     };
     const currentHash = async (): Promise<string> => {
       if (isolated) {
         return String(await gateway({ operation: "hash", path: localPath }));
       }
-      try {
-        await locate(args.path);
-        const metadata = await stat(target);
-        if (!metadata.isFile()) throw new Error("文档输出目标必须是普通文件。");
-        if (metadata.size > MAX_AUTHORED_DOCUMENT_BYTES)
-          throw new Error("已有文档超过 25 MiB，请选择新的输出路径。");
-        const bytes = await readFile(target);
-        return createHash("sha256").update(bytes).digest("hex");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-        throw error;
-      }
+      await locate(args.path);
+      const metadata = await statGuardedPath(root, localPath, { signal: context.signal });
+      if (metadata.state === "missing") return "missing";
+      if (metadata.directory) throw new Error("文档输出目标必须是普通文件。");
+      if (metadata.size > MAX_AUTHORED_DOCUMENT_BYTES)
+        throw new Error("已有文档超过 25 MiB，请选择新的输出路径。");
+      return (
+        await readGuardedFile(root, localPath, MAX_AUTHORED_DOCUMENT_BYTES, {
+          signal: context.signal,
+        })
+      ).sha256;
     };
     const expectedHash = await currentHash();
     const existing = expectedHash !== "missing";
@@ -2508,7 +2571,6 @@ export class ToolRegistry {
     await context.beforeFileWrite?.(target, expectedHash);
     context.signal.throwIfAborted();
     context.onEffectStart?.();
-    let cleanupWarning = "";
     if (isolated) {
       await gateway({
         operation: "write_binary",
@@ -2517,41 +2579,14 @@ export class ToolRegistry {
         expectedHash,
       });
     } else {
-      await mkdir(dirname(target), { recursive: true });
-      const temporary = await safeFilePath(root, `${target}.${randomUUID()}.tmp`);
-      let committed = false;
-      try {
-        const handle = await open(temporary, "wx");
-        try {
-          await handle.writeFile(content);
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        context.signal.throwIfAborted();
-        if ((await currentHash()) !== expectedHash)
-          throw new Error(
-            "EXTERNAL_FILE_CHANGED: output changed while the document was being prepared; generation was not written.",
-          );
-        context.signal.throwIfAborted();
-        if (existing) await rename(temporary, target);
-        else await link(temporary, target);
-        committed = true;
-      } finally {
-        try {
-          await rm(temporary, { force: true, maxRetries: 3, retryDelay: 100 });
-        } catch (error) {
-          recordRuntimeError("documents.temporary-cleanup", error, {
-            sessionId: context.session.id,
-            runId: context.runId,
-          });
-          if (committed) cleanupWarning = `\n文档已保存，但临时文件清理失败：${temporary}。`;
-        }
-      }
+      await writeGuardedFile(root, localPath, content, expectedHash, {
+        signal: context.signal,
+        createParents: true,
+      });
     }
     context.observeFile?.(target, createHash("sha256").update(content).digest("hex"));
     return {
-      output: `已生成 ${target}（${extension.slice(1).toUpperCase()}，${content.length} bytes）。${cleanupWarning}`,
+      output: `已生成 ${target}（${extension.slice(1).toUpperCase()}，${content.length} bytes）。`,
       isError: false,
       fileChange: {
         path: target,
@@ -2883,7 +2918,9 @@ export class ToolRegistry {
     if (!["http:", "https:"].includes(url.protocol)) {
       return { output: "web_fetch 只支持 HTTP 或 HTTPS URL。", isError: true };
     }
-    if (context.session.permissionMode === "request_approval") {
+    const approvedChatNetwork =
+      context.session.agentMode === "chat" && context.session.chatNetworkEnabled !== false;
+    if (context.session.permissionMode === "request_approval" && !approvedChatNetwork) {
       const request: ApprovalRequest = {
         id: randomUUID(),
         sessionId: context.session.id,
@@ -3302,25 +3339,27 @@ export class ToolRegistry {
                 request,
                 context.signal,
               )
-            : await this.nativeSandbox.fileOperation(root, request, context.signal);
+            : await this.nativeSandbox.fileOperation(
+                root,
+                request,
+                context.signal,
+                this.nativeScope(context),
+              );
         }
-        const safe = rel ? await safeFilePath(root, path) : root;
         if (readCommand.operation === "read") {
-          const buffer = await readFile(safe);
-          if (!isProbablyText(buffer)) throw new Error(binaryReadMessage(safe));
+          const { buffer } = await readGuardedFile(root, rel, MAX_DOCUMENT_BYTES, {
+            signal: context.signal,
+          });
+          if (!isProbablyText(buffer)) throw new Error(binaryReadMessage(path));
           return decodeText(buffer);
         }
-        if (readCommand.operation === "exists")
-          return await stat(safe)
-            .then(() => true)
-            .catch((error) => {
-              if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-              throw error;
-            });
-        if ((await stat(safe)).isFile()) return [{ name: basename(safe), directory: false }];
-        return await readdir(safe, { withFileTypes: true }).then((items) =>
+        const metadata = await statGuardedPath(root, rel, { signal: context.signal });
+        if (readCommand.operation === "exists") return metadata.state !== "missing";
+        if (metadata.state === "missing") throw new Error("FILE_NOT_FOUND");
+        if (!metadata.directory) return [{ name: basename(path), directory: false }];
+        return await listGuardedDirectory(root, rel, { signal: context.signal }).then((items) =>
           items
-            .map((item) => ({ name: item.name, directory: item.isDirectory() }))
+            .map((item) => ({ name: item.name, directory: item.directory }))
             .sort((a, b) => a.name.localeCompare(b.name)),
         );
       };
@@ -3381,6 +3420,7 @@ export class ToolRegistry {
         {
           cwd,
           timeoutMs: args.timeout_ms ?? DEFAULT_COMMAND_TIMEOUT,
+          scope: this.nativeScope(context),
           ...(context.session.parentSessionId
             ? {
                 // MXC cannot protect a memory directory before it exists.
@@ -3398,6 +3438,40 @@ export class ToolRegistry {
           ? { fullOutput: `exit_code: ${result.exitCode}\n${result.output}` }
           : {}),
         isError: result.exitCode !== 0,
+      };
+    }
+
+    if (context.session.executionMode !== "docker") {
+      context.onEffectStart?.();
+      const result = await this.hostCommands.run({
+        sessionId: context.session.id,
+        runId: context.runId,
+        toolCallId: context.toolCallId,
+        executable: WINDOWS_POWERSHELL,
+        args: [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-OutputFormat",
+          "Text",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding;${args.command}`,
+        ],
+        cwd,
+        signal: context.signal,
+        timeoutMs: args.timeout_ms ?? DEFAULT_COMMAND_TIMEOUT,
+      });
+      const text = result.output.trim();
+      if (commandKey && !result.isError) this.cache.put(commandKey, truncate(text), 15_000);
+      return {
+        output: truncate(text),
+        ...(result.capturedOutput.length > MAX_TOOL_OUTPUT
+          ? { fullOutput: result.capturedOutput }
+          : {}),
+        isError: result.isError,
+        ...(result.cleanupUnconfirmed ? { cleanupUnconfirmed: true } : {}),
       };
     }
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { validateChatAttachmentBatch } from "../../shared/attachments";
 import { MAX_COMPOSER_ATTACHMENT_BYTES } from "../../shared/composer-draft";
 import type {
   AgentMode,
@@ -9,6 +10,7 @@ import type {
   SessionExecutionMode,
   SessionView,
 } from "../../shared/domain";
+import { normalizeTemporaryInstruction } from "../../shared/draft-assist";
 import {
   MAX_QUEUED_PROMPT_ATTACHMENT_BYTES,
   MAX_QUEUED_PROMPTS,
@@ -37,6 +39,7 @@ import { validateChatAttachments } from "./attachment-validation";
 interface StoredQueuedPromptItem {
   id: string;
   text: string;
+  temporaryInstruction?: string;
   attachments: ChatAttachmentInput[];
   snapshot: QueuedPromptConfigurationSnapshot;
   dispatch?: {
@@ -99,6 +102,14 @@ function nullableString(value: unknown, maxLength = 32_768): string | null {
 function normalizeText(value: unknown): string {
   if (typeof value !== "string") throw new Error("队列消息文本格式无效。");
   return value;
+}
+
+function storedTemporaryInstruction(value: unknown): string | undefined {
+  try {
+    return normalizeTemporaryInstruction(value);
+  } catch {
+    throw invalidStorage();
+  }
 }
 
 function normalizeAttachments(value: ChatAttachmentInput[] | undefined): ChatAttachmentInput[] {
@@ -229,6 +240,11 @@ function storedSnapshot(value: unknown): QueuedPromptConfigurationSnapshot {
 
 function storedAttachments(value: unknown): ChatAttachmentInput[] {
   if (!Array.isArray(value)) throw invalidStorage();
+  try {
+    validateChatAttachmentBatch(value);
+  } catch {
+    throw invalidStorage();
+  }
   return value.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw invalidStorage();
     const attachment = raw as Record<string, unknown>;
@@ -302,6 +318,7 @@ function readStoredQueue(value: unknown): StoredQueuedPromptQueue {
     ids.add(id);
     const attachments = storedAttachments(item.attachments);
     const text = normalizeText(item.text);
+    const temporaryInstruction = storedTemporaryInstruction(item.temporaryInstruction);
     if (!text.trim() && attachments.length === 0) throw invalidStorage();
     const createdAt = requiredString(item.createdAt, 100);
     const updatedAt = requiredString(item.updatedAt, 100);
@@ -309,6 +326,7 @@ function readStoredQueue(value: unknown): StoredQueuedPromptQueue {
     return {
       id,
       text,
+      ...(temporaryInstruction ? { temporaryInstruction } : {}),
       attachments,
       snapshot: storedSnapshot(item.snapshot),
       ...(dispatch ? { dispatch } : {}),
@@ -351,6 +369,7 @@ export class QueuedPromptService {
     if (queue.items.length >= MAX_QUEUED_PROMPTS)
       throw new Error(`每个会话最多保留 ${MAX_QUEUED_PROMPTS} 条队列消息。`);
     const text = normalizeText(input.text);
+    const temporaryInstruction = normalizeTemporaryInstruction(input.temporaryInstruction);
     const attachments = normalizeAttachments(input.attachments);
     if (!text.trim() && attachments.length === 0) throw new Error("队列消息和附件不能同时为空。");
     if (
@@ -362,6 +381,7 @@ export class QueuedPromptService {
     const item: StoredQueuedPromptItem = {
       id: randomUUID(),
       text,
+      ...(temporaryInstruction ? { temporaryInstruction } : {}),
       attachments,
       snapshot: snapshotForSession(session),
       createdAt: now,
@@ -384,6 +404,10 @@ export class QueuedPromptService {
     if (!current) throw new Error(`${QUEUED_PROMPT_NOT_FOUND}: 队列消息不存在。`);
     this.assertNotDispatched(input.sessionId, current);
     const text = normalizeText(input.text);
+    const temporaryInstruction =
+      input.temporaryInstruction === undefined
+        ? current.temporaryInstruction
+        : normalizeTemporaryInstruction(input.temporaryInstruction);
     const attachments =
       input.attachments === undefined
         ? current.attachments
@@ -392,7 +416,16 @@ export class QueuedPromptService {
     const otherBytes = queueAttachmentBytes(queue.items.filter((item) => item.id !== current.id));
     if (otherBytes + attachmentBytes(attachments) > MAX_QUEUED_PROMPT_ATTACHMENT_BYTES)
       throw new Error("该会话的队列附件总量超过 50 MiB 限制。");
-    const updated = { ...current, text, attachments, updatedAt: new Date().toISOString() };
+    const updated: StoredQueuedPromptItem = {
+      id: current.id,
+      text,
+      ...(temporaryInstruction ? { temporaryInstruction } : {}),
+      attachments,
+      snapshot: current.snapshot,
+      ...(current.dispatch ? { dispatch: current.dispatch } : {}),
+      createdAt: current.createdAt,
+      updatedAt: new Date().toISOString(),
+    };
     queue.items[index] = updated;
     this.writeQueue(input.sessionId, queue);
     return this.toView(
@@ -477,6 +510,7 @@ export class QueuedPromptService {
           sessionId,
           text: item.text,
           attachments: item.attachments,
+          ...(item.temporaryInstruction ? { temporaryInstruction: item.temporaryInstruction } : {}),
         });
       } catch (sendError) {
         if (automatic.generation === generation) {
@@ -793,6 +827,7 @@ export class QueuedPromptService {
       id: item.id,
       sessionId,
       text: item.text,
+      ...(item.temporaryInstruction ? { temporaryInstruction: item.temporaryInstruction } : {}),
       attachments: attachmentViews(item.attachments),
       snapshot: item.snapshot,
       changedConfigurationFields: changed,

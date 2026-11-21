@@ -19,11 +19,6 @@ vi.mock("./document-pdf", () => ({
   printDocumentPdf: vi.fn(),
 }));
 
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const original = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...original, rm: vi.fn(original.rm) };
-});
-
 type FileOperationRequest = Parameters<NativeSandboxService["fileOperation"]>[1];
 
 const roots: string[] = [];
@@ -397,22 +392,23 @@ describe("create_document tool", () => {
     expect(f.files.has("filled.docx")).toBe(false);
     expect(f.onEffectStart).not.toHaveBeenCalled();
   });
-  it("reports committed output when only temporary cleanup fails", async () => {
+  it("does not overwrite a host target created while generation was preparing", async () => {
     const f = await fixture();
-    vi.mocked(rm).mockRejectedValueOnce(
-      Object.assign(new Error("Temporary file is locked"), { code: "EPERM" }),
-    );
+    const target = join(f.root, "saved.docx");
+    const external = Buffer.from("created in another editor");
+    f.beforeFileWrite.mockImplementationOnce(async () => {
+      await writeFile(target, external);
+    });
     const result = await f.registry.execute(
       "create_document",
       { path: "saved.docx", blocks: body },
       f.context,
     );
-    expect(result.isError, result.output).toBe(false);
-    expect(result.output).toContain("临时文件清理失败");
-    const bytes = await readFile(join(f.root, "saved.docx"));
-    expect((await extractDocumentBuffer(bytes, "saved.docx")).text).toContain(chineseText);
-    expect(f.observeFile).toHaveBeenCalledExactlyOnceWith(join(f.root, "saved.docx"), hash(bytes));
-    expect(result.fileChange?.changeType).toBe("created");
+    expect(result.isError).toBe(true);
+    expect(await readFile(target)).toEqual(external);
+    expect(await readdir(f.root)).toEqual(["saved.docx"]);
+    expect(f.observeFile).not.toHaveBeenCalled();
+    expect(result.fileChange).toBeUndefined();
   });
 
   it("writes a real editable DOCX with Chinese, a native table, page break and local image", async () => {

@@ -1,6 +1,6 @@
 # Mingshen Harness Privacy Policy
 
-Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.3. Provider: 新哲文院算法社.
+Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.4. Provider: 新哲文院算法社.
 
 Local code indexes store approved JavaScript/TypeScript, Python, Go, Rust, Java, C/C++ and C# file fingerprints, names/locations, short signatures, reference/call snippets and imports, rather than separate full source copies. Query results can be sent to the selected model as tool output. Structured plans, project plan library, dependencies, breakpoints, checkpoints, confirmed argument hashes and uncertain-operation identifiers remain local. Title full-text indexes and change sequence numbers support local paging/search/synchronization. Saved project plans survive deletion of their source chat and can be removed separately. Session recovery records are removed with the chat; uncertain external-operation workspace barriers need verification before removal. Read caches and temporary leases are process-local. None of these features adds cloud storage. Verification runs declared project checks under current permissions/isolation and preserves output in history. Review project scripts and third-party tools before authorizing execution.
 

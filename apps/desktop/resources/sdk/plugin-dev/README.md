@@ -1,6 +1,6 @@
 # Mingshen Local Plugin SDK
 
-Version 1.3.3.
+Version 1.3.4.
 
 `mingshen-plugin.mjs` is a dependency-free scaffolding and preflight helper for
 Mingshen's native local-plugin format.
@@ -56,6 +56,14 @@ stopped. After source edits, refresh the existing market; a changed semantic ver
 exposes the update action. Removing a source does not uninstall plugins. If the host
 reports incomplete MCP synchronization, use **重试 MCP 同步** on the installed plugin
 row to retry it without changing the installed version.
+
+Marketplace catalog updates are serialized per root and protected by a short-lived
+lock file across CLI processes. The catalog is replaced atomically from a random
+temporary file, so concurrent adds do not overwrite each other's entries.
+Normal writers wait up to 15 seconds. If the lock is older than 60 seconds, the
+SDK stops without deleting the lock or changing the catalog. Verify that no
+writer is active, then remove only the reported `.marketplace.json.lock` and
+retry; do not delete `marketplace.json` as recovery.
 
 Installing and enabling a plugin does not activate hooks globally. Reference the
 plugin from the current primary CodeAgent/WorkAgent composer **+** menu or `/plugins`.

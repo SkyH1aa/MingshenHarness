@@ -100,6 +100,8 @@ const api: MingshenDesktopApi = {
   listSessionPage: (input) => ipcRenderer.invoke(IPC_CHANNELS.sessionPage, input),
   getSessionDelta: (after, ids) => ipcRenderer.invoke(IPC_CHANNELS.sessionDelta, after, ids),
   getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.sessionGet, id),
+  getProjectContexts: (sessionIds) => ipcRenderer.invoke(IPC_CHANNELS.projectContexts, sessionIds),
+  searchWorkspaceFiles: (input) => ipcRenderer.invoke(IPC_CHANNELS.workspaceSearchFiles, input),
   listSessionGroups: () => ipcRenderer.invoke(IPC_CHANNELS.sessionGroups),
   listChatGroups: () => ipcRenderer.invoke(IPC_CHANNELS.chatGroupsList),
   createChatGroup: (name) => ipcRenderer.invoke(IPC_CHANNELS.chatGroupCreate, name),
@@ -127,9 +129,26 @@ const api: MingshenDesktopApi = {
   createModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.modelCreate, input),
   updateModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.modelUpdate, input),
   removeModel: (modelConfigId) => ipcRenderer.invoke(IPC_CHANNELS.modelRemove, modelConfigId),
+  getImageStudioWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGet),
+  saveImageStudioWorkspace: (workspace) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioSave, workspace),
+  getImageStudioAssetData: (assetId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioAssetData, assetId),
+  importImageStudioAssets: (files) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioImport, files),
+  removeImageStudioAsset: (assetId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoveAsset, assetId),
+  generateImageStudioImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGenerate, input),
+  polishImageStudioPrompt: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioPolishPrompt, input),
+  reverseImageStudioPrompt: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioReversePrompt, input),
+  cancelImageStudioRequest: (requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCancel, requestId),
   createSession: (input) => ipcRenderer.invoke(IPC_CHANNELS.sessionCreate, input),
   createSessionInWorkspace: (workspacePath, agentMode) =>
     ipcRenderer.invoke(IPC_CHANNELS.sessionCreateInWorkspace, workspacePath, agentMode),
+  createChatSessionInGroup: (groupId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sessionCreateInChatGroup, groupId),
   forkSession: (sessionId, messageId) =>
     ipcRenderer.invoke(IPC_CHANNELS.sessionFork, sessionId, messageId),
   openSessionWorkspace: (sessionId) =>
@@ -144,10 +163,22 @@ const api: MingshenDesktopApi = {
   getSessionRetention: () => ipcRenderer.invoke(IPC_CHANNELS.sessionRetentionGet),
   setSessionRetention: (settings) => ipcRenderer.invoke(IPC_CHANNELS.sessionRetentionSet, settings),
   sendChat: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatSend, input),
+  getAutoDriveSuggestions: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.autoDriveSuggest, sessionId),
+  cancelAutoDrive: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.autoDriveCancel, sessionId),
+  getAgentCoordination: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.agentCoordinationGet, sessionId),
   getComposerDraft: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.composerDraftGet, sessionId),
   saveComposerDraft: (input) => ipcRenderer.invoke(IPC_CHANNELS.composerDraftSave, input),
   clearComposerDraft: (sessionId, revision) =>
     ipcRenderer.invoke(IPC_CHANNELS.composerDraftClear, sessionId, revision),
+  getDraftAssistSettings: () => ipcRenderer.invoke(IPC_CHANNELS.draftAssistSettingsGet),
+  setDraftAssistSettings: (settings) =>
+    ipcRenderer.invoke(IPC_CHANNELS.draftAssistSettingsSet, settings),
+  polishDraft: (input) => ipcRenderer.invoke(IPC_CHANNELS.draftAssistPolish, input),
+  cancelDraftPolish: (requestId) => ipcRenderer.invoke(IPC_CHANNELS.draftAssistCancel, requestId),
+  getProjectTone: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.projectToneGet, sessionId),
+  setProjectTone: (input) => ipcRenderer.invoke(IPC_CHANNELS.projectToneSet, input),
   onComposerDraftFlush: (listener) => {
     composerDraftFlushListeners.add(listener);
     return () => {
@@ -167,6 +198,8 @@ const api: MingshenDesktopApi = {
   },
   rewriteAndSendChat: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatRewrite, input),
   stopChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.chatStop, sessionId),
+  getRunSteering: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.runSteeringGet, sessionId),
+  steerRun: (input) => ipcRenderer.invoke(IPC_CHANNELS.runSteeringSend, input),
   listQueuedPrompts: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptList, sessionId),
   addQueuedPrompt: (input) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptAdd, input),
   updateQueuedPrompt: (input) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptUpdate, input),
@@ -220,6 +253,21 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.gitRestoreUndo, root, backupId),
   runUserCommand: (root, command) =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceRunCommand, root, command),
+  getLocalReview: (input) => ipcRenderer.invoke(IPC_CHANNELS.localReviewGet, input),
+  submitLocalReviewComments: (input) => ipcRenderer.invoke(IPC_CHANNELS.localReviewSubmit, input),
+  listTerminals: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.terminalList, sessionId),
+  createTerminal: (input) => ipcRenderer.invoke(IPC_CHANNELS.terminalCreate, input),
+  writeTerminal: (terminalId, data) =>
+    ipcRenderer.invoke(IPC_CHANNELS.terminalInput, terminalId, data),
+  resizeTerminal: (terminalId, cols, rows) =>
+    ipcRenderer.invoke(IPC_CHANNELS.terminalResize, terminalId, cols, rows),
+  stopTerminal: (terminalId) => ipcRenderer.invoke(IPC_CHANNELS.terminalStop, terminalId),
+  onTerminalEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) =>
+      listener(value);
+    ipcRenderer.on(IPC_CHANNELS.terminalEvent, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.terminalEvent, handler);
+  },
   listExtensions: () => ipcRenderer.invoke(IPC_CHANNELS.extensionsList),
   chooseExtensionDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.extensionsChooseDirectory),
   importExtensions: (sourceDirectory) =>

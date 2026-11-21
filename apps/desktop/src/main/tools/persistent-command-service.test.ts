@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type CommandSnapshot, PersistentCommandService } from "./persistent-command-service";
@@ -18,10 +19,11 @@ function nodeLaunch(source: string) {
 async function untilComplete(
   service: PersistentCommandService,
   snapshot: CommandSnapshot,
+  commandOwner = owner,
 ): Promise<CommandSnapshot> {
   let current = snapshot;
   for (let attempt = 0; current.running && attempt < 10; attempt++)
-    current = await service.interact(current.id, owner, {
+    current = await service.interact(current.id, commandOwner, {
       yieldMs: 500,
       maxOutputChars: 20_000,
     });
@@ -275,7 +277,12 @@ describe("persistent command sessions", () => {
     expect(last.isError).toBe(true);
     expect(last.output).toContain("COMMAND_CLEANUP_UNCONFIRMED");
     await expect(service.cancelRun(owner.runId)).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
-    expect(service.list(owner.runId)).toHaveLength(1);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+    try {
+      expect(service.list(owner.runId)).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
     await service.start(
       { ...owner, runId: "other-run" },
       { command: "other server", cwd: tmpdir(), securityScope: "host" },
@@ -290,5 +297,340 @@ describe("persistent command sessions", () => {
     await expect(service.shutdown()).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
     expect(service.list("other-run")).toEqual([]);
     expect(service.list(owner.runId)).toHaveLength(1);
+  });
+
+  it("clears a stale cleanup failure after a later cleanup is confirmed", async () => {
+    const service = fixture();
+    const cleanup = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("container daemon temporarily unavailable"))
+      .mockResolvedValueOnce(undefined);
+    const first = await service.start(
+      owner,
+      { command: "container", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup,
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    const failed = await untilComplete(service, first);
+    expect(failed.isError).toBe(true);
+    expect(failed.output).toContain("COMMAND_CLEANUP_UNCONFIRMED");
+    expect(service.inspect(first.id, owner).isError).toBe(true);
+
+    const recovered = await service.interact(first.id, owner, {
+      terminate: true,
+      yieldMs: 0,
+      maxOutputChars: 1000,
+    });
+    expect(cleanup).toHaveBeenCalledTimes(2);
+    expect(recovered.isError).toBe(false);
+    expect(recovered.output).not.toContain("COMMAND_CLEANUP_UNCONFIRMED");
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+    try {
+      expect(service.list(owner.runId)).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("retries a failed stop without caching its rejected cleanup attempt", async () => {
+    const service = fixture();
+    const cleanup = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("container still stopping"))
+      .mockResolvedValueOnce(undefined);
+    await service.start(
+      owner,
+      { command: "container", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("setInterval(()=>{},1000);"),
+        cleanup,
+      },
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    await expect(service.cancelRun(owner.runId)).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
+    expect(service.list(owner.runId)).toHaveLength(1);
+    await expect(service.cancelRun(owner.runId)).resolves.toBeUndefined();
+    expect(cleanup).toHaveBeenCalledTimes(2);
+    expect(service.list(owner.runId)).toEqual([]);
+  });
+
+  it("retains a termination failure even when the root process later closes", async () => {
+    let child!: ChildProcess;
+    let terminationAttempted!: () => void;
+    const attempted = new Promise<void>((resolve) => {
+      terminationAttempted = resolve;
+    });
+    const service = new PersistentCommandService({
+      terminate: async (current) => {
+        child = current;
+        terminationAttempted();
+        throw new Error("taskkill failed");
+      },
+    });
+    services.push(service);
+    await service.start(
+      owner,
+      { command: "root closes after failed termination", cwd: tmpdir(), securityScope: "host" },
+      nodeLaunch("process.stdin.resume();process.stdin.once('end',()=>process.exit(0));"),
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    const cancel = service.cancelRun(owner.runId);
+    await attempted;
+    child.stdin?.end();
+    await expect(cancel).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
+
+    expect(service.list(owner.runId)).toHaveLength(1);
+    expect(service.list(owner.runId)[0]).toMatchObject({ running: false, isError: true });
+  });
+
+  it("clears a termination failure after an independent termination retry succeeds", async () => {
+    let child!: ChildProcess;
+    let terminationAttempted!: () => void;
+    const attempted = new Promise<void>((resolve) => {
+      terminationAttempted = resolve;
+    });
+    const terminate = vi
+      .fn<(current: ChildProcess) => Promise<void>>()
+      .mockImplementationOnce(async (current) => {
+        child = current;
+        terminationAttempted();
+        throw new Error("taskkill failed");
+      })
+      .mockResolvedValueOnce(undefined);
+    const service = new PersistentCommandService({ terminate });
+    services.push(service);
+    await service.start(
+      owner,
+      { command: "retry termination", cwd: tmpdir(), securityScope: "host" },
+      nodeLaunch("setInterval(()=>{},1000);"),
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    const firstCancel = service.cancelRun(owner.runId);
+    await attempted;
+    child.kill();
+    await expect(firstCancel).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
+    expect(service.list(owner.runId)).toHaveLength(1);
+
+    await expect(service.cancelRun(owner.runId)).resolves.toBeUndefined();
+    expect(terminate).toHaveBeenCalledTimes(2);
+    expect(service.list(owner.runId)).toEqual([]);
+  });
+
+  it("accepts independent Docker cleanup as confirmation after termination fails", async () => {
+    let child!: ChildProcess;
+    let terminationAttempted!: () => void;
+    const attempted = new Promise<void>((resolve) => {
+      terminationAttempted = resolve;
+    });
+    const cleanup = vi.fn(async () => undefined);
+    const service = new PersistentCommandService({
+      terminate: async (current) => {
+        child = current;
+        terminationAttempted();
+        throw new Error("taskkill failed");
+      },
+    });
+    services.push(service);
+    await service.start(
+      owner,
+      { command: "docker cleanup confirms stop", cwd: tmpdir(), securityScope: "docker" },
+      { ...nodeLaunch("setInterval(()=>{},1000);"), cleanup },
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    const cancel = service.cancelRun(owner.runId);
+    await attempted;
+    child.kill();
+    await expect(cancel).resolves.toBeUndefined();
+
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(service.list(owner.runId)).toEqual([]);
+  });
+
+  it("keeps manual confirmation authoritative when cleanup finishes late with an error", async () => {
+    let child!: ChildProcess;
+    let terminationAttempted!: () => void;
+    let cleanupStarted!: () => void;
+    let finishCleanup!: () => void;
+    const attempted = new Promise<void>((resolve) => {
+      terminationAttempted = resolve;
+    });
+    const cleanupPending = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    const cleanupResult = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const cleanup = vi.fn(async () => {
+      cleanupStarted();
+      await cleanupResult;
+      throw new Error("late cleanup failure");
+    });
+    const service = new PersistentCommandService({
+      terminate: async (current) => {
+        child = current;
+        terminationAttempted();
+        throw new Error("taskkill failed");
+      },
+    });
+    services.push(service);
+    await service.start(
+      owner,
+      { command: "manual stop during cleanup", cwd: tmpdir(), securityScope: "docker" },
+      { ...nodeLaunch("setInterval(()=>{},1000);"), cleanup },
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    const cancel = service.cancelRun(owner.runId);
+    await attempted;
+    child.kill();
+    await cleanupPending;
+    expect(service.confirmRunStopped(owner.runId)).toBe(1);
+    finishCleanup();
+
+    await expect(cancel).resolves.toBeUndefined();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(service.list(owner.runId)).toEqual([]);
+  });
+
+  it("rejects manual run confirmation atomically while a normal command is active", async () => {
+    const service = fixture();
+    const unconfirmed = await service.start(
+      owner,
+      { command: "cleanup unconfirmed", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup: async () => {
+          throw new Error("container cleanup unconfirmed");
+        },
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    await untilComplete(service, unconfirmed);
+    const active = await service.start(
+      owner,
+      { command: "still active", cwd: tmpdir(), securityScope: "host" },
+      nodeLaunch("setInterval(()=>{},1000);"),
+      { signal: new AbortController().signal, timeoutMs: 10_000, yieldMs: 0, maxOutputChars: 1000 },
+    );
+
+    expect(() => service.confirmRunStopped(owner.runId)).toThrow("COMMAND_RUN_STILL_ACTIVE");
+    expect(
+      service
+        .list(owner.runId)
+        .map((command) => command.id)
+        .sort(),
+    ).toEqual([unconfirmed.id, active.id].sort());
+  });
+
+  it("clears only the explicitly confirmed run and returns the discarded count", async () => {
+    const service = fixture();
+    const completed = await service.start(
+      owner,
+      { command: "completed sibling", cwd: tmpdir(), securityScope: "host" },
+      nodeLaunch("process.exit(0);"),
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    await untilComplete(service, completed);
+    const unconfirmed = await service.start(
+      owner,
+      { command: "confirmed stopped", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup: async () => {
+          throw new Error("container cleanup unconfirmed");
+        },
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    await untilComplete(service, unconfirmed);
+    const otherOwner = { ...owner, runId: "other-run" };
+    const other = await service.start(
+      otherOwner,
+      { command: "other run", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup: async () => {
+          throw new Error("other container cleanup unconfirmed");
+        },
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    await untilComplete(service, other, otherOwner);
+
+    expect(service.confirmRunStopped(owner.runId)).toBe(2);
+    expect(service.list(owner.runId)).toEqual([]);
+    expect(service.list(otherOwner.runId).map((command) => command.id)).toEqual([other.id]);
+  });
+
+  it("removes confirmed siblings when another command in the run cannot be cleaned", async () => {
+    const service = fixture();
+    const confirmed = await service.start(
+      owner,
+      { command: "confirmed", cwd: tmpdir(), securityScope: "host" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup: async () => undefined,
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    const unconfirmed = await service.start(
+      owner,
+      { command: "unconfirmed", cwd: tmpdir(), securityScope: "docker" },
+      {
+        ...nodeLaunch("process.exit(0);"),
+        cleanup: async () => {
+          throw new Error("container daemon unavailable");
+        },
+      },
+      {
+        signal: new AbortController().signal,
+        timeoutMs: 10_000,
+        yieldMs: 1000,
+        maxOutputChars: 1000,
+      },
+    );
+    await untilComplete(service, confirmed);
+    await untilComplete(service, unconfirmed);
+
+    await expect(service.cancelRun(owner.runId)).rejects.toThrow("COMMAND_CLEANUP_UNCONFIRMED");
+    expect(service.list(owner.runId).map((command) => command.id)).toEqual([unconfirmed.id]);
   });
 });

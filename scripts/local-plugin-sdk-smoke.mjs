@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createPlugin,
   upsertMarketplace,
@@ -9,6 +19,40 @@ import {
 } from "../apps/desktop/resources/sdk/plugin-dev/mingshen-plugin.mjs";
 
 const temporary = await mkdtemp(join(tmpdir(), "mingshen-plugin-sdk-"));
+const pluginSdkPath = fileURLToPath(
+  new URL(
+    "../apps/desktop/resources/sdk/plugin-dev/mingshen-plugin.mjs",
+    import.meta.url,
+  ),
+);
+
+function runMarketplaceProcess(marketRoot, pluginRoot) {
+  return new Promise((resolveProcess, rejectProcess) => {
+    const child = spawn(
+      process.execPath,
+      [pluginSdkPath, "marketplace", marketRoot, "--name", "dev-example", "--add", pluginRoot],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", rejectProcess);
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolveProcess(stdout);
+      } else {
+        rejectProcess(new Error(`Plugin marketplace child exited ${code}: ${stderr}`));
+      }
+    });
+  });
+}
 
 try {
   const marketRoot = join(temporary, "market");
@@ -61,6 +105,10 @@ try {
   const catalog = JSON.parse(await readFile(marketV1.catalogPath, "utf8"));
   assert.equal(catalog.name, "dev-example");
   assert.equal(catalog.plugins[0].version, "0.1.0");
+  assert.equal(
+    (await readdir(marketRoot)).some((entry) => entry.startsWith(".marketplace.json.")),
+    false,
+  );
 
   await writeFile(
     manifestPath,
@@ -157,6 +205,122 @@ try {
   assert.equal(updatedCatalog.plugins.length, 1);
   assert.equal(updatedCatalog.plugins[0].version, "0.1.1");
 
+  const concurrentNames = ["alpha", "beta"];
+  const concurrentRoots = [];
+  for (const name of concurrentNames) {
+    const concurrentRoot = join(marketRoot, "plugins", name);
+    concurrentRoots.push(concurrentRoot);
+    await createPlugin({
+      pluginRoot: concurrentRoot,
+      name,
+      version: "1.0.0",
+      description: `Validate the ${name} concurrent marketplace entry.`,
+      displayName: `${name} Plugin`,
+    });
+    await writeFile(
+      join(concurrentRoot, "skills", `${name}-harness`, "SKILL.md"),
+      `---\nname: ${name}-harness\ndescription: Use when validating ${name} marketplace concurrency.\n---\n\n# ${name} Plugin\n\nReturn a bounded result.\n`,
+      "utf8",
+    );
+  }
+  await Promise.all(
+    Array.from({ length: 12 }, (_, index) =>
+      upsertMarketplace(marketRoot, "dev-example", [
+        concurrentRoots[index % concurrentRoots.length],
+      ]),
+    ),
+  );
+  const concurrentCatalog = JSON.parse(await readFile(marketV1.catalogPath, "utf8"));
+  assert.deepEqual(
+    concurrentCatalog.plugins.map((entry) => entry.name),
+    ["alpha", "beta", "example"],
+  );
+  assert.equal(
+    (await readdir(marketRoot)).some(
+      (entry) => entry.startsWith(".marketplace.json.") || entry === ".marketplace.json.lock",
+    ),
+    false,
+  );
+
+  const crossProcessRoots = [];
+  for (const name of ["cross-alpha", "cross-beta"]) {
+    const crossProcessRoot = join(marketRoot, "plugins", name);
+    crossProcessRoots.push(crossProcessRoot);
+    await createPlugin({
+      pluginRoot: crossProcessRoot,
+      name,
+      version: "1.0.0",
+      description: `Validate the ${name} cross-process marketplace entry.`,
+      displayName: `${name} Plugin`,
+    });
+    await writeFile(
+      join(crossProcessRoot, "skills", `${name}-harness`, "SKILL.md"),
+      `---\nname: ${name}-harness\ndescription: Use when validating ${name} cross-process marketplace concurrency.\n---\n\n# ${name} Plugin\n\nReturn a bounded result.\n`,
+      "utf8",
+    );
+  }
+  await Promise.all(
+    crossProcessRoots.map((pluginRoot) => runMarketplaceProcess(marketRoot, pluginRoot)),
+  );
+  const crossProcessCatalog = JSON.parse(await readFile(marketV1.catalogPath, "utf8"));
+  assert.ok(
+    crossProcessCatalog.plugins.some((entry) => entry.name === "cross-alpha"),
+  );
+  assert.ok(
+    crossProcessCatalog.plugins.some((entry) => entry.name === "cross-beta"),
+  );
+
+  const staleMarketRoot = join(temporary, "stale-market");
+  const stalePluginRoot = join(staleMarketRoot, "plugins", "staged");
+  await createPlugin({
+    pluginRoot: stalePluginRoot,
+    name: "staged",
+    version: "1.0.0",
+    description: "Validate stale marketplace lock handling.",
+    displayName: "Staged Plugin",
+  });
+  await writeFile(
+    join(stalePluginRoot, "skills", "staged-harness", "SKILL.md"),
+    `---\nname: staged-harness\ndescription: Use when validating stale marketplace locks.\n---\n\n# Staged Plugin\n\nReturn a bounded result.\n`,
+    "utf8",
+  );
+  const staleCatalogPath = join(staleMarketRoot, "marketplace.json");
+  const staleLockPath = `${staleCatalogPath}.lock`;
+  const staleCatalog =
+    `${JSON.stringify({ name: "stale-market", plugins: [] }, null, 2)}\n`;
+  const staleLock = `${JSON.stringify(
+    {
+      pid: 999999,
+      createdAt: "2020-01-01T00:00:00.000Z",
+      token: "stale-fixture",
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(staleCatalogPath, staleCatalog, "utf8");
+  await writeFile(staleLockPath, staleLock, "utf8");
+  const staleTime = new Date(Date.now() - 61_000);
+  await utimes(staleLockPath, staleTime, staleTime);
+  await assert.rejects(
+    () => upsertMarketplace(staleMarketRoot, "stale-market", [stalePluginRoot]),
+    (error) => {
+      assert.match(error.message, /stale after 60 seconds/);
+      assert.ok(error.message.includes(staleLockPath));
+      assert.match(error.message, /catalog was not modified/);
+      return true;
+    },
+  );
+  assert.equal(await readFile(staleCatalogPath, "utf8"), staleCatalog);
+  assert.equal(await readFile(staleLockPath, "utf8"), staleLock);
+
+  await rm(marketV1.catalogPath, { force: true });
+  await mkdir(marketV1.catalogPath, { recursive: true });
+  await assert.rejects(() => upsertMarketplace(marketRoot, "dev-example", [pluginRoot]));
+  assert.equal(
+    (await readdir(marketRoot)).some((entry) => entry.startsWith(".marketplace.json.")),
+    false,
+  );
+
   const escapedSource = resolve(temporary, "outside-plugin");
   await createPlugin({
     pluginRoot: escapedSource,
@@ -188,6 +352,9 @@ try {
           "non-UTF-8 and oversized command files are rejected",
           "visible marketplace catalog uses an inside-root relative source",
           "version update reconciles the existing marketplace entry",
+          "concurrent marketplace updates preserve every plugin entry",
+          "cross-process marketplace updates preserve both plugin entries",
+          "stale locks fail explicitly without deleting the lock or changing the catalog",
         ],
         authoritativeRuntimeValidation: "pending local_plugin validate after backend integration",
       },

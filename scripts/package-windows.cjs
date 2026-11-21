@@ -7,6 +7,7 @@ const { packageCacheRoot, assertChildPath } = require('./package-paths.cjs');
 const { nativeCopyFor } = require('./package-native-copy.cjs');
 const { createUpdateZip } = require('./create-update-zip.cjs');
 const { provisionElectronRuntime } = require('./provision-electron-runtime.cjs');
+const { prepareNativeDependencies } = require('./package-native-dependencies.cjs');
 
 const workspace = path.resolve(__dirname, '..');
 const desktop = path.join(workspace, 'apps', 'desktop');
@@ -65,11 +66,19 @@ async function main() {
     }
     const cli = require.resolve('electron-builder/cli.js', { paths: [desktop] });
     console.log(`Using installed Electron ${version}; experimental executables are excluded.`);
+    console.log('Verifying official node-pty prebuilds and rebuilding other native dependencies...');
+    await prepareNativeDependencies({
+      appDir: desktop, workspaceRoot: workspace, electronVersion: version,
+      platform: 'win32', arch: 'x64',
+    });
+    console.log('Native dependencies prepared; verified node-pty 1.1.0 Windows x64 prebuilds retained.');
     const code = await new Promise((done, reject) => {
       const child = spawn(process.execPath, [
         '--require', path.join(__dirname, 'package-copy-compat.cjs'),
         cli, '--win', '--x64', '--publish', 'never',
         `--config.electronDist=${staging}`, `--config.directories.output=${output}`,
+        // The official rebuild above has finished; retain builder's dependency collection.
+        '--config.npmRebuild=false',
         ...(values.dir ? ['--dir'] : []),
       ], {
         cwd: desktop, stdio: 'inherit', windowsHide: true,

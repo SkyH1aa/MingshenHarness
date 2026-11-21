@@ -550,7 +550,7 @@ describe("built-in capability discovery", () => {
     ).rejects.toThrow("SKILL_MODE_UNAVAILABLE");
   });
 
-  it("discovers and loads every packaged Work source while isolating mode and resources", async () => {
+  it("retains the physical inventory but discovers and loads only active Work source versions", async () => {
     const promptDirectory = resolve("resources/prompts");
     const work = { agentMode: "work" } as SessionView;
     const code = { agentMode: "code" } as SessionView;
@@ -664,10 +664,14 @@ describe("built-in capability discovery", () => {
 
     const builtins = await builtinCapabilityDiscoveryRecords(work, promptDirectory);
     const sourceRecords = builtins.filter((entry) => entry.builtin_kind === "work-source");
-    expect(sourceRecords).toHaveLength(124);
-    expect(new Set(sourceRecords.map((entry) => entry.id))).toEqual(
-      new Set(entries.map((entry) => entry.id)),
-    );
+    expect(sourceRecords).toHaveLength(98);
+    expect(new Set(sourceRecords.map((entry) => entry.source_sha256)).size).toBe(98);
+    const activeSourcePaths = new Set(sourceRecords.map((entry) => entry.source_path));
+    for (const sourcePath of representativePdfPaths.slice(0, 4))
+      expect(activeSourcePaths.has(sourcePath)).toBe(true);
+    expect(activeSourcePaths.has(representativePdfPaths[4])).toBe(false);
+    expect(activeSourcePaths.has("documents-1/0.2.2/skills/docx/SKILL.md")).toBe(true);
+    expect(activeSourcePaths.has("docx/SKILL.md")).toBe(true);
 
     const discoveredIds: string[] = [];
     let offset = 0;
@@ -683,13 +687,13 @@ describe("built-in capability discovery", () => {
         next_offset: number | null;
         matches: Array<{ id: string }>;
       };
-      expect(page.total).toBe(124);
+      expect(page.total).toBe(98);
       discoveredIds.push(...page.matches.map((entry) => entry.id));
       offset = page.next_offset ?? 0;
       if (page.next_offset === null) break;
     } while (offset < 200);
-    expect(discoveredIds).toHaveLength(124);
-    expect(new Set(discoveredIds).size).toBe(124);
+    expect(discoveredIds).toHaveLength(98);
+    expect(new Set(discoveredIds).size).toBe(98);
 
     const entryById = new Map(entries.map((entry) => [entry.id, entry]));
     for (const record of sourceRecords) {
@@ -711,19 +715,85 @@ describe("built-in capability discovery", () => {
     const representativeByRoot = new Map<string, string>();
     for (const entry of entries)
       if (!representativeByRoot.has(entry.resourceRoot))
-        representativeByRoot.set(entry.resourceRoot, entry.id);
+        representativeByRoot.set(entry.resourceRoot, entry.sourceSha256);
     expect(representativeByRoot.size).toBe(104);
-    for (const id of representativeByRoot.values()) {
-      const provenance = await loadDomainSkill(
-        work,
-        { name: id, resource: "SOURCE.md" },
-        promptDirectory,
-        extensions,
-      );
-      expect(provenance).toContain("Source SHA-256:");
-      expect(provenance).toContain("Resource: references/SOURCE.md");
+    for (const [root, sha] of representativeByRoot) {
+      const provenance = await readFile(join(promptDirectory, "skills", root, "SOURCE.md"), "utf8");
+      expect(provenance).toContain(sha);
     }
   }, 60_000);
+
+  it("compares semantic versions and preserves separate sources, variants and unknown versions", async () => {
+    const promptDirectory = await makeWorkSourcePromptDirectory();
+    const catalogPath = join(promptDirectory, "skills", "work-sources", "catalog.json");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    const base = catalog.entries[0];
+    const versions = ["0.2.9", "0.2.10-alpha.2", "0.2.10-alpha.10", "0.2.10"];
+    const versioned = versions.map((version, index) => ({
+      ...base,
+      id: `builtin:work-source-version-${index}`,
+      version,
+      sourcePath: `same-package/${version}/skills/pdf/SKILL.md`,
+    }));
+    catalog.entries = [
+      ...versioned,
+      {
+        ...versioned[0],
+        id: "builtin:work-source-other-package",
+        sourcePath: "other-package/0.2.9/skills/pdf/SKILL.md",
+      },
+      {
+        ...versioned[0],
+        id: "builtin:work-source-other-variant",
+        sourcePath: "same-package/0.2.9/skills/pdf-viewer/SKILL.md",
+      },
+      {
+        ...versioned[0],
+        id: "builtin:work-source-invalid-version",
+        version: "0.02.9",
+        sourcePath: "same-package/0.02.9/skills/pdf/SKILL.md",
+      },
+      {
+        ...versioned[0],
+        id: "builtin:work-source-unversioned",
+        version: null,
+        sourcePath: "same-package/skills/pdf/SKILL.md",
+      },
+    ];
+    await writeFile(catalogPath, JSON.stringify(catalog), "utf8");
+    const work = { agentMode: "work" } as SessionView;
+    const records = await builtinCapabilityDiscoveryRecords(
+      work,
+      promptDirectory,
+      new Set(["builtin:work-source-version-0"]),
+    );
+    expect(
+      records.filter((item) => item.builtin_kind === "work-source").map((item) => item.id),
+    ).toEqual([
+      "builtin:work-source-version-3",
+      "builtin:work-source-other-package",
+      "builtin:work-source-other-variant",
+      "builtin:work-source-invalid-version",
+      "builtin:work-source-unversioned",
+    ]);
+    expect(
+      records.find((item) => item.id === "builtin:work-source-version-3")?.session_selected,
+    ).toBe(true);
+    await expect(
+      loadDomainSkill(work, { name: "builtin:work-source-version-0" }, promptDirectory, extensions),
+    ).rejects.toThrow(
+      "SKILL_VERSION_SUPERSEDED: use the current skill builtin:work-source-version-3",
+    );
+
+    catalog.entries = versioned.slice(0, 3);
+    await writeFile(catalogPath, JSON.stringify(catalog), "utf8");
+    const prereleases = await builtinCapabilityDiscoveryRecords(work, promptDirectory);
+    expect(
+      prereleases.filter((item) => item.builtin_kind === "work-source").map((item) => item.id),
+    ).toEqual(["builtin:work-source-version-2"]);
+  });
 
   it("loads exact Work source aliases and their own on-demand resources", async () => {
     const promptDirectory = await makeWorkSourcePromptDirectory();

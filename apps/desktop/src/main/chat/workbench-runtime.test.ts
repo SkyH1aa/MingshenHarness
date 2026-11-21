@@ -6,6 +6,7 @@ import { PermissionStore } from "../permissions/permission-store";
 import { QuestionBroker } from "../permissions/question-broker";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
+import type { ToolExecutionResult } from "../tools/tool-registry";
 import { ChatService } from "./chat-service";
 
 function fixture() {
@@ -27,7 +28,9 @@ function fixture() {
   const events: ChatStreamEvent[] = [];
   const permissions = new PermissionStore();
   const broker = new ApprovalBroker();
-  const tools = vi.fn(async () => ({ output: "ok", isError: false }));
+  const tools = vi.fn(async (): Promise<ToolExecutionResult> => ({ output: "ok", isError: false }));
+  const confirmRunStopped = vi.fn();
+  const registryShutdown = vi.fn(async () => {});
   const questionBroker = new QuestionBroker();
   const custom = { has: async () => false };
   const chat = new ChatService({
@@ -39,8 +42,11 @@ function fixture() {
     dockerService: { getImage: () => null },
     providerService: {},
     toolRegistry: {
-      descriptors: () => ["read_file", "list_files", "write_file"].map((name) => ({ name })),
+      descriptors: () =>
+        ["read_file", "list_files", "write_file", "run_command"].map((name) => ({ name })),
       execute: tools,
+      confirmRunStopped,
+      shutdown: registryShutdown,
     },
     emit: (event: ChatStreamEvent) => events.push(event),
   } as unknown as ConstructorParameters<typeof ChatService>[0]);
@@ -91,6 +97,8 @@ function fixture() {
     permissions,
     broker,
     tools,
+    confirmRunStopped,
+    registryShutdown,
     chat,
     internal,
     questionBroker,
@@ -118,6 +126,160 @@ function request(
 }
 
 describe("workbench runtime boundaries", () => {
+  it("retains the writer lease and durable recovery barrier when native cleanup is unconfirmed", async () => {
+    const f = fixture();
+    const signal = new AbortController().signal;
+    const runId = "unconfirmed-native-run";
+    try {
+      f.internal.executionSafety.begin(f.session.id, runId);
+      f.tools.mockResolvedValue({
+        output: "The sandbox process could not be confirmed stopped.",
+        isError: true,
+        cleanupUnconfirmed: true,
+      });
+      const result = await f.internal.executeToolCall({
+        session: f.session,
+        runId,
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "unconfirmed-command",
+          name: "run_command",
+          arguments: JSON.stringify({ command: "Write-Output 'task'" }),
+        },
+      });
+      expect(result, result.output).toMatchObject({ isError: true, cleanupUnconfirmed: true });
+      expect(f.internal.executionSafety.inspect(runId)).toMatchObject({ resolved: false });
+      await expect(
+        f.internal.fileLocks.acquire(
+          [f.session.workspacePath as string],
+          true,
+          { sessionId: "another-session", runId: "another-run", label: "Another writer" },
+          signal,
+          async () => false,
+        ),
+      ).rejects.toThrow("Writer retained");
+      f.internal.executionSafety.finish(runId);
+      f.internal.executionSafety.begin(f.session.id, "next-run");
+      const blocked = await f.internal.executeToolCall({
+        session: f.session,
+        runId: "next-run",
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "next-write",
+          name: "write_file",
+          arguments: JSON.stringify({ path: "file.txt", content: "blocked" }),
+        },
+      });
+      expect(blocked.output).toContain("RECOVERY_INSPECTION_REQUIRED");
+      expect(f.tools).toHaveBeenCalledOnce();
+      await f.internal.executeToolCall({
+        session: f.session,
+        runId: "next-run",
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "failed-recovery-read",
+          name: "read_file",
+          arguments: JSON.stringify({ path: "file.txt" }),
+        },
+      });
+      f.tools.mockResolvedValue({ output: "Inspected current files.", isError: false });
+      expect(
+        (
+          await f.internal.executeToolCall({
+            session: f.session,
+            runId: "next-run",
+            signal,
+            toolCall: {
+              index: 0,
+              callId: "recovery-read",
+              name: "read_file",
+              arguments: JSON.stringify({ path: "file.txt" }),
+            },
+          })
+        ).isError,
+      ).toBe(false);
+      const recovery = f.internal.executeToolCall({
+        session: f.session,
+        runId: "next-run",
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "recover-command",
+          name: "resolve_interrupted",
+          arguments: JSON.stringify({
+            evidence_call_ids: ["recovery-read"],
+            summary: "Inspected files and confirmed the affected process tree stopped.",
+          }),
+        },
+      });
+      await vi.waitFor(() => expect(f.questionBroker.list()).toHaveLength(1));
+      expect(f.confirmRunStopped).not.toHaveBeenCalled();
+      f.questionBroker.answer({
+        questionId: f.questionBroker.list()[0]?.id as string,
+        answers: [{ id: "recovery", selectedOptions: ["继续执行"], otherText: "" }],
+      });
+      expect(await recovery).toMatchObject({ isError: false });
+      expect(f.confirmRunStopped).toHaveBeenCalledWith(runId);
+      const release = await f.internal.fileLocks.acquire(
+        [f.session.workspacePath as string],
+        true,
+        { sessionId: "another-session", runId: "another-run", label: "Recovered writer" },
+        signal,
+        async () => false,
+      );
+      release();
+      expect(
+        (
+          await f.internal.executeToolCall({
+            session: f.session,
+            runId: "next-run",
+            signal,
+            toolCall: {
+              index: 0,
+              callId: "recovered-write",
+              name: "write_file",
+              arguments: JSON.stringify({ path: "file.txt", content: "allowed" }),
+            },
+          })
+        ).isError,
+      ).toBe(false);
+    } finally {
+      f.internal.fileLocks.releaseRun(runId);
+      f.db.close();
+    }
+  });
+  it("releases the command lease after a confirmed ordinary failure", async () => {
+    const f = fixture();
+    const signal = new AbortController().signal;
+    try {
+      f.tools.mockResolvedValue({ output: "exit_code: 1", isError: true });
+      await f.internal.executeToolCall({
+        session: f.session,
+        runId: "confirmed-native-run",
+        signal,
+        toolCall: {
+          index: 0,
+          callId: "failed-command",
+          name: "run_command",
+          arguments: JSON.stringify({ command: "Write-Output 'task'" }),
+        },
+      });
+      expect(f.tools).toHaveBeenCalledOnce();
+      const release = await f.internal.fileLocks.acquire(
+        [f.session.workspacePath as string],
+        true,
+        { sessionId: "next-session", runId: "next-run", label: "Next writer" },
+        signal,
+        async () => false,
+      );
+      release();
+    } finally {
+      f.db.close();
+    }
+  });
   it("starts host tool activities after persisting their source call despite checkpoint storage delay", async () => {
     const f = fixture();
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -161,6 +323,47 @@ describe("workbench runtime boundaries", () => {
       f.db.close();
     }
   });
+  it.each([
+    { output: "cleanup status unknown", isError: true, cleanupUnconfirmed: true },
+    { output: "COMMAND_CLEANUP_UNCONFIRMED: process still unknown", isError: true },
+    {
+      output: "command still running",
+      isError: false,
+      commandSession: { id: "running", running: true, unreadOutputChars: 0 },
+    },
+  ] satisfies ToolExecutionResult[])(
+    "preserves an uncertain host-tool checkpoint for $output",
+    async (result) => {
+      const f = fixture();
+      try {
+        f.chat.workbench.checkpoint(f.session.id, {
+          runId: "host-run",
+          state: "running",
+          updatedAt: "",
+          lastSafeTool: "read_file",
+          lastSafeCallId: "prior-safe",
+          completedTools: 2,
+          uncertainTools: [],
+        });
+        vi.spyOn(f.internal, "executeToolCall").mockResolvedValue(result);
+        await f.internal.runHostTool(
+          f.session,
+          "host-run",
+          new AbortController().signal,
+          "run_command",
+          { command: "Write-Output task" },
+        );
+        expect(f.chat.workbench.state(f.session.id).checkpoint).toMatchObject({
+          completedTools: 2,
+          lastSafeTool: "read_file",
+          lastSafeCallId: "prior-safe",
+          uncertainTools: [expect.objectContaining({ name: "run_command" })],
+        });
+      } finally {
+        f.db.close();
+      }
+    },
+  );
   it("blocks unrelated actions until the current model reviews the previous plan, without granting file permissions", async () => {
     const f = fixture();
     try {
@@ -775,11 +978,11 @@ describe("workbench runtime boundaries", () => {
       f.db.close();
     }
   });
-  it("seeds six fixed profiles once, keeps enabled custom profiles and respects readonly/ask policies", () => {
+  it("seeds eighteen built-in profiles once, preserves custom profiles and respects readonly/ask policies", () => {
     const f = fixture();
     try {
       expect(f.repository.listAgentProfiles().filter((profile) => profile.builtin)).toHaveLength(
-        10,
+        18,
       );
       const review = f.repository.getAgentProfile("code-review");
       expect(review).toMatchObject({
@@ -798,6 +1001,9 @@ describe("workbench runtime boundaries", () => {
         description: "Mine",
       });
       new AgentProfileService(f.repository);
+      expect(f.repository.listAgentProfiles().filter((profile) => profile.builtin)).toHaveLength(
+        18,
+      );
       expect(f.repository.getAgentProfile("creative")).toMatchObject({
         name: "My Creative",
         enabled: false,

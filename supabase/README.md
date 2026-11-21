@@ -14,7 +14,7 @@
 
 只通过 SQL Editor、服务端任务或 Supabase Dashboard 写入发布记录。`anon` 角色不能直接写表。
 
-当前源码为1.3.3；维护者已于2026-11-19自行完成1.3.3打包，并提供GitHub Releases ZIP直链。对应发布文件为 [publish-release-1.3.3.sql](publish-release-1.3.3.sql)，已核对本地ZIP、`.zip.json`、`.zip.sha256`及ZIP内安装器，填入实际哈希、字节数和下载地址，可在部署0003后手动执行。本轮没有重新下载远端ZIP或执行云端SQL，云端发布是否生效需维护者执行后核对RPC。下方仍为结构示例，不能原样执行。`publish-release-1.3.2.sql`、`publish-release-1.3.1.sql`和`publish-release.sql`保留1.3.2/1.3.1/1.3.0历史元数据。新包须重新核对元数据，不能沿用旧包哈希。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；执行前需部署0003并确认链接中的安装包版本。不要将分享网页标记为ZIP直链。
+当前源码目标版本为1.3.4。维护者已于2026-11-19自行完成1.3.3打包，并提供GitHub Releases ZIP直链；对应 [publish-release-1.3.3.sql](publish-release-1.3.3.sql) 保留该包已核对的实际哈希、字节数和下载地址，属于历史发布材料。1.3.4 尚需重新打包并基于新ZIP生成发布SQL，不能复用1.3.3的哈希、大小或直链。下方仍为结构示例，不能原样执行。`publish-release-1.3.2.sql`、`publish-release-1.3.1.sql`和`publish-release.sql`保留1.3.2/1.3.1/1.3.0历史元数据。新包须重新核对元数据。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；执行前需部署0003并确认链接中的安装包版本。不要将分享网页标记为ZIP直链。
 
 ```sql
 insert into public.mingshen_app_releases (
@@ -33,7 +33,7 @@ values (
 );
 ```
 
-`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。当前完整可重复执行文件见 `publish-release-1.3.3.sql`；不要原样执行任何下载地址或哈希占位符。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
+`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。`publish-release-1.3.3.sql` 是当前保留的完整历史示例；1.3.4 打包后必须新建对应SQL，不要原样执行旧下载地址或哈希。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
 
 1.3.3 ZIP为318504814字节（303.75 MiB），SHA-256为`39039e54ec234f0c23ce629a6cb81aac5f26f979a264ff6f60f390f245d12d90`，对应`MingshenHarness-1.3.3-x64.zip`；下载地址已填为维护者提供的`SkyH1aa/MingshenHarness`仓库`V1.3.3` Release资产直链。ZIP根目录只有同版本安装EXE，解压长度319403978字节，其SHA-256与旁置EXE一致，安装器ProductVersion为1.3.3。本次未重新下载远端ZIP验证内容。旧版本SQL保留各自实际元数据，不混用。相同版本重新发布不会触发已安装同版本客户端的升级提示。本轮只生成发布文件，没有执行云端SQL或上传包。
 

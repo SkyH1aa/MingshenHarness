@@ -537,12 +537,13 @@ describe("Token Saver persistence, recall and accounting", () => {
     const f = fixture();
     const partial =
       'data: {"choices":[{"delta":{"content":"partial"}}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":6}}}\n\n';
+    const completed = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n';
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
         .mockResolvedValueOnce(new Response(partial))
-        .mockResolvedValueOnce(new Response(`${partial}data: [DONE]\n\n`)),
+        .mockResolvedValueOnce(new Response(`${partial}${completed}data: [DONE]\n\n`)),
     );
     for await (const _event of streamModelTurn({
       ...f,

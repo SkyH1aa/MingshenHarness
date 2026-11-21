@@ -129,7 +129,11 @@ async function fixture() {
       throw new Error(`Unexpected fixture transport operation: ${request.operation}`);
     },
   );
-  const registry = new ToolRegistry({ fileOperation } as unknown as NativeSandboxService);
+  const confirmRunStopped = vi.fn();
+  const registry = new ToolRegistry({
+    fileOperation,
+    confirmRunStopped,
+  } as unknown as NativeSandboxService);
   const execute = vi.spyOn(registry, "execute");
   const chat = new ChatService({
     repository,
@@ -206,6 +210,7 @@ async function fixture() {
     registry,
     execute,
     fileOperation,
+    confirmRunStopped,
     chat,
     internal,
     call,
@@ -616,7 +621,8 @@ describe("document authoring runtime policy", () => {
       questionId: f.questions.list()[0]?.id as string,
       answers: [{ id: "recovery", selectedOptions: ["继续执行"], otherText: "" }],
     });
-    expect((await pending).isError).toBe(false);
+    expect(await pending).toMatchObject({ isError: false });
+    expect(f.confirmRunStopped).toHaveBeenCalledWith("recovery");
     expect((await call("create_document", document())).isError).toBe(false);
     expect((await readFile(join(f.root, "report.docx"))).length).toBeGreaterThan(1000);
   });

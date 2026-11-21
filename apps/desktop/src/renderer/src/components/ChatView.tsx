@@ -18,6 +18,7 @@ import {
   FileText,
   FolderOpen,
   GitBranch,
+  GitPullRequestArrow,
   Globe2,
   HardDrive,
   Image,
@@ -56,7 +57,7 @@ import {
   useState,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
-import { canExtractAttachment } from "../../../shared/attachments";
+import { canExtractAttachment, validateChatAttachmentBatch } from "../../../shared/attachments";
 import type {
   ActivityEvent,
   AgentMode,
@@ -65,6 +66,7 @@ import type {
   ApprovalRequest,
   AttachmentKind,
   ChatAttachmentInput,
+  ChatTurnOptions,
   ContextUsageView,
   CustomCommandView,
   ExtensionImportResult,
@@ -87,6 +89,12 @@ import {
   type QueuedPromptContinueResult,
   type QueuedPromptView,
 } from "../../../shared/queued-prompt";
+import {
+  MAX_PENDING_RUN_STEERING,
+  MAX_RUN_STEERING_TEXT_CHARS,
+  MAX_RUN_STEERING_TOTAL_CHARS,
+  type RunSteeringMessage,
+} from "../../../shared/run-steering";
 import { getLocale, tr, useLocale } from "../i18n/index";
 import { runtimeText } from "../i18n/runtime";
 import {
@@ -100,7 +108,6 @@ import { isAllowedChatAttachment, profileSupportsAgentMode } from "../lib/agent-
 import type { LiveRun, SessionUsage } from "../lib/chat-types";
 import { clipboardImages, namedClipboardImage } from "../lib/clipboard-images";
 import type { DraftAttachment } from "../lib/composer-drafts";
-import { shouldOpenPastePreview } from "../lib/composer-input";
 import { composerMarkdown } from "../lib/composer-markdown";
 import { revealPanelItem } from "../lib/floating-panel";
 import { formatCount, formatDuration, formatPath } from "../lib/format";
@@ -113,8 +120,10 @@ import {
 } from "../lib/slash-commands";
 import { composerDrafts, useComposerDraft } from "../lib/use-composer-draft";
 import { useFloatingPanel } from "../lib/use-floating-panel";
+import { useRunSteering } from "../lib/use-run-steering";
 import { AgentQuestionPanel } from "./AgentQuestionPanel";
 import { BrandMark } from "./BrandMark";
+import { ComposerAssistControls } from "./ComposerAssistControls";
 import { ComposerEditMenu } from "./ComposerEditMenu";
 import { ContextMeter } from "./ContextMeter";
 import { CopyButton } from "./CopyButton";
@@ -126,6 +135,7 @@ import { ModelPicker } from "./ModelPicker";
 import { QuestionNavigator } from "./QuestionNavigator";
 import { QueuedPromptTray } from "./QueuedPromptTray";
 import { RenameSessionDialog } from "./RenameSessionDialog";
+import { RunSteeringTray } from "./RunSteeringTray";
 import { ToolCallDetails } from "./ToolCallDetails";
 import { useUiPreferences } from "./UiPreferences";
 
@@ -151,12 +161,14 @@ interface ChatViewProps {
   activities: ActivityEvent[];
   approval: ApprovalRequest | null;
   question: QuestionRequest | null;
+  creatingSession?: boolean;
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onSend: (
     text: string,
     attachments: ChatAttachmentInput[],
     draftRevision: string,
+    options?: ChatTurnOptions,
   ) => Promise<void>;
   onRewriteMessage: (messageId: string, text: string) => Promise<void>;
   onModePreparationChange: (sessionId: string, preparing: boolean) => void;
@@ -169,6 +181,7 @@ interface ChatViewProps {
   onAddQueuedPrompt?: (
     text: string,
     attachments: ChatAttachmentInput[],
+    options?: ChatTurnOptions,
   ) => Promise<QueuedPromptView>;
   onUpdateQueuedPrompt?: (itemId: string, text: string) => Promise<QueuedPromptView>;
   onBeginQueuedPromptEdit?: (itemId: string) => Promise<string>;
@@ -191,6 +204,30 @@ interface ChatViewProps {
 
 type ToolDetail = NonNullable<ReturnType<typeof toolDetailsForMessage>>;
 const noActiveToolDetails: ReadonlySet<ToolDetail> = new Set();
+const steeringRequests = new Map<string, string>();
+
+function steeringDraftBlocker(
+  text: string,
+  attachmentCount: number,
+  instruction: string,
+  messages: RunSteeringMessage[],
+): string | null {
+  const trimmed = text.trim();
+  if (attachmentCount || instruction.trim())
+    return tr("运行中补充仅支持纯文本，请先移除附件和临时指令。");
+  if (!trimmed) return tr("请输入补充内容。");
+  if (trimmed.length > MAX_RUN_STEERING_TEXT_CHARS)
+    return tr("补充内容不能超过 {0} 个字符。", [MAX_RUN_STEERING_TEXT_CHARS]);
+  const pending = messages.filter((message) => message.status === "pending");
+  const total = messages
+    .filter((message) => message.status !== "unapplied")
+    .reduce((sum, message) => sum + message.text.length, 0);
+  if (pending.length >= MAX_PENDING_RUN_STEERING)
+    return tr("待接入的补充内容已达上限，请稍后再试。");
+  if (total + trimmed.length > MAX_RUN_STEERING_TOTAL_CHARS)
+    return tr("本次运行的补充内容已达上限，请等待运行结束。");
+  return null;
+}
 
 function attachmentKindFromFile(file: File): AttachmentKind {
   if (file.type.startsWith("image/")) {
@@ -237,6 +274,21 @@ async function prepareChatAttachment(
     dataUrl: resolvedDataUrl,
     ...(localPath ? { path: localPath } : {}),
   };
+}
+
+function validateDraftAttachmentBatch(
+  attachments: DraftAttachment[],
+  additions: File[] = [],
+): void {
+  validateChatAttachmentBatch(
+    attachments
+      .map(({ file }) => ({ name: file.name, size: file.size }))
+      .concat(additions.map((file) => ({ name: file.name, size: file.size }))),
+  );
+}
+
+function attachmentValidationMessage(cause: unknown): string {
+  return runtimeText(cause instanceof Error ? cause.message : String(cause));
 }
 
 function formatBytes(size: number): string {
@@ -308,6 +360,7 @@ export function ChatView({
   activities,
   approval,
   question,
+  creatingSession = false,
   onNewSession,
   onSelectSession,
   onSend,
@@ -338,9 +391,13 @@ export function ChatView({
   const { activeStyle, preferences } = useUiPreferences();
   const orbit = activeStyle === "orbit";
   const sessionId = session?.id ?? null;
+  const selectedSessionIdRef = useRef(sessionId);
+  selectedSessionIdRef.current = sessionId;
   const chatMode = agentMode === "chat" || session?.agentMode === "chat";
+  const chatNetworkEnabled = session?.chatNetworkEnabled !== false;
   const workStarters = orbit && !compact && !chatMode && agentMode === "work";
   const draftState = useComposerDraft(sessionId);
+  const steeringState = useRunSteering(sessionId);
   const draft = draftState.value.text;
   const attachments = draftState.value.attachments;
   const formattedDraft = draftState.value.formatted ? draft : null;
@@ -378,9 +435,6 @@ export function ChatView({
     },
     [sessionId],
   );
-  // A paste only opens preview when the matching input event arrives immediately after it.
-  // Consuming the flag here prevents a stale paste from moving later typing into preview.
-  const pasteWaitingRef = useRef(false);
   const previewRef = useRef<HTMLElement>(null);
   const previewRequested =
     preferences.composerRichPaste && Boolean(draft) && formattedDraft === draft;
@@ -401,6 +455,14 @@ export function ChatView({
   const [dragActive, setDragActive] = useState(false);
   const [sending, setSending] = useState(false);
   const [queueing, setQueueing] = useState(false);
+  const [steering, setSteering] = useState(false);
+  const composerActionRef = useRef(false);
+  const [temporaryInstruction, setTemporaryInstruction] = useState("");
+  const temporaryInstructionRef = useRef("");
+  const updateTemporaryInstruction = (value: string) => {
+    temporaryInstructionRef.current = value;
+    setTemporaryInstruction(value);
+  };
   const [sendingStartedAt, setSendingStartedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [memoryResult, setMemoryResult] = useState<string | null>(null);
@@ -428,6 +490,10 @@ export function ChatView({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenuRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Temporary guidance belongs only to the selected conversation.
+  useEffect(() => {
+    updateTemporaryInstruction("");
+  }, [sessionId]);
   useLayoutEffect(() => {
     if (!draftState.ready) return;
     const field = textareaRef.current;
@@ -506,6 +572,20 @@ export function ChatView({
   });
   const running =
     session?.status === "running" || session?.status === "waiting_approval" || Boolean(live);
+  const canSteerRun = Boolean(
+    session &&
+      !session.parentSessionId &&
+      running &&
+      runState?.status === "running" &&
+      steeringState?.accepting &&
+      steeringState.runId === runState.runId,
+  );
+  const steeringBlocker = steeringDraftBlocker(
+    draft,
+    attachments.length,
+    temporaryInstruction,
+    steeringState?.messages ?? [],
+  );
   const activeToolDetails = useMemo(() => {
     if (!running || activities.length === 0) return noActiveToolDetails;
     const calls = new Set<ToolDetail>();
@@ -785,23 +865,28 @@ export function ChatView({
           return;
         }
       }
-      const oversized = files.find((file) => file.size > 25 * 1024 * 1024);
-      if (oversized) {
-        setError(
-          tr(
-            "\u9644\u4EF6\u300C{0}\u300D\u8D85\u8FC7\u5355\u6587\u4EF6 25 MiB \u9650\u5236\u3002",
-            [oversized.name],
-          ),
-        );
-        return;
-      }
       setError(null);
       void composerDrafts
         .load(sessionId)
-        .then(() =>
+        .then(() => {
+          const current = composerDrafts.state(sessionId).value.attachments;
+          const keys = new Set(current.map((item) => `${item.file.name}:${item.file.size}`));
+          const additions = files.filter((file) => {
+            const key = `${file.name}:${file.size}`;
+            if (keys.has(key)) return false;
+            keys.add(key);
+            return true;
+          });
+          if (additions.length === 0) return;
+          try {
+            validateDraftAttachmentBatch(current, additions);
+          } catch (cause) {
+            setError(attachmentValidationMessage(cause));
+            return;
+          }
           setAttachments((current) => {
             const existing = new Set(current.map((item) => `${item.file.name}:${item.file.size}`));
-            const next = files
+            const next = additions
               .filter((file) => !existing.has(`${file.name}:${file.size}`))
               .map((file) => ({
                 id: crypto.randomUUID(),
@@ -809,8 +894,8 @@ export function ChatView({
                 kind: attachmentKindFromFile(file),
               }));
             return [...current, ...next];
-          }),
-        )
+          });
+        })
         .catch((cause: unknown) =>
           setError(cause instanceof Error ? cause.message : String(cause)),
         );
@@ -898,8 +983,18 @@ export function ChatView({
                 : "\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u8BA9 Mingshen \u8FDB\u5165\u4E00\u4E2A\u672C\u5730\u5DE5\u4F5C\u76EE\u5F55\u3002",
             )}
           </p>
-          <button className="btn btn--primary" type="button" onClick={onNewSession}>
-            <Plus aria-hidden="true" size={16} />
+          <button
+            className="btn btn--primary"
+            type="button"
+            onClick={onNewSession}
+            disabled={creatingSession}
+            aria-busy={creatingSession}
+          >
+            {creatingSession ? (
+              <LoaderCircle className="spin" aria-hidden="true" size={16} />
+            ) : (
+              <Plus aria-hidden="true" size={16} />
+            )}
             {tr(chatMode ? "新建对话" : "\u65B0\u5EFA\u4F1A\u8BDD")}
           </button>
         </div>
@@ -909,9 +1004,18 @@ export function ChatView({
 
   const send = async () => {
     if (!draftState.ready) return;
+    if (draftState.error) {
+      setError(tr("请先处理草稿同步错误。"));
+      return;
+    }
     const submitted = composerDrafts.state(session.id).value;
     const text = submitted.text.trim();
-    if ((!text && submitted.attachments.length === 0) || sending || running) {
+    if (
+      (!text && submitted.attachments.length === 0) ||
+      sending ||
+      running ||
+      composerActionRef.current
+    ) {
       return;
     }
     const builtin = chatMode ? null : parseBuiltinCommand(text);
@@ -936,13 +1040,24 @@ export function ChatView({
       );
       return;
     }
+    try {
+      validateDraftAttachmentBatch(submitted.attachments);
+    } catch (cause) {
+      setError(attachmentValidationMessage(cause));
+      return;
+    }
 
+    composerActionRef.current = true;
     setSending(true);
     setSendingStartedAt(Date.now());
     setError(null);
     onModePreparationChange(session.id, true);
+    let submittedToRun = false;
     try {
       await composerDrafts.flush(session.id);
+      if (composerDrafts.state(session.id).value.revision !== submitted.revision)
+        throw new Error(tr("草稿已更改，请检查后重新发送。"));
+      const submittedInstruction = temporaryInstruction.trim();
       const preparedAttachments = await Promise.all(
         submitted.attachments.map((attachment) =>
           prepareChatAttachment(
@@ -954,15 +1069,27 @@ export function ChatView({
           ),
         ),
       );
-      await onSend(text, preparedAttachments, submitted.revision);
+      await onSend(
+        text,
+        preparedAttachments,
+        submitted.revision,
+        submittedInstruction ? { temporaryInstruction: submittedInstruction } : undefined,
+      );
+      submittedToRun = true;
+      updateTemporaryInstruction("");
       await composerDrafts.accepted(session.id, submitted.revision);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(
+        submittedToRun
+          ? tr("内容已提交，但草稿同步失败。请先重试草稿同步，避免重复发送。")
+          : runtimeText(cause instanceof Error ? cause.message : String(cause)),
+      );
     } finally {
       onModePreparationChange(session.id, false);
+      composerActionRef.current = false;
       setSending(false);
       setSendingStartedAt(null);
     }
@@ -973,6 +1100,8 @@ export function ChatView({
       !onAddQueuedPrompt ||
       session.parentSessionId ||
       !draftState.ready ||
+      draftState.error ||
+      composerActionRef.current ||
       queueing ||
       sending ||
       !running ||
@@ -999,11 +1128,22 @@ export function ChatView({
       setError(tr("聊天命令不能加入下一轮队列。"));
       return;
     }
+    try {
+      validateDraftAttachmentBatch(submitted.attachments);
+    } catch (cause) {
+      setError(attachmentValidationMessage(cause));
+      return;
+    }
 
+    composerActionRef.current = true;
     setQueueing(true);
     setError(null);
+    let submittedToQueue = false;
     try {
       await composerDrafts.flush(session.id);
+      if (composerDrafts.state(session.id).value.revision !== submitted.revision)
+        throw new Error(tr("草稿已更改，请检查后重新发送。"));
+      const submittedInstruction = temporaryInstruction.trim();
       const preparedAttachments = await Promise.all(
         submitted.attachments.map((attachment) =>
           prepareChatAttachment(
@@ -1015,15 +1155,103 @@ export function ChatView({
           ),
         ),
       );
-      await onAddQueuedPrompt(text, preparedAttachments);
+      await onAddQueuedPrompt(
+        text,
+        preparedAttachments,
+        submittedInstruction ? { temporaryInstruction: submittedInstruction } : undefined,
+      );
+      submittedToQueue = true;
+      updateTemporaryInstruction("");
       await composerDrafts.clearIfCurrent(session.id, submitted.revision);
       if (textareaRef.current) textareaRef.current.style.height = "auto";
       textareaRef.current?.focus();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(
+        submittedToQueue
+          ? tr("内容已加入队列，但草稿同步失败。请先重试草稿同步，避免重复发送。")
+          : runtimeText(cause instanceof Error ? cause.message : String(cause)),
+      );
     } finally {
+      composerActionRef.current = false;
       setQueueing(false);
     }
+  };
+
+  const steerCurrentDraft = async () => {
+    if (composerActionRef.current || steering || sending || queueing || !draftState.ready) return;
+    if (draftState.error) {
+      setError(tr("请先处理草稿同步错误。"));
+      return;
+    }
+    if (!canSteerRun || !steeringState) {
+      setError(tr("当前运行暂不接受补充内容，草稿已保留。"));
+      return;
+    }
+    const submitted = composerDrafts.state(session.id).value;
+    const text = submitted.text.trim();
+    const blocker = steeringDraftBlocker(
+      submitted.text,
+      submitted.attachments.length,
+      temporaryInstructionRef.current,
+      steeringState.messages,
+    );
+    if (blocker) {
+      setError(blocker);
+      return;
+    }
+    const key = JSON.stringify([session.id, steeringState.runId, submitted.revision, text]);
+    let requestId = steeringRequests.get(key);
+    if (!requestId) {
+      requestId = crypto.randomUUID();
+      steeringRequests.set(key, requestId);
+      if (steeringRequests.size > 128) {
+        const oldest = steeringRequests.keys().next().value;
+        if (oldest !== undefined) steeringRequests.delete(oldest);
+      }
+    }
+    composerActionRef.current = true;
+    setSteering(true);
+    setError(null);
+    let submittedToRun = false;
+    try {
+      await composerDrafts.flush(session.id);
+      if (composerDrafts.state(session.id).value.revision !== submitted.revision)
+        throw new Error(tr("草稿已更改，请检查后重新发送补充内容。"));
+      await window.mingshen.steerRun({
+        sessionId: session.id,
+        runId: steeringState.runId,
+        requestId,
+        text,
+        draftRevision: submitted.revision,
+      });
+      submittedToRun = true;
+      await composerDrafts.accepted(session.id, submitted.revision);
+      steeringRequests.delete(key);
+      if (selectedSessionIdRef.current === session.id) textareaRef.current?.focus();
+    } catch (cause) {
+      if (selectedSessionIdRef.current === session.id)
+        setError(
+          submittedToRun
+            ? tr("内容已提交，但草稿同步失败。请先重试草稿同步，避免重复发送。")
+            : runtimeText(cause instanceof Error ? cause.message : String(cause)),
+        );
+    } finally {
+      composerActionRef.current = false;
+      setSteering(false);
+    }
+  };
+
+  const applyPolishedDraft = (input: {
+    originalText: string;
+    originalRevision: string;
+    polishedText: string;
+  }) => {
+    if (!sessionId) return;
+    composerDrafts.update(sessionId, (current) =>
+      current.revision === input.originalRevision && current.text === input.originalText
+        ? { ...current, text: input.polishedText, formatted: false }
+        : current,
+    );
   };
 
   const replaceQueuedAttachments = async (itemId: string, text: string, files: File[]) => {
@@ -1031,9 +1259,10 @@ export function ChatView({
     if (!selectedModel) {
       throw new Error(tr("请先为当前会话选择模型。"));
     }
-    const oversized = files.find((file) => file.size > 25 * 1024 * 1024);
-    if (oversized) {
-      throw new Error(tr("附件「{0}」超过单文件 25 MiB 限制。", [oversized.name]));
+    try {
+      validateChatAttachmentBatch(files);
+    } catch (cause) {
+      throw new Error(attachmentValidationMessage(cause));
     }
     if (chatMode) {
       const unsupported = files.find(
@@ -1262,7 +1491,12 @@ export function ChatView({
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.nativeEvent.isComposing) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (running && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void steerCurrentDraft();
+      return;
+    }
     if (choices) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -1287,7 +1521,8 @@ export function ChatView({
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      void send();
+      if (running) void steerCurrentDraft();
+      else void send();
     }
   };
 
@@ -1297,6 +1532,7 @@ export function ChatView({
   };
   const onPreviewKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (sending) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if ((event.ctrlKey || event.metaKey) && ["a", "x"].includes(event.key.toLowerCase())) {
       event.preventDefault();
       editDraft();
@@ -1305,7 +1541,8 @@ export function ChatView({
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      void send();
+      if (running) void steerCurrentDraft();
+      else void send();
       return;
     }
     if (event.key === "Escape") {
@@ -1531,7 +1768,7 @@ export function ChatView({
 
   return (
     <main
-      className={`chat-view${compact ? " chat-view--quick" : ""}${dragActive ? " chat-view--drag-active" : ""}${question ? " chat-view--question" : ""}`}
+      className={`chat-view${compact ? " chat-view--quick" : ""}${dragActive ? " chat-view--drag-active" : ""}${question ? " chat-view--question" : ""}${canSteerRun ? " chat-view--steer-available" : ""}`}
       data-testid="chat-view"
       data-agent-mode={agentMode}
       data-compact={compact ? "true" : "false"}
@@ -2034,6 +2271,41 @@ export function ChatView({
               onChange={(selection, model) => void changeModel(selection, model)}
               disabled={running}
             />
+            {chatMode ? (
+              <fieldset className="chat-network-control">
+                <legend className="visually-hidden">{tr("联网权限")}</legend>
+                <button
+                  type="button"
+                  data-testid="chat-network-allow"
+                  data-network-action="allow"
+                  aria-pressed={chatNetworkEnabled}
+                  disabled={running || sending}
+                  onClick={() =>
+                    void onPatch({ sessionId: session.id, chatNetworkEnabled: true }).catch(
+                      (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+                    )
+                  }
+                >
+                  <Globe2 size={14} aria-hidden="true" />
+                  {tr("允许联网")}
+                </button>
+                <button
+                  type="button"
+                  data-testid="chat-network-deny"
+                  data-network-action="deny"
+                  aria-pressed={!chatNetworkEnabled}
+                  disabled={running || sending}
+                  onClick={() =>
+                    void onPatch({ sessionId: session.id, chatNetworkEnabled: false }).catch(
+                      (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+                    )
+                  }
+                >
+                  <ShieldAlert size={14} aria-hidden="true" />
+                  {tr("禁止联网")}
+                </button>
+              </fieldset>
+            ) : null}
             {!chatMode ? (
               <>
                 <label className="composer-agent">
@@ -2096,6 +2368,8 @@ export function ChatView({
               onReplaceAttachments={replaceQueuedAttachments}
             />
           ) : null}
+
+          <RunSteeringTray state={steeringState} />
 
           {attachments.length > 0 ? (
             <fieldset
@@ -2167,43 +2441,20 @@ export function ChatView({
             }
             onChange={(event) => {
               const text = event.target.value;
-              const inputType = (event.nativeEvent as InputEvent).inputType;
-              const pasted = shouldOpenPastePreview({
-                inputType,
-                pastePending: pasteWaitingRef.current,
-                richPasteEnabled: preferences.composerRichPaste,
-              });
-              pasteWaitingRef.current = false;
               setDraft(text);
-              if (pasted) {
-                previewFocusRequested.current = true;
-                setFormattedDraft(text);
-              }
               setSlashIndex(0);
               setSlashDismissed(null);
               event.target.style.height = "auto";
               event.target.style.height = `${Math.min(240, event.target.scrollHeight)}px`;
             }}
             onKeyDown={(event) => {
-              pasteWaitingRef.current = false;
               onComposerKeyDown(event);
             }}
-            onCompositionStart={() => {
-              pasteWaitingRef.current = false;
-            }}
             onPaste={(event) => {
-              pasteWaitingRef.current = false;
               const images = clipboardImages(event.clipboardData);
               if (images.length) {
                 event.preventDefault();
                 addFiles(images.map(namedClipboardImage));
-              } else {
-                pasteWaitingRef.current = Boolean(event.clipboardData.getData("text/plain"));
-                // Bounded expiry protects against a paste that never produces an input event.
-                // Keydown and composition start also clear it immediately.
-                setTimeout(() => {
-                  pasteWaitingRef.current = false;
-                }, 1000);
               }
             }}
             onContextMenu={(event) => {
@@ -2232,10 +2483,6 @@ export function ChatView({
                   event.preventDefault();
                   addFiles(images.map(namedClipboardImage));
                 } else {
-                  pasteWaitingRef.current = Boolean(event.clipboardData.getData("text/plain"));
-                  setTimeout(() => {
-                    pasteWaitingRef.current = false;
-                  }, 1000);
                   editDraft();
                 }
               }}
@@ -2262,6 +2509,11 @@ export function ChatView({
           {previewRequested && !formatted ? (
             <p className="composer-preview-status" role="status">
               {tr("内容较长或格式复杂，已保留原文编辑。")}
+            </p>
+          ) : null}
+          {canSteerRun && (attachments.length > 0 || Boolean(temporaryInstruction.trim())) ? (
+            <p className="run-steering__blocker" role="status">
+              {tr("运行中补充仅支持纯文本，请先移除附件和临时指令。")}
             </p>
           ) : null}
           {editMenu ? (
@@ -2459,6 +2711,18 @@ export function ChatView({
                   </button>
                 </fieldset>
               ) : null}
+              {!compact ? (
+                <ComposerAssistControls
+                  session={session}
+                  draftText={draft}
+                  draftRevision={draftState.value.revision}
+                  formatted={formatted}
+                  disabled={sending || !draftState.ready}
+                  temporaryInstruction={temporaryInstruction}
+                  onTemporaryInstructionChange={updateTemporaryInstruction}
+                  onApplyPolished={applyPolishedDraft}
+                />
+              ) : null}
               <ExtensionPicker
                 builtinCapabilities={builtinCapabilities}
                 extensions={extensions}
@@ -2480,7 +2744,9 @@ export function ChatView({
                   onClick={() => void queueCurrentDraft()}
                   disabled={
                     queueing ||
+                    steering ||
                     !draftState.ready ||
+                    Boolean(draftState.error) ||
                     (!draft.trim() && attachments.length === 0) ||
                     !selectedModel ||
                     incompatibleAttachments.length > 0 ||
@@ -2535,6 +2801,34 @@ export function ChatView({
               </label>
 
               <div className="composer__actions">
+                {canSteerRun ? (
+                  <button
+                    className="send-button steering-send-button"
+                    type="button"
+                    aria-label={tr("发送运行中补充")}
+                    data-testid="chat-steering-send"
+                    title={
+                      draftState.error
+                        ? tr("请先处理草稿同步错误。")
+                        : (steeringBlocker ?? tr("发送补充：将在当前回复或工具批次结束后接入。"))
+                    }
+                    onClick={() => void steerCurrentDraft()}
+                    disabled={
+                      Boolean(steeringBlocker) ||
+                      steering ||
+                      queueing ||
+                      sending ||
+                      Boolean(draftState.error) ||
+                      !draftState.ready
+                    }
+                  >
+                    {steering ? (
+                      <LoaderCircle className="spin" aria-hidden="true" size={17} />
+                    ) : (
+                      <GitPullRequestArrow aria-hidden="true" size={17} />
+                    )}
+                  </button>
+                ) : null}
                 {running || sending ? (
                   <button
                     className="btn btn--secondary"
@@ -2557,6 +2851,7 @@ export function ChatView({
                     disabled={
                       (!draft.trim() && attachments.length === 0) ||
                       !draftState.ready ||
+                      Boolean(draftState.error) ||
                       sending ||
                       !selectedModel ||
                       incompatibleAttachments.length > 0
@@ -2636,7 +2931,14 @@ export function ChatView({
               <button
                 className="btn btn--secondary"
                 type="button"
-                onClick={() => void composerDrafts.flush(session.id).catch(() => undefined)}
+                onClick={() =>
+                  void composerDrafts
+                    .flush(session.id)
+                    .then(() => {
+                      if (selectedSessionIdRef.current === session.id) setError(null);
+                    })
+                    .catch(() => undefined)
+                }
               >
                 <RotateCcw size={14} aria-hidden="true" />
                 {tr("重试")}

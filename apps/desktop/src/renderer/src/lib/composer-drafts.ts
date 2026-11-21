@@ -46,6 +46,8 @@ interface DraftEntry {
   listeners: Set<() => void>;
   loaded: Promise<void> | null;
   pending: Promise<void> | null;
+  acceptance: Promise<void> | null;
+  acceptanceRevisions: string[];
   refreshEpoch: number;
   baseRevision: string | null;
   persistedRevision: string;
@@ -113,6 +115,8 @@ export class ComposerDraftStore {
         listeners: new Set(),
         loaded: null,
         pending: null,
+        acceptance: null,
+        acceptanceRevisions: [],
         refreshEpoch: 0,
         baseRevision: null,
         persistedRevision: value.revision,
@@ -306,6 +310,9 @@ export class ComposerDraftStore {
 
   async flush(sessionId: string): Promise<void> {
     await this.load(sessionId);
+    const entry = this.entry(sessionId);
+    if (entry.acceptance || entry.acceptanceRevisions.length)
+      await this.processAcceptances(sessionId, entry);
     await this.save(sessionId);
   }
 
@@ -317,6 +324,8 @@ export class ComposerDraftStore {
           !entry.removed &&
           !failed.has(id) &&
           (entry.pending !== null ||
+            entry.acceptance !== null ||
+            entry.acceptanceRevisions.length > 0 ||
             !entry.state.ready ||
             (entry.state.ready && entry.persistedRevision !== entry.state.value.revision)),
       );
@@ -345,6 +354,8 @@ export class ComposerDraftStore {
       (entry) =>
         !entry.removed &&
         (entry.pending !== null ||
+          entry.acceptance !== null ||
+          entry.acceptanceRevisions.length > 0 ||
           (entry.state.ready && entry.persistedRevision !== entry.state.value.revision)),
     );
   }
@@ -359,29 +370,126 @@ export class ComposerDraftStore {
     }
   }
 
-  async accepted(sessionId: string, revision: string): Promise<void> {
+  accepted(sessionId: string, revision: string): Promise<void> {
     const entry = this.entries.get(sessionId);
-    if (!entry || entry.removed) return;
-    if (!entry.state.ready) await this.load(sessionId);
+    if (!entry || entry.removed) return Promise.resolve();
+    if (!entry.acceptanceRevisions.includes(revision)) entry.acceptanceRevisions.push(revision);
+    return this.processAcceptances(sessionId, entry);
+  }
+
+  private processAcceptances(sessionId: string, entry: DraftEntry): Promise<void> {
+    const previous = entry.acceptance;
+    const acceptance = (async () => {
+      await previous?.catch(() => undefined);
+      while (!entry.removed && entry.acceptanceRevisions.length) {
+        const revision = entry.acceptanceRevisions[0];
+        if (!revision) return;
+        await this.reconcileAcceptance(sessionId, revision, entry);
+        entry.acceptanceRevisions.shift();
+      }
+    })();
+    entry.acceptance = acceptance;
+    void acceptance.then(
+      () => {
+        if (entry.acceptance === acceptance) entry.acceptance = null;
+      },
+      () => {
+        if (entry.acceptance === acceptance) entry.acceptance = null;
+      },
+    );
+    return acceptance;
+  }
+
+  private async reconcileAcceptance(
+    sessionId: string,
+    revision: string,
+    entry: DraftEntry,
+  ): Promise<void> {
     if (entry.removed) return;
-    if (entry.state.value.revision !== revision) {
-      // Acceptance may have removed attachment bytes before its IPC reply arrived.
+    if (!entry.state.ready) await this.load(sessionId);
+    while (!entry.removed) {
       await entry.pending?.catch(() => undefined);
       if (entry.removed) return;
-      entry.baseRevision = null;
+
+      const valueRevision = entry.state.value.revision;
+      const persistedRevision = entry.persistedRevision;
+      const baseRevision = entry.baseRevision;
+      if (
+        valueRevision !== revision &&
+        (persistedRevision === valueRevision || baseRevision !== revision)
+      )
+        return;
+
+      // Invalidate older refreshes, and discard this read if local state changes meanwhile.
+      const epoch = ++entry.refreshEpoch;
+      const conflict = entry.state.conflict;
+      const current = () =>
+        !entry.removed &&
+        epoch === entry.refreshEpoch &&
+        entry.pending === null &&
+        entry.state.value.revision === valueRevision &&
+        entry.persistedRevision === persistedRevision &&
+        entry.baseRevision === baseRevision &&
+        entry.state.conflict === conflict;
+      let saved: ComposerDraft | null;
+      try {
+        saved = await this.api.getComposerDraft(sessionId);
+      } catch (cause) {
+        if (entry.removed) return;
+        if (!current()) continue;
+        this.publish(entry, { error: cause instanceof Error ? cause.message : String(cause) });
+        throw cause;
+      }
+      if (entry.removed) return;
+      if (!current()) continue;
+
+      const consumed =
+        saved === null ||
+        (saved.revision === revision &&
+          saved.text.length === 0 &&
+          !saved.formatted &&
+          saved.attachments.length === 0);
+
+      if (valueRevision === revision) {
+        if (conflict || persistedRevision !== revision) return;
+        if (saved && saved.revision !== revision) {
+          const value: ComposerDraftValue = {
+            revision: saved.revision,
+            text: saved.text,
+            formatted: saved.formatted,
+            attachments: saved.attachments.map(restoredAttachment),
+            notificationDraftIds: saved.notificationDraftIds,
+          };
+          entry.baseRevision = saved.revision;
+          entry.persistedRevision = value.revision;
+          entry.storedAttachments = new Set(value.attachments.map((item) => item.id));
+          this.publish(entry, { value, error: null, conflict: false });
+          return;
+        }
+        if (!consumed) {
+          this.publish(entry, { error: COMPOSER_DRAFT_CONFLICT_MESSAGE, conflict: true });
+          return;
+        }
+        const value = { ...emptyDraft(), notificationDraftIds: saved?.notificationDraftIds ?? [] };
+        entry.baseRevision = saved?.revision ?? null;
+        entry.persistedRevision = value.revision;
+        entry.storedAttachments.clear();
+        this.publish(entry, { value, error: null, conflict: false });
+        return;
+      }
+
+      if (!consumed || conflict || saved === null) {
+        // A missing record may be an ABA change from another window, not this clear.
+        this.publish(entry, { error: COMPOSER_DRAFT_CONFLICT_MESSAGE, conflict: true });
+        return;
+      }
+      // A successful clear can remove attachment bytes while a newer save is pending.
+      entry.baseRevision = saved?.revision ?? null;
       entry.storedAttachments.clear();
       this.publish(entry, { error: null, conflict: false });
       await this.save(sessionId);
       return;
     }
-    const value = {
-      ...emptyDraft(),
-      notificationDraftIds: entry.state.value.notificationDraftIds,
-    };
-    entry.baseRevision = null;
-    entry.persistedRevision = value.revision;
-    entry.storedAttachments.clear();
-    this.publish(entry, { value, error: null, conflict: false });
   }
 
   async resolveConflict(

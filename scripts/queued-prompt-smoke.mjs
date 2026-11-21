@@ -742,6 +742,58 @@ async function failQueuedAttachmentReplacement(sessionId, text, fileName) {
   );
 }
 
+async function installQueuedReplacementPreflightCounters() {
+  await mainInspector.evaluate(`(()=>{
+    const ipcMain=process.getBuiltinModule("module")
+      .createRequire(process.cwd()+"/package.json")("electron").ipcMain;
+    const handlers=ipcMain._invokeHandlers;
+    const original=handlers.get("chat:queue-update");
+    if(typeof original!=="function")throw new Error("Missing queue update handler");
+    globalThis.__queuedReplacementUpdateCalls=0;
+    globalThis.__queuedReplacementUpdateRestore=()=>{
+      handlers.set("chat:queue-update",original);
+    };
+    handlers.set("chat:queue-update",(...args)=>{
+      globalThis.__queuedReplacementUpdateCalls+=1;
+      return original(...args);
+    });
+    return true;
+  })()`);
+  await renderer.evaluate(`(()=>{
+    globalThis.__queuedReplacementFileReads=0;
+    globalThis.__queuedReplacementOriginalFileReader=FileReader.prototype.readAsDataURL;
+    FileReader.prototype.readAsDataURL=function(file){
+      globalThis.__queuedReplacementFileReads+=1;
+      return globalThis.__queuedReplacementOriginalFileReader.call(this,file);
+    };
+    return true;
+  })()`);
+}
+
+async function queuedReplacementPreflightCounters() {
+  return {
+    fileReads: await renderer.evaluate("globalThis.__queuedReplacementFileReads"),
+    queueUpdates: await mainInspector.evaluate(
+      "globalThis.__queuedReplacementUpdateCalls",
+    ),
+  };
+}
+
+async function restoreQueuedReplacementPreflightCounters() {
+  await renderer.evaluate(`(()=>{
+    FileReader.prototype.readAsDataURL=globalThis.__queuedReplacementOriginalFileReader;
+    delete globalThis.__queuedReplacementOriginalFileReader;
+    delete globalThis.__queuedReplacementFileReads;
+    return true;
+  })()`).catch(() => undefined);
+  await mainInspector.evaluate(`(()=>{
+    globalThis.__queuedReplacementUpdateRestore?.();
+    delete globalThis.__queuedReplacementUpdateRestore;
+    delete globalThis.__queuedReplacementUpdateCalls;
+    return true;
+  })()`).catch(() => undefined);
+}
+
 try {
   await mkdir(project, { recursive: true });
   await mkdir(evidence, { recursive: true });
@@ -1321,15 +1373,33 @@ try {
     attachments: [originalAttachment],
   });
   await waitForQueueCount(attachmentFailureSession.id, 1);
-  const replacementError = await failQueuedAttachmentReplacement(
-    attachmentFailureSession.id,
-    attachmentQueueText,
-    "queue-invalid-over-25-miB.txt",
-  );
+  await installQueuedReplacementPreflightCounters();
+  let replacementError;
+  let replacementPreflight;
+  try {
+    replacementError = await failQueuedAttachmentReplacement(
+      attachmentFailureSession.id,
+      attachmentQueueText,
+      "queue-invalid-over-25-miB.txt",
+    );
+    await until(
+      `window.mingshen.listQueuedPrompts(${JSON.stringify(attachmentFailureSession.id)}).then(items=>items.length===1&&items[0].automaticPauseReason==="editing"&&items[0].attachments.length===1&&items[0].attachments[0].name===${JSON.stringify(originalAttachmentName)})`,
+    );
+    replacementPreflight = await queuedReplacementPreflightCounters();
+    assert.equal(
+      replacementPreflight.fileReads,
+      0,
+      "Oversized queued attachment replacement must fail before FileReader",
+    );
+    assert.equal(
+      replacementPreflight.queueUpdates,
+      0,
+      "Oversized queued attachment replacement must fail before queue update IPC",
+    );
+  } finally {
+    await restoreQueuedReplacementPreflightCounters();
+  }
   assert.match(replacementError, /25 MiB/);
-  await until(
-    `window.mingshen.listQueuedPrompts(${JSON.stringify(attachmentFailureSession.id)}).then(items=>items.length===1&&items[0].automaticPauseReason==="editing"&&items[0].attachments.length===1&&items[0].attachments[0].name===${JSON.stringify(originalAttachmentName)})`,
-  );
   const attachmentPaused = (await queueItems(attachmentFailureSession.id))[0];
   assert.ok(attachmentPaused);
   assert.deepEqual(attachmentPaused.attachments, [
@@ -1402,13 +1472,14 @@ try {
   await waitForQueueCount(attachmentFailureSession.id, 0);
   queueEvidence.attachmentReplacementFailure = {
     error: replacementError,
+    rendererPreflight: replacementPreflight,
     preserved: attachmentPaused.attachments,
     automaticRequestsBeforeResume: 0,
     resumedRunId: attachmentRecovered.runId,
     transport: recoveredFiles.length ? "input_file" : "extracted_text",
   };
   passed.push(
-    "A queued head with an attachment pauses when an oversized replacement fails, preserves the original bytes, sends nothing automatically, and sends the original only after queue-level Resume",
+    "A queued head with an attachment rejects an oversized replacement before FileReader or update IPC, preserves the original bytes, sends nothing automatically, and sends the original only after queue-level Resume",
   );
 
   await selectWorkspaceSession(failureSession);

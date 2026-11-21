@@ -1,3 +1,4 @@
+import { MAX_CHAT_ATTACHMENT_BYTES } from "./attachments";
 import type { ChatAttachmentInput } from "./domain";
 
 export interface ComposerDraftAttachment extends ChatAttachmentInput {
@@ -27,7 +28,7 @@ export interface SaveComposerDraftInput {
 export const COMPOSER_DRAFT_CONFLICT_CODE = "COMPOSER_DRAFT_CONFLICT";
 export const COMPOSER_DRAFT_CONFLICT_MESSAGE = `${COMPOSER_DRAFT_CONFLICT_CODE}: 草稿已在其他窗口更新。本地内容仍保留，请明确选择覆盖最新草稿或载入最新版本。`;
 
-export const MAX_COMPOSER_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_COMPOSER_ATTACHMENT_BYTES = MAX_CHAT_ATTACHMENT_BYTES;
 export const MAX_COMPOSER_NOTIFICATION_IDS = 128;
 
 export function validAttachmentBytes(dataUrl: string, size: number): boolean {

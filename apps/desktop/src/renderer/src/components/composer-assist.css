@@ -1,0 +1,326 @@
+.composer-assist-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.composer-assist-trigger {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+}
+
+.composer-assist-trigger[data-active="true"] {
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.composer-assist-trigger__dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--surface);
+  border-radius: 50%;
+  background: var(--brand);
+}
+
+.composer-assist-inline-error {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--danger, #c84c42);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-assist-popover {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 16px 44px rgb(0 0 0 / 24%);
+  color: var(--text);
+}
+
+.composer-assist-popover__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.composer-assist-popover__header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.composer-assist-popover__header strong {
+  font-size: 13px;
+}
+
+.composer-assist-popover__header small {
+  max-width: 380px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.composer-assist-textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2, var(--bg));
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.composer-assist-textarea:focus {
+  border-color: var(--brand);
+  outline: 2px solid var(--brand-soft);
+  outline-offset: 1px;
+}
+
+.composer-assist-popover__footer,
+.composer-tone-custom__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.composer-assist-popover__footer > span,
+.composer-tone-custom__actions > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-tone-options {
+  display: grid;
+  gap: 3px;
+}
+
+.composer-tone-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-tone-option:hover,
+.composer-tone-option[aria-pressed="true"] {
+  border-color: var(--line);
+  background: var(--surface-hover);
+}
+
+.composer-tone-option[aria-pressed="true"] {
+  color: var(--brand);
+}
+
+.composer-tone-option > span {
+  display: grid;
+  gap: 2px;
+}
+
+.composer-tone-option strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.composer-tone-option small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.composer-tone-custom {
+  display: grid;
+  gap: 7px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.composer-tone-custom > label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.composer-assist-popover__error {
+  margin: 0;
+  color: var(--danger, #c84c42);
+  font-size: 11px;
+}
+
+.draft-polish-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.draft-polish-scrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgb(4 12 16 / 64%);
+  backdrop-filter: blur(3px);
+}
+
+.draft-polish-dialog {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 14px;
+  width: min(960px, 100%);
+  max-height: min(760px, calc(100dvh - 48px));
+  overflow: hidden;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 28px 90px rgb(0 0 0 / 38%);
+  color: var(--text);
+}
+
+.draft-polish-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.draft-polish-dialog h2 {
+  margin: 2px 0 3px;
+  font-size: 17px;
+}
+
+.draft-polish-dialog header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.draft-polish-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--brand);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.draft-polish-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+}
+
+.draft-polish-compare article {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.draft-polish-compare article > h3 {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.draft-polish-compare__result {
+  border-color: color-mix(in srgb, var(--brand) 46%, var(--line)) !important;
+}
+
+.draft-polish-compare pre {
+  min-height: 180px;
+  max-height: 440px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  color: var(--text);
+  font: 12px/1.6 var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.draft-polish-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--line));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.draft-polish-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .draft-polish-layer {
+    padding: 10px;
+  }
+
+  .draft-polish-dialog {
+    max-height: calc(100dvh - 20px);
+    padding: 14px;
+  }
+
+  .draft-polish-compare {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .draft-polish-compare pre {
+    min-height: 120px;
+    max-height: 240px;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .draft-polish-dialog {
+    animation: draft-polish-in 140ms ease-out;
+  }
+
+  @keyframes draft-polish-in {
+    from {
+      opacity: 0;
+      transform: translateY(5px) scale(0.995);
+    }
+  }
+}

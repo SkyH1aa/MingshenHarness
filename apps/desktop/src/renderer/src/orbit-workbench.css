@@ -775,6 +775,8 @@
 :root[data-interface-style="orbit"] .chat-view[data-agent-mode="chat"] .composer__context {
   grid-template-columns: minmax(0, 1fr);
 }
+:root[data-interface-style="orbit"] .chat-network-control { justify-self: start; border-radius: 5px; border-color: var(--orbit-hairline, var(--line)); background: var(--orbit-pane, var(--surface)); }
+:root[data-interface-style="orbit"] .chat-network-control button { min-height: 27px; }
 :root[data-interface-style="orbit"] .composer__context .model-picker__trigger {
   padding-inline: 6px;
   border-radius: var(--orbit-radius-control);

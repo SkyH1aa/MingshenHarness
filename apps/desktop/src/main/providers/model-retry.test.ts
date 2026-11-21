@@ -148,7 +148,7 @@ describe("automatic model request retries", () => {
           ? { type: "response.completed" }
           : protocol === "anthropic_messages"
             ? { type: "message_stop" }
-            : "[DONE]";
+            : { choices: [{ delta: {}, finish_reason: "stop" }] };
       const fetcher = vi.fn(async () => {
         request++;
         if (![3, 5, 7].includes(request)) return new Response("Unavailable", { status: 503 });

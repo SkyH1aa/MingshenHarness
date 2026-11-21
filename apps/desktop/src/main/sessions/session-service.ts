@@ -6,6 +6,7 @@ import type {
   SessionUpdateInput,
   SessionView,
 } from "../../shared/domain";
+import { isTextModel } from "../../shared/model-capabilities";
 import {
   canonicalProjectMemoryRoot,
   commitProjectMemoryBackend,
@@ -16,6 +17,7 @@ import type { SessionBuiltinCapabilityService } from "../agents/session-builtin-
 import { validateCompactionChoice } from "../chat/compaction-config";
 import { projectPermission, setApprovalMode } from "../permissions/project-permissions";
 import type { Repository } from "../storage/repository";
+import type { ProjectNavigationService } from "./project-navigation-service";
 
 function validateTitle(value: string | undefined): string | undefined {
   if (value === undefined) {
@@ -60,6 +62,7 @@ export class SessionService {
   constructor(
     private readonly repository: Repository,
     private readonly builtinCapabilities?: SessionBuiltinCapabilityService,
+    private readonly projectNavigation?: ProjectNavigationService,
   ) {}
 
   list(): SessionView[] {
@@ -128,10 +131,93 @@ export class SessionService {
       }
       this.builtinCapabilities?.copy(source.id, session.id);
     } catch (error) {
+      this.projectNavigation?.forget(session.id);
       this.repository.removeSession(session.id);
       throw error;
     }
     return session;
+  }
+
+  createChatSessionInGroup(groupId: string | null): SessionView {
+    if (groupId !== null && typeof groupId !== "string") {
+      throw new Error("聊天分组无效。");
+    }
+    const normalizedGroupId = groupId?.trim() || null;
+    if (groupId !== null && !normalizedGroupId) {
+      throw new Error("聊天分组无效。");
+    }
+    if (normalizedGroupId && !this.repository.getChatGroup(normalizedGroupId)) {
+      throw new Error("聊天分组不存在。");
+    }
+
+    const chats = this.repository
+      .listSessions()
+      .filter(
+        (session) => !session.archived && !session.parentSessionId && session.agentMode === "chat",
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+          right.id.localeCompare(left.id),
+      );
+    const source =
+      chats.find((session) => (session.chatGroupId ?? null) === normalizedGroupId) ?? chats[0];
+
+    if (!source) {
+      for (const provider of this.repository.listProviders()) {
+        const model = provider.models.find(
+          (candidate) => candidate.enabled && isTextModel(candidate),
+        );
+        if (!model) continue;
+        return this.create({
+          providerId: provider.id,
+          modelId: model.id,
+          agentMode: "chat",
+          chatGroupId: normalizedGroupId,
+          agentProfileId: "primary",
+          workspacePath: null,
+          reasoningLevel: null,
+          permissionMode: "request_approval",
+          approvalMode: "manual",
+          executionMode: "host",
+          patchOnly: false,
+        });
+      }
+      throw new Error("没有可用于 ChatAgent 的已启用文本模型，请先在设置中启用或添加模型。");
+    }
+
+    const provider = source.providerId ? this.repository.getProvider(source.providerId) : null;
+    const model = source.modelId ? this.repository.getModel(source.modelId) : null;
+    if (
+      !provider ||
+      !model ||
+      model.providerId !== provider.id ||
+      !model.enabled ||
+      !isTextModel(model)
+    ) {
+      throw new Error("上一 ChatAgent 对话的供应商或模型已失效，请先在原对话中重新选择可用模型。");
+    }
+    if (source.reasoningLevel && !model.reasoningLevels.includes(source.reasoningLevel)) {
+      throw new Error("上一 ChatAgent 对话的思考等级已不受当前模型支持，请先在原对话中重新选择。");
+    }
+
+    return this.create({
+      providerId: provider.id,
+      modelId: model.id,
+      agentMode: "chat",
+      chatGroupId: normalizedGroupId,
+      agentProfileId: "primary",
+      workspacePath: null,
+      systemPrompt: source.systemPrompt,
+      reasoningLevel: source.reasoningLevel,
+      permissionMode: "request_approval",
+      approvalMode: "manual",
+      ...(source.compactionModel ? { compactionModel: source.compactionModel } : {}),
+      executionMode: "host",
+      patchOnly: false,
+      ...(source.chatNetworkEnabled === false ? { chatNetworkEnabled: false } : {}),
+    });
   }
 
   create(input: SessionCreateInput): SessionView {
@@ -144,12 +230,20 @@ export class SessionService {
     if (!model || model.providerId !== input.providerId) {
       throw new Error("模型配置不存在或不属于该供应商。");
     }
+    if (!model.enabled || !isTextModel(model)) {
+      throw new Error("所选模型已禁用或不支持文本输入和输出。");
+    }
 
     if (input.reasoningLevel && !model.reasoningLevels.includes(input.reasoningLevel)) {
       throw new Error("所选思考等级不被该模型支持。");
     }
 
     const mode = normalizeAgentMode(input.agentMode);
+    if (input.chatNetworkEnabled !== undefined) {
+      if (typeof input.chatNetworkEnabled !== "boolean")
+        throw new Error("ChatAgent 联网状态无效。");
+      if (mode !== "chat") throw new Error("联网开关仅适用于 ChatAgent。");
+    }
     const requestedProfileId = input.agentProfileId?.trim() || "primary";
     const agentProfileId = mode === "chat" ? "primary" : requestedProfileId;
     if (mode !== "chat") {
@@ -199,10 +293,20 @@ export class SessionService {
     try {
       if (mode !== "chat" && input.approvalMode === "automatic")
         setApprovalMode(this.repository, session.id, "automatic");
+      if (mode !== "chat") {
+        this.projectNavigation?.markCreated(
+          session.id,
+          session.workspacePath,
+          session.executionMode,
+        );
+      }
+      if (mode === "chat" && input.chatNetworkEnabled === false)
+        this.repository.setSetting(`chat.network.enabled.${session.id}`, false);
       if (compactionModel)
         this.repository.setSetting(`context.model.${session.id}`, compactionModel);
       if (memoryBackend) commitProjectMemoryBackend(this.repository, workspacePath, memoryBackend);
     } catch (error) {
+      this.projectNavigation?.forget(session.id);
       this.repository.removeSession(session.id);
       throw error;
     }
@@ -218,6 +322,17 @@ export class SessionService {
     const mode = input.agentMode === undefined ? currentMode : normalizeAgentMode(input.agentMode);
     if (mode !== currentMode && (mode === "chat" || currentMode === "chat"))
       throw new Error("ChatAgent 与 CodeAgent/WorkAgent 不能直接互换，请使用对应的会话页面。");
+    if (input.chatNetworkEnabled !== undefined) {
+      if (typeof input.chatNetworkEnabled !== "boolean")
+        throw new Error("ChatAgent 联网状态无效。");
+      if (mode !== "chat") throw new Error("联网开关仅适用于 ChatAgent。");
+      if (
+        [current, ...this.descendants(current.id)].some((session) =>
+          ["running", "waiting_approval"].includes(session.status),
+        )
+      )
+        throw new Error("任务运行期间不能切换 ChatAgent 联网状态，请等待结束或手动停止。");
+    }
     const modeChanging = mode !== currentMode;
     if (
       modeChanging &&
@@ -284,6 +399,9 @@ export class SessionService {
       if (!model || model.providerId !== providerId) {
         throw new Error("模型配置不存在或不属于该供应商。");
       }
+      if (!model.enabled || !isTextModel(model)) {
+        throw new Error("所选模型已禁用或不支持文本输入和输出。");
+      }
     }
 
     const agentProfileId =
@@ -321,23 +439,36 @@ export class SessionService {
     }
     if (compactionModel)
       this.repository.setSetting(`context.model.${input.sessionId}`, compactionModel);
-    const session = this.repository.updateSession(input.sessionId, {
-      title,
-      agentMode: mode,
-      chatGroupId,
-      providerId: input.providerId,
-      modelId: input.modelId,
-      agentProfileId: mode === "chat" ? "primary" : input.agentProfileId,
-      workspacePath: input.workspacePath === undefined ? undefined : workspacePath,
-      systemPrompt: input.systemPrompt,
-      reasoningLevel: input.reasoningLevel,
-      permissionMode: mode === "chat" ? "request_approval" : input.permissionMode,
-      executionMode: mode === "chat" ? "host" : input.executionMode,
-      patchOnly: mode === "chat" ? false : input.patchOnly,
-      archived: input.archived,
-      pinned: input.pinned,
+    return this.repository.runInSavepoint(() => {
+      const session = this.repository.updateSession(input.sessionId, {
+        title,
+        agentMode: mode,
+        chatGroupId,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        agentProfileId: mode === "chat" ? "primary" : input.agentProfileId,
+        workspacePath: input.workspacePath === undefined ? undefined : workspacePath,
+        systemPrompt: input.systemPrompt,
+        reasoningLevel: input.reasoningLevel,
+        permissionMode: mode === "chat" ? "request_approval" : input.permissionMode,
+        executionMode: mode === "chat" ? "host" : input.executionMode,
+        patchOnly: mode === "chat" ? false : input.patchOnly,
+        archived: input.archived,
+        pinned: input.pinned,
+      });
+      if (input.chatNetworkEnabled !== undefined)
+        this.repository.setSetting(
+          `chat.network.enabled.${input.sessionId}`,
+          input.chatNetworkEnabled,
+        );
+      if (mode !== "chat" && (moving || current.executionMode !== session.executionMode))
+        this.projectNavigation?.reset(
+          input.sessionId,
+          session.workspacePath,
+          session.executionMode,
+        );
+      return this.repository.getSession(input.sessionId) ?? session;
     });
-    return session;
   }
 
   private descendants(sessionId: string): SessionView[] {
@@ -363,6 +494,7 @@ export class SessionService {
   }
 
   remove(sessionId: string): void {
+    this.projectNavigation?.forget(sessionId);
     this.repository.removeSession(sessionId);
   }
 

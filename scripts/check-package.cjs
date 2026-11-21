@@ -6,6 +6,7 @@ const { createHash } = require('node:crypto');
 const { TENCENT_MEMORY_RESOURCES, checkTencentMemoryResources } = require('./tencent-memory-package.cjs');
 const { validateWindowsIcon } = require('./windows-icon.cjs');
 const { checkElectronRuntime } = require('./provision-electron-runtime.cjs');
+const { validateNodePty } = require('./package-native-dependencies.cjs');
 const desktop = path.resolve(__dirname, '../apps/desktop');
 const requireDesktop = createRequire(path.resolve(desktop, 'package.json'));
 const YAML = requireDesktop('yaml');
@@ -221,6 +222,93 @@ function checkParsers(resolveModule, unpackedRoot) {
     if (unpackedRoot) assert.ok(parser.startsWith(unpackedRoot), 'Dynamic parsers must be unpacked');
   }
 }
+
+function checkTerminalRuntime(resolveModule, unpackedRoot) {
+  const root = packageRoot(resolveModule, 'node-pty');
+  validateNodePty({ moduleRoot: root });
+  if (unpackedRoot) assert.ok(root.startsWith(unpackedRoot), 'node-pty must be unpacked');
+  for (const relative of [
+    'lib/index.js',
+    'lib/utils.js',
+    'lib/windowsPtyAgent.js',
+    'lib/conpty_console_list_agent.js',
+    'prebuilds/win32-x64/pty.node',
+    'prebuilds/win32-x64/conpty.node',
+    'prebuilds/win32-x64/conpty_console_list.node',
+    'prebuilds/win32-x64/conpty/conpty.dll',
+    'prebuilds/win32-x64/conpty/OpenConsole.exe',
+    'prebuilds/win32-x64/winpty.dll',
+    'prebuilds/win32-x64/winpty-agent.exe',
+  ]) {
+    const file = path.join(root, relative);
+    assert.ok(fs.existsSync(file) && fs.statSync(file).size > 0, `Missing node-pty runtime: ${relative}`);
+    if (unpackedRoot) assert.ok(file.startsWith(unpackedRoot), `node-pty runtime must be unpacked: ${relative}`);
+  }
+}
+
+function checkImageRuntime(resolveModule, unpackedRoot) {
+  const root = packageRoot(resolveModule, 'sharp');
+  const metadata = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  assert.equal(metadata.version, '0.35.5', 'Unexpected sharp version');
+  if (unpackedRoot) assert.ok(root.startsWith(unpackedRoot), 'sharp must be unpacked');
+  for (const dependency of Object.keys(metadata.dependencies || {})) {
+    const entry = resolveModule(dependency);
+    assert.ok(fs.existsSync(entry), `Missing sharp dependency: ${dependency}`);
+    if (unpackedRoot) assert.ok(entry.startsWith(unpackedRoot), `sharp dependency must be unpacked: ${dependency}`);
+  }
+  const nativeRoot = path.dirname(resolveModule('@img/sharp-win32-x64/sharp.node'));
+  if (unpackedRoot) assert.ok(nativeRoot.startsWith(unpackedRoot), 'sharp native runtime must be unpacked');
+  for (const relative of ['lib/sharp-win32-x64-0.35.5.node', 'lib/libvips-42.dll', 'lib/libvips-cpp-8.18.7.dll', 'LICENSE']) {
+    const file = path.join(nativeRoot, relative);
+    assert.ok(fs.existsSync(file) && fs.statSync(file).size > 0, `Missing sharp runtime: ${relative}`);
+  }
+}
+
+const imageNoticeHashes = {
+  'README.md': '3d083ada5ebafe1e6c227daa7b061d4254b61df4a3901c359ffdeac817ce5866',
+  LICENSE: 'dc1f5d2d43c5531dfe0acaf4e950ea5dbe3e61e1850cf0e983bda7efc10d6693',
+};
+const imageNoticeCopies = [
+  { from: 'node_modules/@img/sharp-win32-x64/README.md', to: 'third-party-notices/sharp-win32-x64/app-local-README.md' },
+  { from: '../../node_modules/@img/sharp-win32-x64/README.md', to: 'third-party-notices/sharp-win32-x64/workspace-README.md' },
+];
+
+function checkImageNotices(resolveSource, options = {}) {
+  const appDirectory = options.appDirectory || desktop;
+  const config = options.config || YAML.parse(fs.readFileSync(path.join(desktop, 'electron-builder.yml'), 'utf8'));
+  const sourceRoot = path.dirname(resolveSource('@img/sharp-win32-x64/sharp.node'));
+  const verify = (file, expected, label) => {
+    assert.ok(fs.existsSync(file) && fs.statSync(file).isFile(), `Missing ${label}: ${file}`);
+    assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), expected, `${label} hash mismatch`);
+  };
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8')).version, '0.35.5', 'Unexpected sharp native package version');
+  for (const [name, expected] of Object.entries(imageNoticeHashes))
+    verify(path.join(sourceRoot, name), expected, `sharp source ${name}`);
+  let availableSourceCopies = 0;
+  for (const copy of imageNoticeCopies) {
+    assert.ok(Array.isArray(config.extraResources) && config.extraResources.some(entry => entry && entry.from === copy.from && entry.to === copy.to), `Missing sharp notice copy configuration: ${copy.from}`);
+    const file = path.resolve(appDirectory, copy.from);
+    if (fs.existsSync(file)) {
+      verify(file, imageNoticeHashes['README.md'], 'sharp configured source README');
+      availableSourceCopies++;
+    }
+  }
+  assert.ok(availableSourceCopies > 0, 'Missing sharp configured source README');
+  if (!options.resources) return;
+  assert.equal(typeof options.resolvePackaged, 'function', 'Missing packaged sharp resolver');
+  const packagedRoot = path.dirname(options.resolvePackaged('@img/sharp-win32-x64/sharp.node'));
+  verify(path.join(packagedRoot, 'LICENSE'), imageNoticeHashes.LICENSE, 'sharp packaged LICENSE');
+  let packagedCopies = 0;
+  for (const copy of imageNoticeCopies) {
+    const file = path.join(options.resources, copy.to);
+    if (fs.existsSync(file)) {
+      verify(file, imageNoticeHashes['README.md'], 'sharp packaged README');
+      packagedCopies++;
+    }
+  }
+  assert.ok(packagedCopies > 0, 'Missing sharp packaged README');
+}
+
 function skillResourceFiles(directory, local = '') {
   return fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en')).flatMap(entry => {
     assert.ok(!entry.isSymbolicLink(), `Linked bundled skill resource: ${path.join(directory, entry.name)}`);
@@ -740,6 +828,12 @@ module.exports = async context => {
   const unpacked = path.join(resources, 'app.asar.unpacked');
   checkParsers(name => require.resolve(name, {paths:[unpacked]}), unpacked);
   checkDocumentRuntime(name => require.resolve(name, {paths:[unpacked]}), unpacked);
+  checkTerminalRuntime(name => require.resolve(name, {paths:[unpacked]}), unpacked);
+  checkImageRuntime(name => require.resolve(name, {paths:[unpacked]}), unpacked);
+  checkImageNotices(name => require.resolve(name, {paths:[desktop]}), {
+    resources,
+    resolvePackaged: name => require.resolve(name, {paths:[unpacked]}),
+  });
   checkPackagedAuthoringRuntime(archive, unpacked, files, asar);
   console.log('Packaged application resource validation passed.');
 };
@@ -754,12 +848,18 @@ if (require.main === module) {
     assert.ok([desktop, path.resolve(desktop, '../..')].some(root => fs.existsSync(path.join(root, 'node_modules', dependency, 'package.json'))), `Missing dependency: ${dependency}`);
   checkParsers(name => require.resolve(name, {paths:[desktop]}));
   checkDocumentRuntime(name => require.resolve(name, {paths:[desktop]}));
+  checkTerminalRuntime(name => require.resolve(name, {paths:[desktop]}));
+  checkImageRuntime(name => require.resolve(name, {paths:[desktop]}));
+  checkImageNotices(name => require.resolve(name, {paths:[desktop]}));
   checkAuthoringRuntime(name => require.resolve(name, {paths:[desktop]}));
   console.log(`Packaging preflight passed: ${required.length} resources, production dependencies and version ${pkg.version}.`);
 }
 
 module.exports.checkAuthoringRuntime = checkAuthoringRuntime;
 module.exports.checkPackagedAuthoringRuntime = checkPackagedAuthoringRuntime;
+module.exports.checkTerminalRuntime = checkTerminalRuntime;
+module.exports.checkImageRuntime = checkImageRuntime;
+module.exports.checkImageNotices = checkImageNotices;
 module.exports.checkWorkSourceCatalog = checkWorkSourceCatalog;
 module.exports.checkImportedSkillSources = checkImportedSkillSources;
 module.exports.importedSkillTreeDescriptor = importedSkillTreeDescriptor;

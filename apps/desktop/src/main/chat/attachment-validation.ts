@@ -1,5 +1,18 @@
-import { MAX_COMPOSER_ATTACHMENT_BYTES, validAttachmentBytes } from "../../shared/composer-draft";
+import {
+  MAX_CHAT_ATTACHMENT_BYTES,
+  MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
+  MAX_CHAT_ATTACHMENTS,
+  validateChatAttachmentBatch,
+} from "../../shared/attachments";
+import { validAttachmentBytes } from "../../shared/composer-draft";
 import type { ChatAttachmentInput } from "../../shared/domain";
+
+export {
+  MAX_CHAT_ATTACHMENT_BYTES,
+  MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
+  MAX_CHAT_ATTACHMENTS,
+  validateChatAttachmentBatch,
+};
 
 function payloadMimeType(dataUrl: string): string {
   return /^data:([^;,]*)/i.exec(dataUrl)?.[1]?.trim().toLowerCase() || "application/octet-stream";
@@ -9,7 +22,7 @@ export function validateChatAttachments(
   value: ChatAttachmentInput[] | undefined,
 ): ChatAttachmentInput[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("附件列表格式无效。");
+  validateChatAttachmentBatch(value);
   return value.map((attachment) => {
     if (!attachment || typeof attachment !== "object") throw new Error("附件格式无效。");
     const name = typeof attachment.name === "string" ? attachment.name.trim() : "";
@@ -24,13 +37,13 @@ export function validateChatAttachments(
     if (
       !Number.isSafeInteger(attachment.size) ||
       attachment.size <= 0 ||
-      attachment.size > MAX_COMPOSER_ATTACHMENT_BYTES
+      attachment.size > MAX_CHAT_ATTACHMENT_BYTES
     ) {
       throw new Error(`附件「${name}」超过单文件 25 MiB 限制。`);
     }
     if (
       typeof attachment.dataUrl !== "string" ||
-      attachment.dataUrl.length > Math.ceil((MAX_COMPOSER_ATTACHMENT_BYTES * 4) / 3) + 1024 ||
+      attachment.dataUrl.length > Math.ceil((MAX_CHAT_ATTACHMENT_BYTES * 4) / 3) + 1024 ||
       !validAttachmentBytes(attachment.dataUrl, attachment.size)
     ) {
       throw new Error(`附件「${name}」内容与声明大小不符。请重新上传。`);

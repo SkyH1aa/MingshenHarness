@@ -11,6 +11,7 @@ import type { McpService } from "../mcp/mcp-service";
 import { ApprovalBroker } from "../permissions/approval-broker";
 import { setProjectPermission } from "../permissions/project-permissions";
 import { QuestionBroker } from "../permissions/question-broker";
+import { SessionService } from "../sessions/session-service";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import { TrajectoryService } from "../trajectories/trajectory-service";
@@ -76,6 +77,7 @@ describe("HeadlessServerService", () => {
     const questions = new QuestionBroker();
     const service = new HeadlessServerService(
       repository,
+      new SessionService(repository),
       chatService,
       agentProfileService,
       customCommandService,
@@ -116,6 +118,66 @@ describe("HeadlessServerService", () => {
       });
       expect(sessions.status).toBe(200);
       expect(await sessions.json()).toHaveLength(1);
+      const provider = repository.insertProvider({
+        name: "Headless fixture",
+        baseUrl: "https://example.invalid/v1",
+        protocol: "openai_responses",
+        authMode: "bearer",
+        customHeaderName: null,
+      });
+      repository.insertModel({
+        providerId: provider.id,
+        modelId: "headless-model",
+        displayName: "Headless model",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        toolCalls: true,
+        parallelToolCalls: true,
+        reasoningLevels: [],
+        anthropicNoneBehavior: "disabled",
+      });
+      const modelId = repository.getProvider(provider.id)?.models[0]?.id ?? "";
+      const createHeadless = (model: string, extra: Record<string, unknown> = {}) =>
+        fetch(`${status.url}/session`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${status.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: "Headless created session",
+            providerId: provider.id,
+            modelId: model,
+            workspacePath: root,
+            ...extra,
+          }),
+        });
+      const invalidCreation = await createHeadless("missing-model");
+      expect(invalidCreation.status).toBe(400);
+      expect(await invalidCreation.json()).toMatchObject({
+        error: expect.stringContaining("模型配置不存在"),
+      });
+      expect(repository.listSessions()).toHaveLength(1);
+      for (const field of ["parentSessionId", "forkedFromMessageId"]) {
+        const derivedCreation = await createHeadless(modelId, {
+          [field]: "existing-session-or-message",
+        });
+        expect(derivedCreation.status).toBe(400);
+        expect(await derivedCreation.json()).toMatchObject({
+          error: expect.stringContaining("root sessions only"),
+        });
+      }
+      expect(repository.listSessions()).toHaveLength(1);
+      const validCreation = await createHeadless(modelId);
+      expect(validCreation.status).toBe(201);
+      expect(await validCreation.json()).toMatchObject({
+        providerId: provider.id,
+        modelId,
+        workspacePath: root,
+      });
+      expect(repository.listSessions()).toHaveLength(2);
       const questionRequest = questions.ask(
         {
           id: "clarification",
@@ -247,6 +309,7 @@ describe("HeadlessServerService", () => {
   it("refuses non-loopback bindings", async () => {
     const service = new HeadlessServerService(
       {} as Repository,
+      {} as SessionService,
       {} as ChatService,
       {} as AgentProfileService,
       {} as CustomCommandService,

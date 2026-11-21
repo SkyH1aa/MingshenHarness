@@ -1,6 +1,6 @@
 # Mingshen Harness 开发交接与维护记录
 
-最后核对日期：2026-11-19（Asia/Shanghai）。适用工作区版本：1.3.3。
+最后核对日期：2026-11-21（Asia/Shanghai）。适用工作区版本：1.3.4。
 
 本文供其他智能体、开发者和新对话接续工作，记录开发经过、已确认约束、实际代码位置、验证边界和打包方法。它不是功能全部完成、无漏洞或安装包已验收的证明。任何接续工作先核对当前源码、用户最新指令和 `git status`，不要直接照搬早期计划。
 
@@ -9,20 +9,30 @@
 1. 阅读本文和 [README.md](README.md)，涉及安全时阅读 [SECURITY.md](SECURITY.md)。
 2. 执行 `git status --short`，了解已有修改；本交接时工作区有大量未提交修改和未跟踪文件，包含有效实现，不是可直接清理的废料。
 3. 按任务阅读对应模块及相邻测试。优先小范围修复，沿用现有 Electron、React、TypeScript 和 pnpm 结构。
-4. 先阅读 [1.3.3 验证记录](docs/VALIDATION_1.3.3.md)；历史行为参考 [1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
+4. 先阅读 [1.3.4 验证记录](docs/VALIDATION_1.3.4.md)；历史行为参考 [1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
 5. 完成后记录改了什么、执行了什么、结果及剩余边界；变更协议、打包、数据结构或安全边界时同步本文和对应文档。
 
-当前 1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
+当前工作区目标版本为 1.3.4，DeepSeek thinking 工具链续接、原生 Memory 摘要预算、原生沙箱终止结算、会话目录增量恢复、宿主恢复路径竞态、工具结果缓存、持久命令清理以及退出/恢复生命周期修复已完成本地回归；最终证据见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)。1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。1.3.3 的实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
 
 1.3.0 包含内置 DOCX/PPTX/PDF、按 profile 配置子模型、原生 Responses 状态、图片工具、管道命令、分页读取/受控并发、父会话验证转交与 Token Saver 质量默认值；随后补充模型首次预填、K/M 数值输入、供应商连接编辑和 TencentDB 记忆库。最新工作区记忆设置及模型语义提取见第30节，取代历史离线规则摘录；官方提示词逐字对齐与真实请求核验见第31节。第二套“光轨”界面保留默认“简约”，按已确认预览重构为独立工作台，独立结构见第26节，最新材质打磨及主界面模型/供应商标签见第27节；第24节为首次接入历史。选择自动保存、重载或重启生效，共用全部业务功能。运行信息展开/收起、完整诊断与命令详情见第25节，并在独立结构中回归。各轮实际结果和未验证边界见 [1.3.0 验证记录](docs/VALIDATION_1.3.0.md)。主会话窗口15%的压缩输出预算及触顶恢复、TencentDB 本地记忆核心及项目二选一、工具参数流与 UTF-16 读写修复、缓存前缀优化与诊断、供应商缓存配置、同模型压缩复用、提问/修改冲突通知、Token Saver、执行链、项目记忆、自动重试及剪贴板图片附件见 [1.2.9 验证记录](docs/VALIDATION_1.2.9.md)；下方历史版本结果不能替代本轮验证。
 
+最新 ChatAgent 分组快速新建见第66节：同组加号直接沿用最近更新的未归档 Chat 配置创建空白对话，不再显示完整新建弹窗。稳定性修复全量回归与本轮快速新建定向验证分别记录，不把第65节的2001项作为本轮最终代码重新全量验证的结果。
+
+最新全仓审查清单、粘贴原文修复及ChatAgent联网开关已完成本地集成验证，见第67、68节和[1.3.4验证记录](docs/VALIDATION_1.3.4.md)：联网开关最终源码下完整串行Vitest为155文件、2121项通过，另有3文件、14项环境跳过；独立联网Electron smoke 3/3通过，完整工作台smoke另有任务面板复载断言超时，不能宣称全工作台smoke通过。项目来源、LSP、编辑重发事务、附件预算、文档包与嵌入工作簿、宿主命令、ACP及本地预览均按实际入口重新核对。
+
 文件名说明：用户指定的主要交接文件是本 `AGENT.md`；根目录 `AGENTS.md` 是自动发现入口，指向本文。不要复制维护两份正文。
 
-最新续接已补充 Code/Work 内置专业工作流、Office 设计预设和受控版式、全部启用扩展的按需发现，以及独立 Chat 快捷窗口；两项全局快捷键已移入设置，可录制 Ctrl/Shift/Alt 组合、实际注册并检测占用。主窗口与快捷窗口共用草稿时新增 revision 冲突保护及明确恢复操作。见第55节，最新实际检查及未验证项继续以[1.3.3验证记录](docs/VALIDATION_1.3.3.md)追加部分为准，不把前轮数字用于证明本轮修改。
+最新工作面与项目协作扩展见第69节：348个工作流模板、生图与可移植画布、只读AutoDrive、18角色协同总控、统一命令面板、真实多标签Shell、逐行评论、分支/worktree导航及草稿辅助已集成。工作站空章节与写入失败恢复、交接冲突去重和异步目标复核已补齐；最终验证继续以[1.3.4验证记录](docs/VALIDATION_1.3.4.md)“创作工作面与项目协作扩展”节为准，不复用第68节数字。PNG/JPEG/WebP/GIF素材做有界完整解码，APNG暂不支持；新增原生依赖、组件许可表和生产依赖闭包均纳入打包检查。
+
+运行中引导的最新接续入口见第70节。它向同一次运行的后续模型请求加入普通用户文字，与当前运行正常结束后才派发的下一轮队列分别处理；不能中途改写已经发出的模型请求或撤回已开始的工具操作。本轮最终证据单独追加到[1.3.4验证记录](docs/VALIDATION_1.3.4.md)，不复用第69节的测试数字。
+
+工作站模板库、内置 Skill 版本合并及 Code/Work 侧栏空白的最新接续入口见第71节。工作站已从第69节的初版扩至780个独立场景，简略与详细是同一场景的两个提示词版本，不另增场景数。用户入口和交付范围见[工作站模板说明](docs/WORKSTATION_TEMPLATES.md)。
+
+最新续接已补充 Code/Work 内置专业工作流、Office 设计预设和受控版式、全部启用扩展的按需发现，以及独立 Chat 快捷窗口；两项全局快捷键已移入设置，可录制 Ctrl/Shift/Alt 组合、实际注册并检测占用。主窗口与快捷窗口共用草稿时新增 revision 冲突保护及明确恢复操作。见第55节，最新实际检查及未验证项继续以[1.3.4验证记录](docs/VALIDATION_1.3.4.md)追加部分为准，不把前轮数字用于证明本轮修改。
 
 本地插件开发市场、原生清单/SDK/创建器、用户提供的 Work 技能流适配、SubAgent 无固定总时限和后台协作、小窗切换及持久置顶已进入源码，见第56节及[本地插件接口](docs/LOCAL_PLUGINS.md)。来源覆盖清单与运行时技能数量分别记录，不把兼容清单或源码资源存在当成第三方插件已验收。
 
-最新插件开发故障修复及 Work 技能全版本补齐见第57节：统一发现入口包含内置技能，主 Code/Work 宿主请求批准会话可使用只读插件校验，不再依赖沙箱外 SDK 或系统 Node；`WorkAgentSkill/` 全树实际为124个物理来源、104个不同源正文SHA、93个名称。第56节此前98份是只统计latest系列的历史结果，不是全树总数。来源逐项映射见[完整清单](apps/desktop/resources/prompts/skills/work-sources/inventory.md)，最终验证仍以[1.3.3验证记录](docs/VALIDATION_1.3.3.md)本轮追加部分为准。
+最新插件开发故障修复及 Work 技能全版本补齐见第57节：统一发现入口包含内置技能，主 Code/Work 宿主请求批准会话可使用只读插件校验，不再依赖沙箱外 SDK 或系统 Node；`WorkAgentSkill/` 全树实际为124个物理来源、104个不同源正文SHA、93个名称。第56节此前98份是只统计latest系列的历史结果，不是全树总数。来源逐项映射见[完整清单](apps/desktop/resources/prompts/skills/work-sources/inventory.md)，最终验证仍以[1.3.4验证记录](docs/VALIDATION_1.3.4.md)本轮追加部分为准。
 
 内置Skill/Plugin的手动引用、Work专属PPTMaster与ASD-STE100，以及参考T3 Code的下一轮队列初版见第58节；队列现已按用户最新要求升级为最多10条、正常完成后自动FIFO发送，见第62节，取代第58节的8条及手动继续行为。Code基础Skill仍为9个，Work为16个基础Skill加124个来源；两种模式各另有2个真实内置插件目录项。主界面Code/Work/Chat均支持队列，QuickChat和实际SubAgent不提供队列。最终检查以验证记录的最新追加结果为准。
 
@@ -33,7 +43,7 @@
 - 不擅自重建项目、迁移框架、移动模块、创建替代仓库或改变包管理器。
 - 不执行 `git reset --hard`、`git checkout --`、`git clean -fd` 等丢弃现有工作的命令；不把已有未跟踪源码当临时文件删除。
 - 未经明确请求不提交、推送、发布 GitHub Release、不执行云端 SQL、不生成或安装正式安装包。`--dir` 解包验证与正式 NSIS 安装包是两个不同操作。
-- 用户最新指定版本为 **1.3.3**；当前交付源码与实验版，未获明确要求时不生成或发布安装包。已生成的1.3.0/1.3.1/1.3.2安装包及发布SQL保留真实历史元数据，不代表包含当前源码。
+- 用户最新指定版本为 **1.3.4**；当前交付源码与实验版，未获明确要求时不生成或发布安装包。已生成的1.3.0/1.3.1/1.3.2/1.3.3安装包及发布SQL保留真实历史元数据，不代表包含当前源码。
 - 保留用户已确定的水青色原子图标。不要替换成旧红色 M 或 Electron 默认图标。
 - 不将真实 API Key、OAuth Secret、Token、Cookie、个人数据库、日志、截图或会话内容加入代码、文档和测试夹具。历史对话中的测试 Key 不得再次使用。
 - 不通过关闭防护、加白名单、改系统 ACL、删除 DLL、修改官方二进制或跳过哈希校验来“修复”打包与隔离。
@@ -47,7 +57,7 @@
 | 产品名 / Agent 名 | Mingshen Harness / Mingshen |
 | 发布者 / 维护主体 | Ming / 新哲文院算法社 |
 | 平台 | Windows 10/11 x64 桌面 GUI；原生 MXC 需要兼容的较新 Windows 11，旧系统选择 Docker |
-| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.3 |
+| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.4 |
 | 协议修订号 | `apps/desktop/src/shared/release.ts` 中的 `2026-11-04.3`，与应用版本分别管理；新增备用审批/压缩供应商的数据发送说明，旧版用户重新同意 |
 | 分发 | 当前用户 x64 NSIS、首版不签名；1.2.6起确认后后台下载/校验ZIP并在会话结束后启动安装器，旧网页链接手动打开 |
 | 语言与外观 | 默认简体中文，支持 English；默认“简约”保留白色日间/近黑石墨夜间，第二风格“光轨”为冰白矿青/深墨青；风格重载或重启生效，日夜即时切换，原子图标保留 |
@@ -191,7 +201,7 @@ pnpm build
 .\run-experimental.cmd
 ```
 
-`run-experimental.cmd` 会自动寻找 Node/pnpm，缺依赖或原生运行时时准备它们，由准备脚本校验 ICO、必要时从同目录同名 PNG 恢复并生成专用实验 EXE。**如果 `out/main/index.js` 已存在，脚本不会自动重建源码**，所以修改后要先 `pnpm build`；仅重启可能仍运行旧构建。正常退出托盘中的旧测试进程后再验证，不能擅自终止用户任务。
+`run-experimental.cmd` 会自动寻找 Node/pnpm，缺依赖时安装依赖；每次启动都先核验固定原生沙箱、准备 Electron 并重新构建当前源码，任一步失败即停止，不启动旧构建。准备脚本还会校验 ICO、必要时从同目录同名 PNG 恢复并生成专用实验 EXE；无需因已有 `out/main/index.js` 再手动补一次构建。正常退出托盘中的旧测试进程后再验证，不能擅自终止用户任务。
 
 | 数据或标识 | 约定 |
 | --- | --- |
@@ -234,23 +244,23 @@ Set-Location -LiteralPath 'C:\Users\ASUS\Desktop\MingshenHarness'
 | `.\package-win.cmd` | 同上并创建 NSIS 安装包；复制最终发布文件回项目 |
 | `pnpm package:win` | pnpm 已可用时的正式安装包等效入口，同样使用仓库打包包装脚本 |
 
-版本 1.3.3 的预期输出（1.3.2 历史版本发布材料保留）：
+版本 1.3.4 的预期输出（1.3.3 及更早历史版本发布材料保留）：
 
 ```text
-apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.exe
-apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip
-apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.sha256
-apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.json
+apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.exe
+apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip
+apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip.sha256
+apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip.json
 ```
 
 实际构建目录由脚本创建：
 
 ```text
-%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.3-<random>\
+%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.4-<random>\
   electron\                  临时原版运行时，结束后受限清理
   temp\                      构建子进程的 TEMP/TMP
   output\win-unpacked\      完整应用目录
-  output\MingshenHarness-1.3.3-x64.exe
+  output\MingshenHarness-1.3.4-x64.exe
 ```
 
 `--dir` 是可选的解包验证，不是生成安装包前必须单独执行的步骤。它会打印可运行 EXE 的绝对路径；正式打包会打印项目输出及 `Cached installer:`。如果安装包构建成功、只是复制回项目输出目录失败，使用控制台提示的缓存文件。ZIP、SHA256 及 JSON 各自复制失败时会显示 `Update artifact retained in build cache:`，需分别核对实际路径，不能仅凭退出0断定所有文件已复制回项目。构建失败时打印 `Build files retained for diagnostics:`；该目录不一定有成功安装包，先看构建退出码及目标文件，不要再次全盘清理重装。
@@ -259,7 +269,7 @@ apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.json
 
 ### 6.2 打包调用链
 
-`package-win.cmd` -> 根/桌面 `package:win` -> `provision-electron-runtime.cjs` -> `generate-icon.ps1` -> `provision-native-runtime.mjs` -> `pnpm build` -> `package:check` -> `scripts/package-windows.cjs` -> electron-builder -> `scripts/check-package.cjs` afterPack。
+`package-win.cmd` -> 根/桌面 `package:win` -> `provision-electron-runtime.cjs` -> `generate-icon.ps1` -> `provision-native-runtime.mjs` -> `pnpm build` -> `package:check` -> `scripts/package-windows.cjs` -> `package-native-dependencies.cjs`（验证node-pty官方预编译、官方重编其余依赖）-> electron-builder（仅关闭重复重编）-> `scripts/check-package.cjs` afterPack。
 
 | 脚本 | 必须保留的作用 |
 | --- | --- |
@@ -271,6 +281,7 @@ apps\desktop\release-artifacts\MingshenHarness-1.3.3-x64.zip.json
 | `scripts/package-copy-compat.cjs` | 仅在 builder 子进程、仅本次构建目录移动已暂存运行时并校验移动前后哈希；先部署原版 `electron.exe`，无法移动时回退到验证复制 |
 | `scripts/package-native-copy.cjs` / `.ps1` | 必要时调用 Windows 文件 API，目的地仍校验在本次构建范围内；不永久修改执行策略 |
 | `scripts/check-package.cjs` | 源预检、原生运行时哈希、ICO 尺寸、ASAR 及额外资源校验；拒绝混入实验 EXE、标记和 Electron 示例应用 |
+| `scripts/package-native-dependencies.cjs` | 校验node-pty1.1.0的7份官方x64预编译哈希和加载优先级，按打包器自身解析的官方rebuild重编其余生产/可选模块，失败不启动builder；重编前后核对全部同名实例及目录集合 |
 | `scripts/generate-icon.ps1` / `windows-icon.cjs` | 从已确认 PNG 内存生成多尺寸 ICO，再以同目录临时文件原子替换；共享 ICO 结构与图像校验，不重新设计图标 |
 
 NSIS 配置在 `apps/desktop/electron-builder.yml`：x64、当前用户、未签名、允许选目录、桌面/开始菜单快捷方式、产品名及固定图标。`signAndEditExecutable: true` 负责品牌资源，不应因为“不签名”而关闭它导致图标回退。
@@ -1013,7 +1024,7 @@ pnpm audit --prod：无已知漏洞
 - `providers/responses-state.ts`校验有界、已完成的原生项，`model-stream.ts`捕获供应商实际提供的加密reasoning/compaction、工具身份与assistant phase。重放校验provider/model/endpoint和可见内容；缺失、切模型/端点或内容不一致走普通历史，不伪造原生状态。请求token估算不按reasoning/compaction的`encrypted_content`字符串长度计数，改用每项1024、合计最多8192且不超过模型窗口5%的有界预留，保留实际usage校准，不作精确token保证。不透明项不是可读取的原始隐藏思维链；不宣称已接通服务端`/responses/compact`或无限上下文。
 - `view_image`读取工作区PNG/JPEG/WebP/GIF（单图20MiB），经已有审批及原生MXC/Docker网关返回原生图像内容；模型须配置image能力。图片工具结果会随本地历史保存，附件生成的临时PDF页面图仍按原缓存生命周期处理。
 - `browser_screenshot`截取内嵌浏览器可见页面，按比例限制最长边2048像素、PNG最多8MiB；保存本地PNG的同时返回`tool_result.images`，实际像素随下一次视觉模型请求发送。当前模型未配置image能力时剔除图片并明确提示未发送；此限制独立于工作区`view_image`的20MiB。截图文件与带图历史均按现有本地记录保存，不把路径存在当成模型已看到像素的证据。
-- `tools/persistent-command-service.ts`提供run/session/security-scope绑定的`exec_command`/`write_stdin`管道会话，支持增量输出、stdin、EOF、停止及受管进程收尾；不是PTY。清理未确认保留commandEffects、writer屏障和lease，不得先释放；当前已结束句柄的cleanup失败不会自动重试，短暂失败后的恢复可能需要重启，清屏障不能代替确认进程/容器停止及核实副作用。宿主故意detached/`Start-Process`后原父提前退出，不保证跟踪全部脱离后代；不能宣称任意daemon都有OS级清理保证。
+- `tools/persistent-command-service.ts`提供run/session/security-scope绑定的`exec_command`/`write_stdin`管道会话，支持增量输出、stdin、EOF、停止及受管进程收尾；不是PTY。清理未确认保留commandEffects、writer屏障和lease，不得先释放；本节记录的1.3.0当时对已结束句柄的cleanup失败不自动重试，1.3.4已支持后续终止请求或run cleanup重试，见第65节；清屏障不能代替确认进程/容器停止及核实副作用。宿主故意detached/`Start-Process`后原父提前退出，不保证跟踪全部脱离后代；不能宣称任意daemon都有OS级清理保证。
 - `read_file`使用`start_line`、`end_line`/`limit`、`char_offset`、`max_chars`和下一页JSON游标，offset为首行UTF-16偏移；范围缓存仍核对完整源hash。启用模型parallelToolCalls时，最多3个相邻独立内置读取并发，执行链、命令、写入、浏览器、MCP和custom排除，各自保留审批/隔离/预算。
 - 可写managed child可用`request_verification`排队1–6条检查；`wait_subagents`只收集请求，当前模型轮全部tool_result保存完后，parent再按自己的profile、计划、审批、隔离与writer lease顺序执行并保存独立验证结果，避免Chat/Anthropic调用与结果配对错误。parent仍有运行中命令则保持pending，先轮询或停止再执行。只读child不得申请；child shell继续只读，排队不能算通过。
 - Token Saver缺失/新配置默认`historySummaries:false`、`outputMode:auto`，已有明确配置保留，85%压力保护不变。`input-compressor.ts`保护原生状态/图像结果整消息，不精简或去重其可见文字，拒绝恢复含相关旧替换的ledger；提前摘要阈值不把opaque/base64字节当普通正文。`stable-input.ts`及`compaction-request-cache.ts`指纹包含scope/endpointKey和内容hash，替换ledger不存图像/opaque原文。
@@ -1581,7 +1592,7 @@ COM专属预检对DOCX/XLSX/PPTX的非hyperlink外部关系、Word跨run自动�
 
 ### 创建器、来源与专业流程
 
-Code/Work默认可发现`builtin:skill-creator`、`builtin:plugin-creator`、`builtin:harness-plugin-api`，按需加载正文；`use_skill`同时返回当前实际SDK绝对路径，不猜用户工作区里的SDK位置。SDK位于`resources/sdk/plugin-dev/`，提供create/validate/marketplace，故意保留的TODO必须实现后才能通过；`authoritative:false`预检不能替代宿主校验。模型`local_plugin`只支持inspect/validate/list_markets，仅有工作区的host+full_access主Code/Work开放，并受Profile读取权限和工作区真实路径约束；没有安装/更新/启用工具。手动步骤与完整合同见[本地插件说明](docs/LOCAL_PLUGINS.md)。
+Code/Work默认可发现`builtin:skill-creator`、`builtin:plugin-creator`、`builtin:harness-plugin-api`，按需加载正文；`use_skill`同时返回当前实际SDK绝对路径，不猜用户工作区里的SDK位置。SDK位于`resources/sdk/plugin-dev/`，提供create/validate/marketplace，故意保留的TODO必须实现后才能通过；`authoritative:false`预检不能替代宿主校验。marketplace正常写入最多等待15秒；锁超过60秒时不按mtime自动删除，保持catalog原样并报告锁路径，只能确认无writer后人工删除锁文件。模型`local_plugin`只支持inspect/validate/list_markets，仅有工作区的host+full_access主Code/Work开放，并受Profile读取权限和工作区真实路径约束；没有安装/更新/启用工具。手动步骤与完整合同见[本地插件说明](docs/LOCAL_PLUGINS.md)。
 
 `WorkAgentSkill/`按最新七组版本族92份SKILL加六个独立入口核对，共98份物理正文、93个唯一名称、98个唯一SHA。不是把98个来源原样注册；运行时为19个原创领域工作流，办公能力默认在Work目录可用，正文按需加载。新增PDF、视觉设计、离线HTML可视化、图片来源工作流，强化原有Word/Excel/PPT的结构、叙事、语气、排版和验证参考。设计资源361文件/4,809,702字节，包括74个骨架、8个子技能，82个入口有机器索引并保留许可。Office/PDF来源许可冲突或明确专有的正文/脚本不机械复制，使用原创适配，宿主私有JWT/Viewer/Canvas接口不随技能启用。完整出处见`work-visual-design/references/source-provenance.md`。
 
@@ -1765,3 +1776,137 @@ Node/Web类型检查、Biome380文件、生产构建main135/preload3/renderer225
 Supabase README、部署说明和[1.3.3验证记录](docs/VALIDATION_1.3.3.md)同步已生成实际包及本地发布材料的状态。第62、63节“未生成安装包”是智能体对应开发轮次的历史边界，不改写成智能体打包；旧1.3.2/1.3.1/1.3.0 SQL及元数据保持原样。新SQL的字段、URL、64位SHA、字节范围、公告1000字符约束、upsert和returning静态核对通过，差异空白通过。
 
 本轮没有重新下载远端ZIP、重新打包、安装/升级、上传、执行云SQL、读取正常用户DB/Key、提交或推送；本地产物一致不代表远端文件已独立核验或安装升级已验收。重新构建或替换ZIP后必须重算哈希和大小。若云端仍有8.8.8等更高生效版本，需维护者确认后处理，不自动更改其他发布记录。
+
+## 65. 2026-11-19 / 1.3.4 稳定性修复最终验证
+
+本轮将版本从1.3.3升级到1.3.4，修复并回归七项已核实问题：DeepSeek thinking 与 `execute_tool_chain` 的供应商状态续接、原生 Memory 摘要预算与提交竞态、Native Sandbox 有界停止与 typed tombstone、会话目录 delta revision 恢复、宿主快照/Git 恢复的路径竞态、工具结果缓存 generation 条目以及持久命令 cleanupError/名额清理。随后补齐退出服务的 `Promise.allSettled` 结算、Chat 中断恢复的 evidence/barrier/并发/租约复核、只读 recovery inspection 限制、句柄级工作区 I/O 的 reparse/junction/NTFS 硬链接拒绝和临时文件原子替换。DeepSeek 内部执行步骤仍保留在本地历史和界面；发往 DeepSeek Chat 的历史会折叠回原始链根结果，不发送未由供应商返回的合成 call/result 对。
+
+最终本地验证结果：串行 Vitest **150个文件通过、3个跳过；2001项通过、14项跳过**，退出0，用时243.95秒；`pnpm typecheck`通过；Biome **389个文件**通过；`pnpm build`通过，TencentDB固定源25个模块一致，main/preload/renderer产物分别为1,714.86 kB、31.47 kB、2,581.92 kB JS与365.61 kB CSS；`package-win.cmd --check`退出0，预检通过13,865项资源、生产依赖及1.3.4版本；`git diff --check`通过。测试中的最小沙箱替身同时兼容了显式恢复确认调用，真实ToolRegistry仍会确认持久命令和Native Sandbox。
+
+最终构建后再次通过用户入口资源预检；文档收尾8份Markdown可解析、149个本地链接目标存在且无NUL，只读进程检查未发现本轮Vitest、Git或taskkill残留。
+
+本轮未调用真实DeepSeek或其他付费供应商，未启动真实MXC、Docker、Office COM，未进行NSIS安装/卸载/升级或正式1.3.4安装包验收，未执行云SQL、访问正常用户数据库/API Key、提交或推送。多文件Git/快照操作仍不是数据库级事务，外部并发可能导致部分完成但会返回失败并保留安全快照；脱离受管会话的系统级daemon也不在Native Sandbox的保证范围内。正式打包仍使用仓库根目录的`package-win.cmd`，打包后必须重新核对1.3.4 ZIP的SHA-256、大小和内部版本，不能复用1.3.3发布材料。
+
+## 66. 2026-11-20 / 1.3.4 ChatAgent 分组快速新建
+
+用户要求 ChatAgent 同组点击加号直接沿用上一对话的模型信息，不再显示完整的新建弹窗；版本保持1.3.4，schema9、政策修订号`2026-11-04.3`、原子图标与用户数据目录不变。`SessionService.createChatSessionInGroup(groupId)`由主进程权威会话数据选择同组、未归档、无parent的最近更新Chat，不依赖搜索、分页或置顶显示顺序。空组回退全局最近更新的未归档Chat；完全没有Chat时选择首个已启用、支持text的模型，推理等级为null。继承供应商、模型、推理等级、systemPrompt和compactionModel，保持primary Profile、无workspace、host及Chat受限权限；历史、草稿、附件、扩展与运行状态均不复制。最新来源的模型或推理等级失效时明确报错，不静默改用旧来源。
+
+新IPC为`session:create-in-chat-group`，经shared/preload/main接入，QuickChat白名单继续拒绝此接口。`App.tsx`、`ChatSidebar.tsx`及`ChatView.tsx`接入直接创建，移除`NewChatDialog.tsx`及其专属样式。具名分组和未分组标题都有加号，侧栏顶部和空态创建未分组Chat；成功后选中，新对话所在分组会展开并清除搜索。App级in-flight保护与disabled/loading防止连点重复创建，失败在侧栏显示且窄屏会打开抽屉。组标题保留完整title，加号、重命名和删除为独立32px控件，长组名不会挤占操作。
+
+最终定向Vitest为**4文件37项通过**：`session-service.test.ts`、`session-catalog.test.ts`、`quick-chat-controller.test.ts`、`session-catalog-sync.test.ts`，退出0、2.60秒。Node/Web类型检查与Biome **388文件**通过；生产构建通过25份TencentDB固定源哈希，main **137**、preload **3**、renderer **2254**模块，产物main **1,717.71 kB**、preload **31.64 kB**、renderer JS **2,578.96 kB**及CSS **365.20 kB**，入口为`index-DvFymHUX.js`和`index-9s72hnjt.css`。用户入口资源预检退出0，**13,865项资源、生产依赖及1.3.4版本通过**。
+
+最终真实Electron专项`scripts/chat-group-create-smoke.mjs` **10/10场景通过、17截图、0模型/fixture网络请求、0renderer异常、0fixture服务错误**，证据位于`.impeccable/review/v134-chat-group-create-1795095868403/result.json`。覆盖继承与内容隔离、空组和首次回退、归档排除、搜索/折叠复位、双击防重、失效错误和修复后重试，以及简约/光轨、中英文、日夜和1440/800抽屉。截图已逐张检查；独立临时profile已清理，测试Electron已退出。旧agent-modes和orbit-workbench smoke同步无弹窗流程，但未在本轮重跑其完整场景。机械设计检查仅报告共享CSS的10条既有建议，没有据此重构其他界面。
+
+README、DESIGN、双语内嵌手册/日志、Release与验证记录已同步。本轮未重跑完整后端套件，第65节2001项保留为稳定性修复阶段证据，不与37项相加；未调用真实模型、接触正常用户profile/DB/API Key、生成正式NSIS/ZIP、安装升级、执行云SQL、提交或推送。桌面专项覆盖Chromium视口几何，不代表完整Windows DPI及辅助技术矩阵验收。当前源码使用`run-experimental.cmd`运行，正式打包仍由用户执行`package-win.cmd`。
+
+收尾10份相关Markdown可解析、157个本地链接目标存在且无NUL；三处版本均为1.3.4，renderer入口与上述最终构建一致，差异空白检查通过。只读进程检查未发现本轮桌面专项或其临时profile进程残留。
+
+## 67. 2026-11-20 / 1.3.4 审查清单与输入原文修复
+
+用户要求修复已核实的审查清单，并确认粘贴后自动进入格式预览的问题。版本保持1.3.4，schema9、政策修订号、原子图标、用户数据目录及既有未提交修改保留。粘贴、键入、IME和快捷键不再自动打开预览，只有手动点击预览按钮切换；草稿恢复仍保留用户当时的原文/预览选择，图片粘贴继续作为附件。
+
+项目JSON和Markdown Agent只从已信任工作区加载，项目来源不能覆盖内置Profile；工作区内的`{file:...}`及LSP打开文件使用有界、句柄级读取。编辑重发在外层savepoint内提交Workbench状态、历史删尾与新消息、草稿消费、标题/status及工具输出索引清理；准备或持久化失败回滚，已接受之后的模型失败保留本轮真实消息。Chat Completions必须收到正式`finish_reason`，仅`[DONE]`或非空内容不够，不执行截断流中的工具。
+
+附件统一为每条最多10个、单文件25MiB、合计50MiB，覆盖Renderer读字节前、主进程、草稿和队列。文档提取使用最多2个worker、384MB堆及180秒硬超时；Office包、ZIP条目/XML、文本和PNG/JPEG完整性均有限制。Excel创建与编辑共享100,000单元格工作量预算；公式、主动字段、外部连接和嵌入工作簿有拒绝策略和递归预算。旧稿/模板与COM前验证共享嵌入XLSX检查，跨`instrText`拆分的主动字段按原样合并再检查。结构、重算、渲染分别记录，`partial/unavailable/failed`不能冒充`verified`，抽样截断不算完整验证。
+
+Host命令取消/错误以有界进程树停止和close等待结算，未确认清理保留tombstone、写入屏障及恢复确认，大输出仍有有界头尾恢复。启动失败执行有界清理并失败退出；MCP Token POST拒绝重定向，编辑密钥留空保留仍声明的键；Skills市场拒绝过期响应。Headless建会话共用SessionService，派生会话走专用fork入口。ACP失败、中断和提前终态均结算，并发prompt不能覆盖；abort默认10秒有界，503、网络异常或超时以“远端停止未确认”结算，不给正常任务增加总时限。
+
+Browser本地预览同时限制顶层和子资源的会话、provider、guest和工作区绑定；实验入口每次验证固定沙箱哈希并重建当前源码。插件市场用进程内队列、跨进程独占锁、UUID临时文件和替换后回读；正常等待锁最多15秒，超过60秒的锁只报告路径和人工恢复说明，不按mtime自动删除，不能在可能仍有writer时清理锁。
+
+宿主文档保存使用目标/祖先句柄、旧SHA复核、同目录temp/bak及提交后identity/size/hash复核。Windows实现仍是有短暂gap的两步rename，不是无间隙原子替换或多文件事务。正常abort/timeout尝试`recover-write`；shutdown期间恢复服务不可用时明确失败并报告`RECOVERY_STATE`及`RECOVERY_BACKUP`，保留旧bak，不能承诺强杀、断电或所有退出路径均会自动恢复。
+
+本轮最终完整串行Vitest退出0：**155文件通过、3文件跳过；2115项通过、14项跳过，337.84秒**。首轮6项失败分别由Office/流终态旧夹具、异步启动等待和中文取消提示导致，逐项修正并以三文件95项统一复测后完整重跑通过，未放宽安全合同。Node/Web类型检查、Biome **398文件**、生产构建及差异空白检查通过；TencentDB25份固定源一致，main141/preload3/renderer2255模块，main1801.61kB、preload31.64kB、renderer2581.32kB JS及365.20kB CSS，入口`index-C1HWG2pE.js`和`index-9s72hnjt.css`。构建后用户入口`package-win.cmd --check`退出0，**13,865项资源、生产依赖及1.3.4版本**通过。
+
+最终真实Electron专项串行通过：原文粘贴**9/9场景、23截图、32组测量**，格式预览**11/11、8截图、6组测量**，两套均各1次本地fixture请求、0异常/崩溃/服务错误/意外网络请求，全部31截图已逐张查看。覆盖两种风格、三模式、QuickChat、模拟IME、原生编辑、附件超限预检及运行中队列替换；不操作系统剪贴板。Browser边界**6/6**断言通过，工作区内页面/资产正常且工作区外脚本/图片/iframe/fetch拒绝；真实ASAR的离线OCR、页渲染、旧DOC、Word公式/Markdown/图表/工作簿与DOCX/PPTX作者依赖闭包通过。具体路径、失败重跑和边界见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)，定向数字与完整套件有交集，不累加。
+
+文档收尾11份Markdown可解析、169个本地链接目标存在且无NUL，三处版本均为1.3.4；本轮测试进程残留为0，临时Browser审计副产物不存在。正常用户实例、历史临时目录及既有工作区修改均保留。
+
+未调用真实付费供应商、Microsoft Office COM、MXC/Docker或正式NSIS安装升级，未访问正常用户profile/数据库/API Key，未生成发布包、执行云SQL、提交或推送；真实输入法、完整Windows DPI/GPU和辅助技术矩阵也不在本轮证明范围内。
+
+## 68. 2026-11-20 / 1.3.4 ChatAgent 联网开关与 Crow5 调研
+
+用户要求在 ChatAgent 中增加明确的联网允许/禁止按钮，允许时不再逐次弹出联网审批，并调研 Crow5 相对 Mingshen Harness 的功能差异；Crow5 部分只调研，不据此实施功能。版本保持1.3.4，不新增schema迁移，不改变CodeAgent/WorkAgent权限、图标或用户数据位置。
+
+ChatAgent 会话级联网状态保存在现有`app_settings`，旧会话默认允许以兼容现有行为。主聊天与快捷 Chat 提供“允许联网 / 禁止联网”按钮，发送准备、任务运行或审批等待时锁定；IPC和SessionService均校验会话忙碌状态。允许时只向模型开放`web_search`、`web_fetch`，ChatAgent工具执行不再逐次审批，网页HTTP(S)/公网目标限制保持不变。禁用时工具定义不发送给模型，普通与受管工具路径都由主进程再次硬拒绝。分支、同组快捷新建及快捷 Chat 会话续期继承来源会话的禁网状态，无来源的新Chat默认允许；队列派发读取发送时会话设置，不保存排队时的联网授权快照。
+
+该开关只控制ChatAgent主动调用的网页搜索/读取，不阻断模型供应商API、更新检查或提交用户附件所需的网络；不得描述为应用整体断网。README、SECURITY、双语使用手册、双语更新日志及1.3.4 Release文案同步该边界。
+
+Crow5 调研见[Crow5与Mingshen Harness功能对比](docs/CROW5_COMPARISON_1.3.4.md)。报告按Crow5官方当前首页、官方手册数据、官方自述和第三方资料分级，并以本仓库实现作为Mingshen基线。主要差异为Crow5公开的统一创作工作站、可视化多Agent协同、统一命令面板、可交互多标签终端、策划型Skill/MCP市场、代码时间线/单文件回退和图片无限画布；Mingshen更明确的优势为ChatAgent隔离、Office受控编辑与验证、本地插件SDK、后台SubAgent、自选模型及权限/恢复闭环。官网“500+ Skills”“200+模型”保留为宣传口径，官方手册v6.46.0适用于较早的v1.3.22说明，未将手册全部能力假定为v1.3.31实测。没有安装Crow5、做同任务基准或根据报告修改Mingshen产品功能。
+
+本轮联网开关最终串行Vitest退出0：**155个文件通过、3个跳过；2121项通过、14项跳过，453.62秒**。Node/Web类型检查和Biome **398个文件**通过，生产构建main141/preload3/renderer2255模块及25份TencentDB固定源校验通过；`package-win.cmd --check`通过13,865项资源、生产依赖和1.3.4版本。真实Electron联网专项3/3、8张截图、0模型请求和0renderer异常；证据及布局覆盖见[验证记录](docs/VALIDATION_1.3.4.md)。宽范围Orbit smoke在前9项通过后，任务面板复载600px/ARIA断言超时于联网场景之前，原因仍待查；专项联网smoke通过不替代该未通过的完整布局场景。定向Quick Chat/SessionService新增断言与全量结果有交集，不相加。
+
+Crow5报告仅为公开资料对比；没有安装对手产品、跑性能基准或据此实施产品功能。没有调用真实模型、访问正常profile/Key、执行云SQL、生成/安装NSIS、提交或推送。测试Electron和临时profile已退出/清理，用户已有服务进程未触碰。最终10份Markdown、153个本地链接、diff空白、脚本语法、Node/Web类型、Biome398文件及13,865项1.3.4打包资源预检均通过；无正式安装包。
+
+## 69. 2026-11-20 / 1.3.4 创作工作面与项目协作扩展
+
+用户确认继续实装创作工作站、生图工作台、AutoDrive、多角色并行总控、统一命令搜索、交互式多标签Shell、行评论审阅、分支/worktree项目视图和草稿辅助。版本保持1.3.4，schema9、政策修订号、原子图标、用户数据路径和现有框架保留。新增产品说明使用自身功能名称，不将外部产品名称作为实现或质量保证。用户曾提供带认证参数的外站链接；源码、文档和测试只使用公开页面或本地合成夹具，不保存该认证信息。
+
+### 源码入口与合同
+
+- `shared/creative-templates.ts`、`CreativeWorkstation.tsx`：348个原创工作流/内容模板，按任务类型匹配使用场景、章节意图、交付流程和验收要求；不是348份预渲染Office二进制文件。需求和章节可编辑，支持撤销重做、JSON导入导出及工作区草稿保存。交给WorkAgent只加入输入区，保留已有正文和附件，用户发送后才开始实际制作；取消选目录或草稿冲突不得显示交接成功。写入失败的草稿在同renderer切页后可恢复，成功持久化后清理恢复副本；持续失败时必须在刷新/退出前重试或导出。损坏/不可读的存储原值不覆盖，初次blocked且无失败副本的编辑只留当前工作面。空章节标题允许保存恢复。交接等待草稿保存及目标身份复核，失败在原页面显示，重试不重复追加；异步切会话不抢回旧目标。
+- `main/image-studio/`、`main/providers/image-generation.ts`、`ImageStudio.tsx`：BYOK图片模型与语言模型分别选择。图片配置通过outputModalities区分，文本会话入口排除仅图片输出模型；生图使用OpenAI Images兼容接口，要求Base64图片，不追随供应商远程图片URL。润色先预览确认再生成，反推要求支持图片输入的语言模型。本地素材只存入固定userData子目录；画布支持平移缩放、图层编辑和带素材的工程导入导出。GIF是已选图片帧合成，不宣称文本到AI视频。
+- `main/chat/auto-drive-service.ts`、`shared/autodrive.ts`：显式点击后，由当前模型结合历史、持久计划及有界仓库证据，只读提出3至5种不同方向。没有文件修改或命令工具，选择方案只交给草稿；任务活动、取消、会话删除和退出需统一结算。worktree模式只使用已建立的实际目录；尚未建立时明确失败，不调用`worktreeService.ensure`、不创建目录、不回退主工作区。读取遵循Profile权限，并在证据读取后及模型请求前再次核对。
+- `main/chat/coordination-service.ts`、`shared/coordination.ts`、`ChatService.coordinate_agents`：模型明确拆解2至6个工作包并指定可用角色，使用真实子任务调度，并受已有并发上限、审批和文件写入租约约束。父Agent安排后可继续独立工作，再用wait_subagents补收。验证命令、独立QA和质量状态分别保存；缺少实际验证、命令受阻或失败均不能只凭QA文字标成通过。
+- `CommandPalette.tsx`、`ProjectNavigator.tsx`、项目导航与搜索服务：Ctrl+Shift+P汇总当前模式可用命令、历史会话和工作区文件。项目图标、未读标记及分支/worktree视图沿用会话的实际记录；未记录的历史会话不能凭当前checkout伪造旧分支归属。
+- `main/terminal/terminal-service.ts`、`InteractiveTerminal.tsx`：node-pty/ConPTY加xterm的真实交互Shell，多标签、输入、调整尺寸及停止。只允许主窗口主动创建、可信Code/Work项目、host或实际worktree、Full Access且非patch-only；不是新增模型工具，不对Chat、小窗或实际子Agent开放。窗口、会话和应用退出需要确认进程清理，失败保留可重试状态并显示错误。
+- `main/workspace/local-review-service.ts`、`LocalReview.tsx`：Git、Branch、会话、上一轮四种范围；旧/新行编号、多行评论及版本指纹。发送前重新核对文件和diff，变化后保留评论并要求刷新；只有草稿持久化成功后才清空待交接评论，不自动发送聊天。
+- `main/agents/draft-assist-service.ts`、`ComposerAssistControls.tsx`：独立润色模型、原文/建议预览、显式应用、单次临时指令和按工作区保存的语气。临时指令进入本次运行的低优先级上下文，随相应队列项保存，不改写历史正文或影响之后轮次；不能扩大任何工具或权限。
+
+### 依赖与验证状态
+
+新增生产依赖为node-pty1.1.0、@xterm/xterm6.0.0、@xterm/addon-fit0.11.0、gifenc1.0.3、sharp0.35.5及diff9.0.0；许可与用途记入THIRD_PARTY_NOTICES。终端与图片解码的原生模块及运行时DLL必须进入生产依赖闭包和asarUnpack检查，不能以开发机能加载替代包内校验。生图资产需要有界完整像素解码，GIF/WebP逐帧检查，暂不支持APNG。GIF编码核心使用成熟库，包装层继续限制帧数、像素和输出大小。本地审阅固定HEAD对象与受保护文件字节后在内存计算diff，并限制时间、编辑量及输出；Git配置和对象数据库仍是信任边界。
+
+此节为本轮接续入口；最终完整测试、桌面场景、构建和资源预检数字统一追加到[1.3.4验证记录](docs/VALIDATION_1.3.4.md)本轮节。第68节2121项和既有Orbit smoke失败均属前阶段记录，不自动证明新增工作面已经验收。未生成正式NSIS/ZIP、未安装升级、未执行云SQL、未使用真实模型凭据或正常用户profile，也未提交或推送。
+
+本轮完整串行Vitest最终退出0：**177文件通过、3文件跳过；2312项通过、14项跳过、0失败，411.88秒**，含LSP早到错误、真实ENOENT/EPIPE及关闭结算修复。完整套件之后的界面收尾修复了矮审阅面板评论按钮进入执行区、800px生图属性栏遮挡画布工具，以及更新提示和快捷键警告同时出现时的Orbit顶栏重叠；保留严格矩形/裁切/命中断言，不以中心可点替代完整可见。`studio-navigation.css`必须在`main.tsx`主题样式之后导入，避免相同特异度规则被覆盖。
+
+最终Node/Web类型、Biome **457文件**、生产构建通过，TencentDB25份固定源一致；main157/preload3/renderer2290模块，产物分别为**1,997.89 kB**、**35.97 kB**、renderer JS **3,446.71 kB**及CSS **453.37 kB**，入口`index-D8KAw9p-.js`与`index-mD0ncncx.css`。真实工作流专项**12/12、5截图**；项目审阅专项**8/8、10截图、41组测量**；最新版创作/生图专项**14/14、32截图、180组几何记录**，合成更新提示与快捷键警告同时显示、800px双面板及680px抽屉边界均通过。路径及中间失败保留在验证记录，旧7/7审阅与13/13创作结果不是最终布局证明。ASAR夹具实际验证sharp像素解码、gifenc编码、diff及ConPTY输入/resize/退出；图片许可/打包专项9/9通过，但不是正式electron-builder安装成品验收。
+
+最终构建后`package-win.cmd --check`退出0，**13,865项资源、生产依赖及1.3.4**通过。11份相关Markdown可解析、171个本地链接存在且无NUL；三处版本、最终renderer入口及diff空白检查通过，本轮桌面/ASAR测试进程残留为0。真实收费供应商、Office COM、MXC/Docker、完整Windows DPI/GPU/辅助技术与正式NSIS安装升级仍未验收；用户可用`run-experimental.cmd`运行源码，正式打包由用户执行`package-win.cmd`，完成后重新读取新ZIP的SHA、大小和内部版本。
+
+工作流5张、审阅10张、创作/生图32张最终截图均已逐张复核，未发现新的明显遮挡；创作/生图主流程另抽查4张代表图。静态复核仅覆盖截图位置及面板状态，实际指针、完整矩形与滚动另由专项覆盖，不外推完整键盘、DPI或辅助技术验收。最新创作专项的全部命令结束，临时profile和测试进程已清理。
+
+## 70. 2026-11-20 / 1.3.4 运行中引导
+
+用户要求像现有Agent产品一样，在任务运行中发送补充信息而不停止模型。版本保持1.3.4，schema9、政策修订号、图标、用户数据路径及已有未提交修改保留。原有下一轮队列仍用于当前运行正常完成和清理之后的独立消息；本轮引导作用于当前run的后续模型请求，两者不共用派发时机。
+
+### 行为与边界
+
+- 主Code/Work/Chat及快捷Chat提供单独的发送引导动作，保留停止和下一轮队列。只有实际主模型任务接收引导，手动压缩、独立AutoDrive和实际SubAgent会话不开放。
+- 引导只包含文字，附件和单轮临时指令需另行处理，不在后台丢弃。斜杠命令、`@`和手动扩展引用保留为普通文字，不触发配置、模型、权限或模式切换。沿用当前会话的权限、联网开关、审批、隔离和上下文预算。
+- 每条最多8,000字符，等待接入最多10条，同一run累计最多32,000字符。提交绑定sessionId、runId和幂等requestId；过期run、收尾、停止或不支持的会话直接拒绝。草稿revision、实际正文和附件状态需在事务内复核，入队与消费草稿一同提交，失败保留草稿。
+- 当前模型请求、工具批次及子任务继续运行；引导在完整的assistant/tool结果边界之后按FIFO加入，不能插入未完成的工具调用与结果之间。若当前模型返回最终文本而仍有待接入引导，则在同一run内继续模型请求，不能通过重建run假装保持连续运行，也不能绕过已有工具轮数预算。
+- 状态区分等待接入、已接入和未应用。已接入表示进入本次后续请求上下文，不等于模型完成要求或外部服务确认执行。停止、失败或重启时，未接入内容可恢复且不自动重发；后来启动新run也不能静默清空旧的未应用正文。删除会话会清理该会话的持久引导记录。
+- 主窗口与快捷窗口的事件、初次加载和迟到回执需按会话及run身份核对，不清空新的草稿、重置正在流式显示的输出或把已结束任务变回running。草稿接受事件与IPC成功回执可能同时到达，应保持幂等。
+
+### 入口与验证记录
+
+共享协议为`shared/run-steering.ts`，经`chat:steering-get`、`chat:steering-send`及preload接入ChatService。快捷窗口只允许自身有效会话，主进程仍负责全部运行和输入校验。Renderer使用`use-run-steering.ts`与`RunSteeringTray.tsx`显示等待和恢复内容，ChatView保留原有输入与队列流程。
+
+本轮最终完整源码检查、真实Electron专项、文档和资源预检统一记录在[1.3.4验证记录](docs/VALIDATION_1.3.4.md)“运行中引导”节。历史第69节的完整测试和构建产物不能替代新增行为的本轮验证。正式安装包由用户执行`package-win.cmd`生成，未在本轮自动打包、安装、提交或推送。
+
+2026-11-21收尾：本轮完整串行Vitest第二次运行退出0，**179文件通过、3文件跳过；2350项通过、14项跳过，0失败，396.83秒**；根脚本套件**98项**、Node/Web类型和Biome **463文件**通过。首次全量的审批测试超时及清理竞态已限于夹具修正，并保留失败记录。原有自动队列真实Electron回归**16/16、9截图**通过。引导首次功能复跑12/12，但截图复核发现Code/Work顶栏模式未被夹具正确激活，不能据旧场景名声称完整模式覆盖；修正后最终专项**12/12、7截图、7组测量、16次模式/会话一致性校验**通过，18次本地fixture请求中只有显式Stop提前关闭，0异常/崩溃/意外网络。全部16张最终引导/队列截图已逐张复核；英文Chat侧栏仍有少量既有中文，窄屏队列说明有省略显示，不代表完整本地化或辅助技术验收。
+
+最终生产构建通过，TencentDB25份固定源一致，main159/preload3/renderer2293模块；main2,015.02kB、preload36.24kB、renderer JS3,466.41kB及CSS455.14kB，入口`index-BUZa0a33.js`/`index-BvW2yLct.css`。构建后`package-win.cmd --check`退出0，**13,865项资源、生产依赖及1.3.4版本**通过；11份Markdown、174个本地链接、三处版本及差异空白核对通过。本轮测试进程和临时profile已清理，既有用户实例保留。正式NSIS/ZIP、真实供应商、原生IME、完整DPI和辅助技术仍不在本轮证明范围内；打包由用户执行，源码预检不是安装升级验收。
+
+## 71. 2026-11-21 / 1.3.4 工作站模板、Skill 版本与会话侧栏
+
+- 保留原348个模板ID，新增432个场景；65种任务结构，每种12个场景，覆盖12类。每个场景均有简略版和详细版；详细版由独立场景的资料、任务、交付、风险及所属业务流程组成，并写出相应真实技能ID和适用理由。中文默认详细提示词按汉字核对，不能用标题、标点或英文型号凑数。
+- 草稿`promptMode`是可选字段：新建为`detailed`，旧草稿缺字段时按`brief`读取。不迁移或重写旧JSON，不因版本切换丢弃主题、备注或章节。两版共用预览、复制及追加输入框逻辑；WorkAgent交接不发送消息、不改变工具授权。仅Code配置不能被静默替换以绕开兼容性检查。
+- 模板数据、组合逻辑及回归位于`shared/creative-template-*.ts`；UI位于`CreativeWorkstation.tsx`，索引逻辑位于`creative-template-search.ts`。分类、格式及多关键词取交集，列表分页。仅当前草稿生成全文，避免为整库生成长提示词。各类Office协作产品按可用文件交付离线稿、规格或交接材料，不承诺原生专有格式和云端操作。
+- 工作来源Skill仅在同一来源路径去掉唯一合法SemVer目录后完全一致时合并；不同路径、独立变体及来源仍可选。124份物理来源不删除，活跃发现和手动列表只显示同源最新版。`domain-skills.ts`和`session-builtin-capability-service.ts`负责活动目录、旧选择和上限，相关权限检查也覆盖运行与提示注入。针对旧ID有效且不匹配当前ID的明确范围规则只继承deny/ask，不继承旧allow或通用兜底；无论是否固定选择，取消或重选都不绕过旧限制。详情及测试证据见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)。
+- `workbench.css`将Code/Work会话侧栏控制区收紧到自然高度，只有会话列表伸展与滚动。不改Chat独立布局，也不改变分支、worktree和会话过滤逻辑。全量源码、真实桌面专项和打包预检均记录到验证页的新节，不引用第70节作为本次结果。
+
+模板库最终默认中文详细提示词为1,128–1,454个汉字，平均1,246.67；同类模板共享专业流程及格式规则，不代表每项独立撰写800字，用户编辑后长度可变化。保留原348个ID和简略方式，目录按780个独立场景计数。Work来源保留124份物理资源，发现和手动选择展示98个活动来源，独立用途变体保留。收尾校正FTE口径和纯空白字段回退；模板/索引/绑定/持久化定向4文件48项通过。最终侧栏与项目审阅桌面专项10/10、20截图、60组测量通过；前两次夹具失败及实际边界均保留在[本轮验证记录](docs/VALIDATION_1.3.4.md)。
+
+最终源码完整串行Vitest再次通过：181文件、2379项通过，3文件/14项环境跳过，0失败，391.58秒；根脚本98项、Node/Web类型、Biome479文件通过。生产构建main159/preload3/renderer2306模块，main2,021.39kB、preload36.24kB、renderer JS4,672.06kB/CSS458.94kB，入口`index-28RWupbL.js`/`index-CsLwKf3k.css`；资源预检13,865项与版本1.3.4通过。最终工作站/生图专项19/19、55截图及466组几何记录通过，6次本地合成请求、0页面/服务异常及0意外原生下载；全部截图已逐张复核，含三种布局的简略态、展开提示词原生滚轮到底及目录/预览打开状态。实际证据与未验证项统一记于验证页本轮节；未逐一评审780种真实Office成品，未调用真实收费模型或Office COM，没有正式打包、安装、提交或推送。
+
+文档收尾12份Markdown、177个本地路径链接、28个标题锚点、三处版本和最终renderer入口核对通过，diff空白检查通过。两份桌面专项对应脚本/临时前缀的匹配进程及Temp目录均为0；正常实例、历史目录及已有工作区修改保留，查询范围及清理证据边界见验证页。
+
+## 72. 2026-11-21 / 1.3.4 node-pty 打包重编修复
+
+用户正式打包日志在资源预检后失败于`@electron/rebuild`重编node-pty的`MSB8040`：Visual Studio缺少Spectre缓解库。此前`--check`与自制ASAR夹具不能证明此阶段成功，保留为历史范围。当前node-pty1.1.0官方包已经包含Windows x64 Node-API预编译，官方install也优先使用预编译；不修改上游binding.gyp、防护、DLL或系统组件。
+
+新增`package-native-dependencies.cjs`：对照锁文件SHA-512验证过的npm官方归档，固定校验7份预编译二进制SHA-256；源预检和afterPack共用验证，补查console-list绑定及JS入口。拒绝两套build/Release、Debug路径中的12种优先旧绑定；不删除用户依赖。通过electron-builder自身依赖锚点解析rebuild4.2.1，以同等prod/optional、sequential、Electron45.2.1与win32/x64选项，仅排除已校验node-pty。按照上游真实目录命名规则检查所有将被排除的实例，并在重编后重扫，目录集合变化即拒绝。任何失败不启动builder；成功后才传`npmRebuild=false`避免重复重编，保留正常生产依赖收集。不使用会关闭依赖收集的`beforeBuild`返回false方案。
+
+真实`package-win.cmd --dir`退出0，生成`%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.4-QbDHsf\output\win-unpacked\MingshenHarness.exe`，afterPack全部资源及生产依赖检查通过，EXE版本1.3.4。根脚本整套108项通过（含新增10项），0失败/跳过，48.04秒。`feature-asar-smoke.cjs --archive <实际app.asar>`在隔离Electron45.2.1中使用真实包内依赖，通过ConPTY输入/resize/退出及PID消失、sharp PNG/GIF解码、diff与gifenc；禁止回退宿主依赖。最初探测错误要求README仍在node_modules，但builder按既有配置将它保存在third-party-notices，夹具已分别核对实际布局；生产校验未放宽。此轮只改打包脚本、验证脚本和文档，不重跑全仓Vitest并冒称本轮2379项；源码版本保持1.3.4，未生成正式NSIS/ZIP、安装升级、提交或推送。最终检查见验证页新节。

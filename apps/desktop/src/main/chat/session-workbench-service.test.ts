@@ -70,6 +70,35 @@ describe("persistent structured plans", () => {
       f.db.close();
     }
   });
+  it("can prepare a turn inside a surrounding transaction without publishing premature state", () => {
+    const f = fixture();
+    try {
+      f.service.update({
+        sessionId: f.session.id,
+        revision: 0,
+        steps: [{ ...step("done"), status: "completed" }],
+      });
+      f.emit.mockClear();
+
+      const prepared = f.service.prepareTurn(f.session.id, false, false);
+
+      expect(prepared.steps).toEqual([]);
+      expect(f.emit).not.toHaveBeenCalled();
+      f.service.publishState(f.session.id);
+      expect(f.emit).toHaveBeenCalledWith({
+        type: "session_todos_updated",
+        sessionId: f.session.id,
+        todos: [],
+      });
+      expect(f.emit).toHaveBeenCalledWith({
+        type: "workbench_updated",
+        sessionId: f.session.id,
+        state: expect.objectContaining({ plan: expect.objectContaining({ steps: [] }) }),
+      });
+    } finally {
+      f.db.close();
+    }
+  });
   it("requires model review on ordinary new turns, preserves paused progress and rejects stale decisions", () => {
     const f = fixture();
     try {

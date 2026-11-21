@@ -109,6 +109,19 @@ function parseSecretLines(value: string): Record<string, string> {
   );
 }
 
+function parseSecretKeys(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => (line.includes("=") ? line.slice(0, line.indexOf("=")) : line).trim())
+        .filter((key): key is string => Boolean(key)),
+    ),
+  ];
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -172,6 +185,8 @@ export function McpSettings({ servers, onChanged }: McpSettingsProps) {
         cwd: draft.cwd,
         url: draft.url,
         timeoutMs: draft.timeoutMs,
+        headerKeys: parseSecretKeys(draft.headerText),
+        envKeys: parseSecretKeys(draft.envText),
         headers: parseSecretLines(draft.headerText),
         env: parseSecretLines(draft.envText),
         oauthEnabled: draft.oauthEnabled,

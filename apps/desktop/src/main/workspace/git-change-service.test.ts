@@ -60,6 +60,34 @@ describe("Git discard and managed worktrees", () => {
     expect(await git("diff", "--cached")).toBe(staged);
     expect(await readFile(join(workspace, "tracked.txt"), "utf8")).toBe("unstaged\n");
   }, 20_000);
+  it("times out a hanging Git filter and releases the repository lock", async () => {
+    const { root, workspace, git } = await fixture();
+    await writeFile(join(workspace, ".gitattributes"), "*.txt filter=hang\n");
+    await git("add", ".gitattributes");
+    await git("commit", "-m", "filter attributes");
+    await writeFile(join(workspace, "tracked.txt"), "changed\n");
+    const hangingFilter = `"${process.execPath.replaceAll("\\", "/")}" -e "setInterval(()=>{},1000)"`;
+    await git("config", "filter.hang.smudge", hangingFilter);
+    await git("config", "filter.hang.clean", hangingFilter);
+    await git("config", "filter.hang.required", "true");
+    const service = new GitChangeService(join(root, "undo-filter"), 30_000, 250);
+    Object.defineProperty(service, "changes", {
+      value: async () => ({ root: workspace, paths: ["tracked.txt"] }),
+    });
+    const started = Date.now();
+    await expect(service.discard(workspace, ["tracked.txt"])).rejects.toThrow(
+      "Git 内容读取超过期限",
+    );
+    expect(Date.now() - started).toBeLessThan(5_000);
+
+    await git("config", "--unset", "filter.hang.smudge");
+    await git("config", "--unset", "filter.hang.clean");
+    await git("config", "--unset", "filter.hang.required");
+    const result = await service.discard(workspace, ["tracked.txt"]);
+    expect(await git("status", "--porcelain")).toBe("");
+    await service.restore(result.backupId, workspace);
+    expect(await readFile(join(workspace, "tracked.txt"), "utf8")).toBe("changed\n");
+  }, 15_000);
   it("handles selected deletion and refuses unrelated or forged backup paths", async () => {
     const { root, workspace, git, service } = await fixture();
     await rm(join(workspace, "tracked.txt"));

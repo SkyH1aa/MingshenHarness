@@ -114,7 +114,13 @@ function createMentionDispatchChat(options: Record<string, unknown> = {}) {
     getMessages: () => [],
     listAgentProfiles: () => [parentProfile, worker],
     getAgentProfile: () => parentProfile,
-    getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+    getModel: () => ({
+      id: "model",
+      providerId: "provider",
+      enabled: true,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+    }),
     getProvider: () => ({ id: "provider" }),
     insertSession: () => child,
     listSessionExtensionIds: () => [],
@@ -532,7 +538,13 @@ describe("queued prompt run lifecycle", () => {
     const repository = {
       getSession: () => session,
       getProvider: () => ({ id: "provider" }),
-      getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+      getModel: () => ({
+        id: "model",
+        providerId: "provider",
+        enabled: true,
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+      }),
       getMessages: () => [{ id: "one" }, { id: "two" }],
       getAgentProfile: () => null,
       updateSession: (_sessionId: string, patch: Record<string, unknown>) => ({
@@ -586,7 +598,13 @@ describe("queued prompt run lifecycle", () => {
       repository: {
         getSession: () => session,
         getProvider: () => ({ id: "provider" }),
-        getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+        getModel: () => ({
+          id: "model",
+          providerId: "provider",
+          enabled: true,
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+        }),
         getMessages: () => [{ id: "one" }, { id: "two" }],
         getAgentProfile: () => null,
         updateSession: (_sessionId: string, patch: Record<string, unknown>) => ({

@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { copyFile, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotRestoreResult, SnapshotView } from "../../shared/domain";
+import {
+  applyGuardedOperations,
+  inspectGuardedPaths,
+  listGuardedWorkspaceFiles,
+} from "./guarded-workspace-io";
 import { safeFilePath } from "./safe-file-path";
 
 const IGNORED_DIRECTORIES = new Set([
@@ -139,6 +144,14 @@ async function collectFiles(
   result: string[] = [],
   budget = { bytes: 0 },
 ): Promise<string[]> {
+  if (process.platform === "win32" && current === root && result.length === 0) {
+    const listed = await listGuardedWorkspaceFiles(root, {
+      ignoredDirectories: [...IGNORED_DIRECTORIES],
+      maxFiles: MAX_FILES,
+      maxTotalBytes: SNAPSHOT_MAX_BYTES,
+    });
+    return listed.files.map((file) => file.path);
+  }
   const entries = await readdir(current, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) {
@@ -197,13 +210,28 @@ export class SnapshotService {
 
     let totalBytes = 0;
     try {
-      for (const file of files) {
-        const source = await safeFilePath(workspacePath, file);
-        const target = join(filesRoot, file);
-        await mkdir(dirname(target), { recursive: true });
-        await copyFile(source, target);
-        totalBytes += (await stat(source)).size;
+      if (process.platform === "win32") {
+        const copied = await applyGuardedOperations({
+          root: filesRoot,
+          sourceRoot: workspacePath,
+          operations: files.map((file) => ({
+            kind: "copy" as const,
+            sourcePath: file,
+            targetPath: file,
+            createParents: true,
+          })),
+        });
+        totalBytes = copied.bytes;
         if (totalBytes > SNAPSHOT_MAX_BYTES) throw new Error("快照期间文件增长超过 1 GiB。");
+      } else {
+        for (const file of files) {
+          const source = await safeFilePath(workspacePath, file);
+          const target = join(filesRoot, file);
+          await mkdir(dirname(target), { recursive: true });
+          await copyFile(source, target);
+          totalBytes += (await stat(source)).size;
+          if (totalBytes > SNAPSHOT_MAX_BYTES) throw new Error("快照期间文件增长超过 1 GiB。");
+        }
       }
 
       const manifest: SnapshotManifest = {
@@ -256,31 +284,52 @@ export class SnapshotService {
     const files: string[] = [];
     const missingPaths: string[] = [];
     let totalBytes = 0;
-    for (const scopedPath of scopedPaths) {
-      let metadata: Awaited<ReturnType<typeof lstat>>;
-      try {
-        metadata = await lstat(scopedPath.absolutePath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          missingPaths.push(scopedPath.relativePath);
+    if (process.platform === "win32") {
+      const inspections = await inspectGuardedPaths(
+        workspacePath,
+        scopedPaths.map((path) => path.relativePath),
+      );
+      for (const inspection of inspections) {
+        if (inspection.state === "missing") {
+          missingPaths.push(inspection.path);
           continue;
         }
-        throw error;
+        if (inspection.size > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
+          throw new Error("单个文件超过 25 MiB，无法创建文件检查点。");
+        }
+        totalBytes += inspection.size;
+        if (totalBytes > PARTIAL_CHECKPOINT_MAX_BYTES) {
+          throw new Error("文件检查点超过 128 MiB，未创建检查点。");
+        }
+        files.push(inspection.path);
       }
-      if (metadata.isSymbolicLink()) {
-        throw new Error("文件检查点目标不能是符号链接。");
+    } else {
+      for (const scopedPath of scopedPaths) {
+        let metadata: Awaited<ReturnType<typeof lstat>>;
+        try {
+          metadata = await lstat(scopedPath.absolutePath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            missingPaths.push(scopedPath.relativePath);
+            continue;
+          }
+          throw error;
+        }
+        if (metadata.isSymbolicLink()) {
+          throw new Error("文件检查点目标不能是符号链接。");
+        }
+        if (!metadata.isFile()) {
+          throw new Error(`文件检查点目标必须是普通文件：${scopedPath.relativePath}`);
+        }
+        if (metadata.size > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
+          throw new Error("单个文件超过 25 MiB，无法创建文件检查点。");
+        }
+        totalBytes += metadata.size;
+        if (totalBytes > PARTIAL_CHECKPOINT_MAX_BYTES) {
+          throw new Error("文件检查点超过 128 MiB，未创建文件检查点。");
+        }
+        files.push(scopedPath.relativePath);
       }
-      if (!metadata.isFile()) {
-        throw new Error(`文件检查点目标必须是普通文件：${scopedPath.relativePath}`);
-      }
-      if (metadata.size > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
-        throw new Error("单个文件超过 25 MiB，无法创建文件检查点。");
-      }
-      totalBytes += metadata.size;
-      if (totalBytes > PARTIAL_CHECKPOINT_MAX_BYTES) {
-        throw new Error("文件检查点超过 128 MiB，未创建检查点。");
-      }
-      files.push(scopedPath.relativePath);
     }
 
     const runCheckpoints = (await this.readAllManifests()).filter(
@@ -309,16 +358,23 @@ export class SnapshotService {
     try {
       await mkdir(filesRoot, { recursive: true });
       let copiedBytes = 0;
-      for (const file of files) {
-        const source = await safeFilePath(workspacePath, file);
-        const target = join(filesRoot, file);
-        await mkdir(dirname(target), { recursive: true });
-        await copyFile(source, target);
-        const copiedSize = (await stat(target)).size;
-        if (copiedSize > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
-          throw new Error("检查点创建期间单个文件增长超过 25 MiB。");
+      if (process.platform === "win32") {
+        const copied = await applyGuardedOperations({
+          root: filesRoot,
+          sourceRoot: workspacePath,
+          operations: files.map((file) => ({
+            kind: "copy" as const,
+            sourcePath: file,
+            targetPath: file,
+            createParents: true,
+          })),
+        });
+        for (const copy of copied.copies) {
+          if (copy.bytes > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
+            throw new Error("检查点创建期间单个文件增长超过 25 MiB。");
+          }
         }
-        copiedBytes += copiedSize;
+        copiedBytes = copied.bytes;
         if (copiedBytes > PARTIAL_CHECKPOINT_MAX_BYTES) {
           throw new Error("检查点创建期间文件总量增长超过 128 MiB。");
         }
@@ -327,14 +383,45 @@ export class SnapshotService {
             "SNAPSHOT_CHECKPOINT_LIMIT: 检查点创建期间本轮累计超过 128 MiB，未保留检查点。",
           );
         }
+      } else {
+        for (const file of files) {
+          const source = await safeFilePath(workspacePath, file);
+          const target = join(filesRoot, file);
+          await mkdir(dirname(target), { recursive: true });
+          await copyFile(source, target);
+          const copiedSize = (await stat(target)).size;
+          if (copiedSize > PARTIAL_CHECKPOINT_MAX_FILE_BYTES) {
+            throw new Error("检查点创建期间单个文件增长超过 25 MiB。");
+          }
+          copiedBytes += copiedSize;
+          if (copiedBytes > PARTIAL_CHECKPOINT_MAX_BYTES) {
+            throw new Error("检查点创建期间文件总量增长超过 128 MiB。");
+          }
+          if (checkpointBytes + copiedBytes > PARTIAL_CHECKPOINT_MAX_BYTES_PER_RUN) {
+            throw new Error(
+              "SNAPSHOT_CHECKPOINT_LIMIT: 检查点创建期间本轮累计超过 128 MiB，未保留检查点。",
+            );
+          }
+        }
       }
 
-      for (const missingPath of missingPaths) {
-        try {
-          await lstat(await safeFilePath(workspacePath, missingPath));
-          throw new Error(`检查点目标在创建期间出现：${missingPath}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (process.platform === "win32") {
+        await applyGuardedOperations({
+          root: workspacePath,
+          operations: missingPaths.map((missingPath) => ({
+            kind: "assert" as const,
+            path: missingPath,
+            state: "missing" as const,
+          })),
+        });
+      } else {
+        for (const missingPath of missingPaths) {
+          try {
+            await lstat(await safeFilePath(workspacePath, missingPath));
+            throw new Error(`检查点目标在创建期间出现：${missingPath}`);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
         }
       }
 
@@ -405,9 +492,18 @@ export class SnapshotService {
       ]);
     }
 
-    for (const file of validatedFiles) {
-      if (!(await stat(await safeFilePath(join(root, "files"), file.relativePath))).isFile())
+    if (process.platform === "win32") {
+      const sourceInspections = await inspectGuardedPaths(
+        join(root, "files"),
+        validatedFiles.map((file) => file.relativePath),
+      );
+      if (sourceInspections.some((inspection) => inspection.state !== "file"))
         throw new Error("快照文件损坏。");
+    } else {
+      for (const file of validatedFiles) {
+        if (!(await stat(await safeFilePath(join(root, "files"), file.relativePath))).isFile())
+          throw new Error("快照文件损坏。");
+      }
     }
 
     let safety: SnapshotView;
@@ -431,12 +527,41 @@ export class SnapshotService {
     }
 
     if (isPartial) {
-      let removed = 0;
-      let restored = 0;
       await this.assertRestoreTargetsAreFilesOrMissing(workspacePath, [
         ...manifest.files,
         ...manifest.missingPaths,
       ]);
+      if (process.platform === "win32") {
+        const restored = await applyGuardedOperations({
+          root: workspacePath,
+          sourceRoot: join(root, "files"),
+          operations: [
+            ...[...manifest.files, ...manifest.missingPaths].map((path) => ({
+              kind: "assert" as const,
+              path,
+              state: "file-or-missing" as const,
+            })),
+            ...manifest.missingPaths.map((path) => ({
+              kind: "delete" as const,
+              path,
+              allowMissing: true,
+            })),
+            ...manifest.files.map((path) => ({
+              kind: "copy" as const,
+              sourcePath: path,
+              targetPath: path,
+              createParents: true,
+            })),
+          ],
+        });
+        return {
+          restored: restored.copied,
+          removed: restored.deleted,
+          safetySnapshotId: safety.id,
+        };
+      }
+      let removed = 0;
+      let restored = 0;
       for (const missingPath of manifest.missingPaths) {
         const target = await safeFilePath(workspacePath, missingPath);
         try {
@@ -457,8 +582,55 @@ export class SnapshotService {
       return { restored, removed, safetySnapshotId: safety.id };
     }
 
-    const expected = new Set(manifest.files.map((file) => file.replaceAll("\\", "/")));
+    const expected = new Set(
+      manifest.files.map((file) =>
+        process.platform === "win32"
+          ? file.replaceAll("\\", "/").toLowerCase()
+          : file.replaceAll("\\", "/"),
+      ),
+    );
     const currentFiles = await collectFiles(resolve(workspacePath));
+    if (process.platform === "win32") {
+      const toDelete = currentFiles.filter((file) => {
+        const normalized = file.replaceAll("\\", "/");
+        return !expected.has(normalized.toLowerCase());
+      });
+      const restored = await applyGuardedOperations({
+        root: workspacePath,
+        sourceRoot: join(root, "files"),
+        operations: [
+          ...toDelete.map((path) => ({
+            kind: "delete" as const,
+            path,
+            allowMissing: true,
+          })),
+          ...manifest.files.map((path) => ({
+            kind: "copy" as const,
+            sourcePath: path,
+            targetPath: path,
+            createParents: true,
+          })),
+        ],
+      });
+      const finalFiles = await collectFiles(resolve(workspacePath));
+      const normalizedFinal = finalFiles
+        .map((file) => file.replaceAll("\\", "/").toLowerCase())
+        .sort();
+      const normalizedExpected = [...expected].sort();
+      if (
+        normalizedFinal.length !== normalizedExpected.length ||
+        normalizedFinal.some((file, index) => file !== normalizedExpected[index])
+      ) {
+        throw new Error(
+          `快照恢复期间工作区文件集合发生变化，结果未验证；可使用安全快照 ${safety.id} 恢复。`,
+        );
+      }
+      return {
+        restored: restored.copied,
+        removed: restored.deleted,
+        safetySnapshotId: safety.id,
+      };
+    }
     let removed = 0;
     for (const currentFile of currentFiles) {
       const normalized = currentFile.replaceAll("\\", "/");
@@ -483,6 +655,10 @@ export class SnapshotService {
     workspacePath: string,
     paths: string[],
   ): Promise<void> {
+    if (process.platform === "win32") {
+      await inspectGuardedPaths(workspacePath, paths);
+      return;
+    }
     for (const path of paths) {
       const target = await safeFilePath(workspacePath, path);
       try {

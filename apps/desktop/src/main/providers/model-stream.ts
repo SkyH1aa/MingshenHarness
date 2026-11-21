@@ -106,6 +106,7 @@ export interface StreamTurnInput {
   signal: AbortSignal;
   onRequestUsage?: (usage: RequestUsage) => void;
   onRequestPrepared?: (request: PreparedModelRequest) => void;
+  onBeforeRequest?: () => void;
   retry?: {
     maxRetries: number;
     onRetry: (state: {
@@ -202,6 +203,8 @@ function messageToolCalls(message: SessionMessage) {
       callId: part.callId,
       name: part.name,
       arguments: part.arguments,
+      synthetic: part.synthetic === true,
+      chainRootCallId: part.chainRootCallId,
     }));
 }
 
@@ -541,9 +544,22 @@ function buildChatMessages(
   systemPrompt: string,
   model: ModelConfig,
   provider: ProviderView,
+  includeDeepSeekReasoningFallback: boolean,
 ) {
   const result: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }];
   const pendingImages: Array<Record<string, unknown>> = [];
+  const collapseSyntheticChains = resolveProviderModelFamily(provider) === "deepseek";
+  const syntheticResults = new Map<string, string[]>();
+  if (collapseSyntheticChains) {
+    for (const message of messages) {
+      for (const part of messageToolResults(message)) {
+        if (!part.synthetic || !part.chainRootCallId) continue;
+        const results = syntheticResults.get(part.chainRootCallId) ?? [];
+        results.push(part.output);
+        syntheticResults.set(part.chainRootCallId, results);
+      }
+    }
+  }
   const flushImages = () => {
     if (!pendingImages.length) return;
     result.push({ role: "user", content: [...pendingImages] });
@@ -610,11 +626,18 @@ function buildChatMessages(
         result.push(state);
         continue;
       }
-      const toolCalls = messageToolCalls(message);
+      const toolCalls = messageToolCalls(message).filter(
+        (toolCall) => !(collapseSyntheticChains && toolCall.synthetic),
+      );
       const text = messageText(message);
+      if (!text && toolCalls.length === 0 && messageToolCalls(message).length > 0) continue;
       result.push({
         role: "assistant",
         content: text || null,
+        // DeepSeek rejects thinking-mode histories when an assistant tool turn
+        // lacks reasoning_content. Synthetic chain steps have no native
+        // reasoning of their own, so only an empty placeholder is truthful.
+        ...(includeDeepSeekReasoningFallback ? { reasoning_content: "" } : {}),
         ...(toolCalls.length > 0
           ? {
               tool_calls: toolCalls.map((toolCall) => ({
@@ -632,11 +655,16 @@ function buildChatMessages(
     }
 
     for (const toolResult of messageToolResults(message)) {
+      if (collapseSyntheticChains && toolResult.synthetic) continue;
       const visual = toolResultVisuals(toolResult, model);
+      const chain = collapseSyntheticChains ? syntheticResults.get(toolResult.callId) : undefined;
+      const chainText = chain?.length
+        ? `\n\nHarness execution-chain results:\n${chain.join("\n\n")}`
+        : "";
       result.push({
         role: "tool",
         tool_call_id: toolResult.callId,
-        content: visual.text,
+        content: `${visual.text}${chainText}`,
       });
       if (visual.images.length) {
         pendingImages.push({
@@ -836,6 +864,7 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
   const reasoningEnabled = Boolean(input.reasoningLevel) && input.reasoningLevel !== "none";
   const tools = toolPayload(input.provider.protocol, input.tools);
   const deepseek = resolveProviderModelFamily(input.provider) === "deepseek";
+  const includeDeepSeekReasoningFallback = deepseek && input.reasoningLevel !== "none";
 
   switch (input.provider.protocol) {
     case "gemini_generate_content": {
@@ -956,6 +985,7 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
           input.systemPrompt,
           input.model,
           input.provider,
+          includeDeepSeekReasoningFallback,
         ),
         max_tokens: maxOutputTokens,
         stream: true,
@@ -1816,9 +1846,15 @@ async function* decodeOpenAiChat(
       }
     }
   }
-  if (!completed && !done)
+  // Chat Completions' [DONE] marker only terminates the SSE stream. Without a
+  // finish_reason, a proxy can close a truncated response (or a partial tool
+  // call) while still looking successful, so completion must come from the
+  // provider's terminal choice instead.
+  if (!completed)
     throw new ModelRequestError(
-      "Chat Completions stream ended before completion; the response may be incomplete.",
+      done
+        ? "Chat Completions stream ended without finish_reason; the response may be incomplete."
+        : "Chat Completions stream ended before completion; the response may be incomplete.",
       true,
     );
   toolCalls.finish();
@@ -1982,46 +2018,54 @@ async function* streamModelTurnInternal(
     apiKey: input.apiKey,
   });
   headers.accept = "text/event-stream";
+  const body = JSON.stringify(request.body);
+
+  input.signal.throwIfAborted();
+  try {
+    const fingerprint = createWireCacheFingerprint({
+      provider: input.provider,
+      model: input.model,
+      apiKey: input.apiKey,
+      path: request.path,
+      body: request.body,
+    });
+    recordRequest(fingerprint);
+  } catch (cause) {
+    recordRuntimeError("model.cacheDiagnostics", cause, {
+      providerId: input.provider.id,
+      modelId: input.model.id,
+    });
+  }
+  try {
+    input.onRequestPrepared?.({
+      provider: input.provider,
+      model: input.model,
+      systemPrompt: input.systemPrompt,
+      messages: input.messages,
+      tools: input.tools,
+      reasoningLevel: input.reasoningLevel,
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.topP !== undefined ? { topP: input.topP } : {}),
+    });
+  } catch (cause) {
+    recordRuntimeError("model.requestSnapshot", cause, {
+      providerId: input.provider.id,
+      modelId: input.model.id,
+    });
+  }
+  input.signal.throwIfAborted();
+  try {
+    input.onBeforeRequest?.();
+  } catch (cause) {
+    throw new Error(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
 
   let response: Response;
   try {
-    input.signal.throwIfAborted();
-    try {
-      const fingerprint = createWireCacheFingerprint({
-        provider: input.provider,
-        model: input.model,
-        apiKey: input.apiKey,
-        path: request.path,
-        body: request.body,
-      });
-      recordRequest(fingerprint);
-    } catch (cause) {
-      recordRuntimeError("model.cacheDiagnostics", cause, {
-        providerId: input.provider.id,
-        modelId: input.model.id,
-      });
-    }
-    try {
-      input.onRequestPrepared?.({
-        provider: input.provider,
-        model: input.model,
-        systemPrompt: input.systemPrompt,
-        messages: input.messages,
-        tools: input.tools,
-        reasoningLevel: input.reasoningLevel,
-        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-        ...(input.topP !== undefined ? { topP: input.topP } : {}),
-      });
-    } catch (cause) {
-      recordRuntimeError("model.requestSnapshot", cause, {
-        providerId: input.provider.id,
-        modelId: input.model.id,
-      });
-    }
     response = await fetch(`${input.provider.baseUrl}${request.path}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(request.body),
+      body,
       signal: input.signal,
       redirect: "error",
     });

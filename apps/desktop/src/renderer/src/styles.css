@@ -1939,6 +1939,22 @@ pre {
   white-space: nowrap;
 }
 
+.queued-prompt-item__temporary-instruction {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 20px;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
+  border-radius: 5px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .queued-prompt-item__copy > .queued-prompt-item__warning {
   display: flex;
   margin-top: 5px;
@@ -8242,7 +8258,56 @@ button.message-attachment:hover {
 .chat-view--question .composer > :not(.composer__footer),
 .chat-view--question .composer__footer-left > .extension-picker,
 .chat-view--question .composer__footer-right > .effort-control { display: none; }
+.chat-view--question.chat-view--steer-available .composer > textarea:not([hidden]),
+.chat-view--question.chat-view--steer-available .composer > .composer-preview,
+.chat-view--question.chat-view--steer-available .composer > .run-steering__blocker,
+.chat-view--question.chat-view--steer-available .composer > .run-steering { display: block; }
+.chat-view--question.chat-view--steer-available .composer > .draft-attachments { display: flex; }
 .chat-view--question .composer-wrap { max-height: calc(100dvh - 210px); }
+
+.run-steering {
+  margin: 8px 0 0;
+  border-block: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+}
+.run-steering__header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--muted);
+}
+.run-steering__header svg { color: var(--accent); flex: 0 0 auto; }
+.run-steering__header strong { color: var(--text); }
+.run-steering__items {
+  max-height: 116px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.run-steering__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+}
+.run-steering__copy { flex: 1; min-width: 0; }
+.run-steering__copy p {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.run-steering__copy small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.run-steering__status { color: var(--muted); font-weight: 600; }
+.run-steering__status--delivered { color: var(--success); }
+.run-steering__status--unapplied { color: var(--danger); }
+.run-steering__blocker { margin: 2px 8px 6px; color: var(--muted); font-size: 12px; }
+.steering-send-button { flex: 0 0 auto; }
+.chat-view--quick .run-steering__header span { flex-basis: 100%; }
+.chat-view--quick .run-steering__items { max-height: 74px; }
 
 .question-panel textarea {
   width: 100%;

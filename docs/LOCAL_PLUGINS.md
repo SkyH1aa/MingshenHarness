@@ -1,6 +1,6 @@
 # Mingshen Harness 本地插件接口
 
-适用版本：1.3.3 · Windows 10/11 x64
+适用版本：1.3.4 · Windows 10/11 x64
 
 本文说明如何在 Mingshen Harness 中开发、校验、添加本地开发市场、手动安装、启用、试运行和更新原生本地插件。插件是用户主动安装的本地扩展，不因声明了 Skill、命令、MCP 或 Hook 就获得文件、命令、网络或审批权限。
 
@@ -267,6 +267,7 @@ MCP Hook 的 `input` 只展开扁平变量，例如 `${plugin_root}`、`${cwd}`�
 - 一个市场最多 200 个条目，`marketplace.json` 最大 1 MiB。
 - 首选根目录 `marketplace.json`；兼容隐藏路径 `.mingshen-plugin/marketplace.json`、`.zcode-plugin/marketplace.json` 和 `.claude-plugin/marketplace.json`。
 - 市场只扫描本地真实目录；市场根、插件源及其解析结果不能通过链接逃出市场根。
+- SDK 写入市场清单时使用同进程串行队列和跨进程锁，在读取、修改与提交期间阻止另一个 CLI 同步更新；正常写入最多等待 15 秒，随后使用随机名同目录临时文件和重命名替换 `marketplace.json`，并回读核对结果。锁存在超过 60 秒时不在代码中按 mtime 自动删除，而是报出锁的绝对路径并保持原清单不变。确认没有市场写入进程后，只手动删除报错中的 `.marketplace.json.lock` 再重试；不要删除或重建 `marketplace.json`。这避免并发更新静默丢失和直接覆盖留下的半截清单，但不替代磁盘级 `fsync`、备份或版本控制。
 - 添加或移除市场只修改 Mingshen 的市场登记，不删除用户的源码目录或已安装插件副本。
 
 ## SDK 预检
@@ -371,6 +372,7 @@ ChatAgent、实际 SubAgent、Docker 和 worktree 会话不能调用该工具，
 | 现象 | 检查 |
 | --- | --- |
 | 市场无法添加 | 选择包含 `marketplace.json` 的真实本地目录；不要选择符号链接或仅有插件源码的目录 |
+| SDK 提示市场锁超过 60 秒 | 先确认没有其他 CLI 或宿主市场写入者，再仅删除报错给出的 `.marketplace.json.lock`；不要修改或删除 `marketplace.json` |
 | 条目显示名称/版本错误 | 让市场条目的 `name`、`version` 与 `.mingshen-plugin/plugin.json` 完全一致 |
 | 校验提示占位符 | 替换 `TODO`、`FIXME`、`<your-...>`、`YOUR_API_KEY` 等内容 |
 | 技能未识别 | `skills` 必须指向目录，目录内必须有 `SKILL.md` |
@@ -383,4 +385,4 @@ ChatAgent、实际 SubAgent、Docker 和 worktree 会话不能调用该工具，
 | `Interrupt` 没有执行命令或 MCP | 这是设计边界：`Interrupt` 只发送 prompt 文本活动通知，Command/MCP 动作明确跳过，不审批、不启动进程、不恢复工具 |
 | ChatAgent 看不到插件 | 这是设计边界；ChatAgent 不加载插件、Skill、MCP 或 Hook |
 
-代码、市场和校验功能的实现与限制以当前源码和 1.3.3 验证记录为准。源码存在、SDK 预检或静态文档均不能证明插件已经在真实运行中完成验收。
+代码、市场和校验功能的实现与限制以当前源码、1.3.4 验证记录及 1.3.3 功能基线为准。源码存在、SDK 预检或静态文档均不能证明插件已经在真实运行中完成验收。

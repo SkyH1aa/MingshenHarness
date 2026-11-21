@@ -1,6 +1,7 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { link, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserService } from "./browser-service";
 
@@ -63,7 +64,7 @@ describe("browser screenshot tool results", () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "mingshen-browser-screenshot-test-"));
-    service = new BrowserService(root, vi.fn());
+    service = new BrowserService(root, vi.fn(), () => root);
     mocks.afterWrite = null;
     mocks.fromId.mockReset();
   });
@@ -74,12 +75,94 @@ describe("browser screenshot tool results", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  async function register(image = imageFixture()) {
+  async function register(image = imageFixture(), sessionId = "session") {
     const guest = guestFixture(image);
     mocks.fromId.mockReturnValue(guest);
-    await service.register("session", "edge", guest.id);
+    await service.register(sessionId, "edge", guest.id);
     return guest;
   }
+
+  it("approves only the exact local file URL of a live browser session", async () => {
+    const emitted = vi.fn();
+    service.dispose();
+    service = new BrowserService(root, emitted, () => root);
+    const localUrl = pathToFileURL(join(root, "preview.html")).toString();
+    const opened = service.open("local", "edge", localUrl);
+    await vi.waitFor(() => expect(emitted).toHaveBeenCalled());
+    const approvedUrl = emitted.mock.calls.find(
+      ([event]) => event.type === "browser_open_requested",
+    )?.[0]?.url as string;
+    expect(approvedUrl).toContain("mingshenLocalFileApproval=");
+    expect(service.isApprovedLocalFileUrl(localUrl)).toBe(false);
+    expect(service.isApprovedLocalFileUrl(approvedUrl, "edge")).toBe(true);
+    expect(service.isApprovedLocalFileUrl(approvedUrl, "chrome")).toBe(false);
+    expect(service.isApprovedLocalFileUrl(`${approvedUrl}&other=1`, "edge")).toBe(false);
+    expect(service.isApprovedLocalFileUrl("file:///outside-workspace.html")).toBe(false);
+    await register(imageFixture(), "local");
+    await opened;
+    expect(service.isApprovedLocalFileUrl(approvedUrl, "edge", 23)).toBe(true);
+    expect(service.isApprovedLocalFileUrl(approvedUrl, "edge", 24)).toBe(false);
+
+    await service.close("local");
+    expect(service.isApprovedLocalFileUrl(approvedUrl, "edge")).toBe(false);
+    await expect(
+      service.open(
+        "outside",
+        "edge",
+        pathToFileURL(join(root, "..", "outside-preview.html")).toString(),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("bounds every file subresource request to the approved guest workspace", async () => {
+    const emitted = vi.fn();
+    service.dispose();
+    service = new BrowserService(root, emitted, () => root);
+    const pagePath = join(root, "index.html");
+    const insidePath = join(root, "inside.css");
+    await writeFile(pagePath, "<link rel=stylesheet href=inside.css>", "utf8");
+    await writeFile(insidePath, "body { color: green; }", "utf8");
+
+    const outsideRoot = await mkdtemp(join(tmpdir(), "mingshen-browser-outside-"));
+    try {
+      const outsidePath = join(outsideRoot, "outside.js");
+      const hardlinkPath = join(root, "outside-hardlink.js");
+      await writeFile(outsidePath, "globalThis.outsideScriptLoaded = true;", "utf8");
+      await link(outsidePath, hardlinkPath);
+
+      const opened = service.open("bounded-local", "edge", pathToFileURL(pagePath).toString());
+      await vi.waitFor(() => expect(emitted).toHaveBeenCalled());
+      const approvedUrl = emitted.mock.calls.find(
+        ([event]) => event.type === "browser_open_requested",
+      )?.[0]?.url as string;
+      await register(imageFixture(), "bounded-local");
+      await opened;
+
+      await expect(service.isApprovedLocalFileRequest(23, approvedUrl, "mainFrame")).resolves.toBe(
+        true,
+      );
+      await expect(
+        service.isApprovedLocalFileRequest(23, pathToFileURL(pagePath).toString(), "mainFrame"),
+      ).resolves.toBe(false);
+      await expect(
+        service.isApprovedLocalFileRequest(23, pathToFileURL(insidePath).toString(), "stylesheet"),
+      ).resolves.toBe(true);
+      await expect(
+        service.isApprovedLocalFileRequest(23, pathToFileURL(outsidePath).toString(), "script"),
+      ).resolves.toBe(false);
+      await expect(
+        service.isApprovedLocalFileRequest(23, pathToFileURL(outsidePath).toString(), "xhr"),
+      ).resolves.toBe(false);
+      await expect(
+        service.isApprovedLocalFileRequest(23, pathToFileURL(hardlinkPath).toString(), "script"),
+      ).resolves.toBe(false);
+      await expect(
+        service.isApprovedLocalFileRequest(24, pathToFileURL(insidePath).toString(), "stylesheet"),
+      ).resolves.toBe(false);
+    } finally {
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("saves PNG bytes and returns pixels as a tool image", async () => {
     const png = Buffer.from("exact screenshot bytes");

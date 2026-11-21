@@ -152,7 +152,12 @@ describe("Agent specialization boundaries", () => {
       "read_tool_output",
     ])
       expect(chatToolRejection({ agentMode: "chat" }, name)?.isError).toBe(true);
-    expect(chatToolRejection({ agentMode: "chat" }, "web_fetch")).toBeNull();
+    for (const name of ["web_search", "web_fetch"]) {
+      expect(chatToolRejection({ agentMode: "chat" }, name)).toBeNull();
+      expect(
+        chatToolRejection({ agentMode: "chat", chatNetworkEnabled: false }, name),
+      ).toMatchObject({ isError: true, output: expect.stringContaining("CHAT_NETWORK_DISABLED") });
+    }
     const uploaded = chatUpload({
       kind: "file",
       name: "report.docx",

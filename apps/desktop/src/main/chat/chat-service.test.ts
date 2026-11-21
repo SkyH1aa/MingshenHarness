@@ -31,11 +31,19 @@ describe("Chat MCP routing", () => {
   it("routes manual @subagent sessions to the profile's dedicated provider and model", async () => {
     const child = { id: "child", status: "idle" };
     const insertSession = vi.fn(() => child);
-    const parentModel = { id: "parent-model", providerId: "parent-provider", enabled: true };
+    const parentModel = {
+      id: "parent-model",
+      providerId: "parent-provider",
+      enabled: true,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+    };
     const dedicatedModel = {
       id: "dedicated-model",
       providerId: "dedicated-provider",
       enabled: true,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
     };
     const parentProfile = {
       id: "parent-profile",
@@ -756,6 +764,7 @@ process.exit(1);`,
       exists = false;
     });
     const emit = vi.fn();
+    const onSessionRemoved = vi.fn();
     const permissions = new PermissionStore();
     const chat = new ChatService({
       repository: { removeSession: remove, listChildSessions: () => [] },
@@ -763,6 +772,7 @@ process.exit(1);`,
       questionBroker: { cancelSession: vi.fn() },
       permissions,
       emit,
+      onSessionRemoved,
     } as unknown as ConstructorParameters<typeof ChatService>[0]);
     const state = chat as unknown as {
       activeRuns: Map<string, AbortController>;
@@ -785,6 +795,7 @@ process.exit(1);`,
     await removing;
     expect(remove).toHaveBeenCalledExactlyOnceWith("session");
     expect(emit).toHaveBeenCalledWith({ type: "session_removed", sessionId: "session" });
+    expect(onSessionRemoved).toHaveBeenCalledExactlyOnceWith("session");
     expect(exists).toBe(false);
   });
   it("removes child histories and snapshots before the parent and retains the parent if snapshot cleanup fails", async () => {
@@ -1038,7 +1049,11 @@ process.exit(1);`,
       return [];
     });
     const chat = new ChatService({
-      repository: { getAgentProfile: () => null, getSetting: () => null },
+      repository: {
+        getAgentProfile: () => null,
+        getSetting: () => null,
+        listAgentProfiles: () => [],
+      },
       mcpService: {
         toolDefinitions: discover,
         list: () => [
@@ -1087,6 +1102,32 @@ process.exit(1);`,
     expect(internal.requestApproval).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledOnce();
   });
+  it("exposes web tools only when a ChatAgent session allows internet access", async () => {
+    const chat = new ChatService({
+      toolRegistry: {
+        descriptors: () =>
+          [{ name: "web_search" }, { name: "web_fetch" }, { name: "read_file" }] as never,
+      },
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      availableTools: (
+        session: SessionView,
+        model: ModelConfig,
+      ) => Promise<Array<{ name: string }>>;
+    };
+    const allowed = {
+      id: "chat-session",
+      agentMode: "chat",
+      chatNetworkEnabled: true,
+    } as SessionView;
+    const denied = { ...allowed, chatNetworkEnabled: false };
+
+    expect(await internal.availableTools(allowed, { toolCalls: true } as ModelConfig)).toEqual([
+      { name: "web_search" },
+      { name: "web_fetch" },
+    ]);
+    expect(await internal.availableTools(denied, { toolCalls: true } as ModelConfig)).toEqual([]);
+  });
   it("asks before GitHub writes and honors rejection", async () => {
     const execute = vi.fn();
     const approval = vi.fn(async () => ({ decision: "deny", feedback: "不要发布" }));
@@ -1122,7 +1163,11 @@ process.exit(1);`,
     const custom = vi.fn();
     const discover = vi.fn(async () => []);
     const chat = new ChatService({
-      repository: { getAgentProfile: () => null, getSetting: () => null },
+      repository: {
+        getAgentProfile: () => null,
+        getSetting: () => null,
+        listAgentProfiles: () => [],
+      },
       mcpService: { toolDefinitions: discover, list: () => [] },
       customToolService: { descriptors: custom },
       toolRegistry: {
@@ -1562,5 +1607,257 @@ describe("Agent profile permission resolution", () => {
     const result = await runtime.execute(testCase.name, testCase.args);
     expect(result).toMatchObject({ isError: true, output: "用户拒绝了读取。" });
     expect(runtime.requestApproval).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Chat workspace and rewrite boundaries", () => {
+  it("rejects LSP paths outside the workspace before starting a language server", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mingshen-lsp-boundary-"));
+    const codeIntelligence = vi.fn();
+    const load = vi.fn();
+    const chat = new ChatService({
+      repository: {
+        getAgentProfile: () => null,
+        getSession: () => null,
+        getSetting: () => null,
+      },
+      projectConfigService: { load },
+      lspDiagnosticsService: { codeIntelligence },
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      executeOwnedToolCall: (
+        input: unknown,
+        onCommandLease: (release: () => void) => void,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    try {
+      const result = await internal.executeOwnedToolCall(
+        {
+          session: {
+            id: "session",
+            agentMode: "code",
+            workspacePath: root,
+            agentProfileId: "primary",
+            parentSessionId: null,
+            permissionMode: "full_access",
+            executionMode: "host",
+          },
+          runId: "run",
+          signal: new AbortController().signal,
+          toolCall: {
+            index: 0,
+            callId: "call",
+            name: "lsp",
+            arguments: JSON.stringify({
+              operation: "hover",
+              path: join(root, "..", "outside.ts"),
+              line: 1,
+              column: 1,
+            }),
+          },
+        },
+        vi.fn(),
+      );
+      expect(result).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("只能查询当前工作区"),
+      });
+      expect(codeIntelligence).not.toHaveBeenCalled();
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("defers conversation deletion until send preparation succeeds", async () => {
+    const target = {
+      id: "message-1",
+      sessionId: "session",
+      seq: 4,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Original" }],
+      createdAt: new Date().toISOString(),
+    };
+    const repository = {
+      getSession: () => ({
+        id: "session",
+        agentMode: "chat",
+        archived: false,
+        status: "idle",
+      }),
+      getMessage: () => target,
+      listAgentProfiles: () => [],
+      deleteMessagesFromSeq: vi.fn(),
+    };
+    const chat = new ChatService({
+      repository,
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      sendWithContext: (
+        input: ChatSendInput,
+        parentSignal: AbortSignal | undefined,
+        resumePlan: boolean,
+        draftSessionId: string,
+        queuedPrompt: boolean,
+        replaceTailFromSeq?: number,
+      ) => Promise<{ runId: string }>;
+    };
+    const sendWithContext = vi
+      .spyOn(internal, "sendWithContext")
+      .mockResolvedValue({ runId: "replacement-run" });
+
+    await expect(
+      chat.rewriteAndSend({ sessionId: "session", messageId: target.id, text: "Replacement" }),
+    ).resolves.toEqual({ runId: "replacement-run" });
+    expect(repository.deleteMessagesFromSeq).not.toHaveBeenCalled();
+    expect(sendWithContext).toHaveBeenCalledWith(
+      { sessionId: "session", text: "Replacement", attachments: [] },
+      undefined,
+      false,
+      "session",
+      false,
+      target.seq,
+    );
+  });
+
+  it("rolls back the whole rewrite when session metadata cannot be committed", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const provider = repository.insertProvider({
+      name: "Rewrite fixture",
+      baseUrl: "http://127.0.0.1:1/v1",
+      protocol: "openai_responses",
+      authMode: "bearer",
+      customHeaderName: null,
+    });
+    repository.insertModel({
+      providerId: provider.id,
+      modelId: "rewrite-fixture",
+      displayName: "Rewrite fixture",
+      contextWindow: 10_000,
+      maxOutputTokens: 1_000,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      toolCalls: false,
+      parallelToolCalls: false,
+      reasoningLevels: ["none"],
+      anthropicNoneBehavior: "disabled",
+    });
+    const model = repository.getProvider(provider.id)?.models[0];
+    if (!model) throw new Error("Fixture model missing");
+    const session = repository.insertSession({
+      title: "Original title",
+      providerId: provider.id,
+      modelId: model.id,
+      agentProfileId: "primary",
+      workspacePath: null,
+      systemPrompt: "",
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+      executionMode: "host",
+      patchOnly: false,
+    });
+    const original = repository.appendMessage({
+      sessionId: session.id,
+      role: "user",
+      parts: [{ type: "text", text: "Original request" }],
+    });
+    repository.appendMessage({
+      sessionId: session.id,
+      role: "assistant",
+      parts: [{ type: "text", text: "Original answer" }],
+    });
+    const chat = new ChatService({
+      repository,
+      agentProfileService: { syncWorkspace: vi.fn(async (): Promise<void> => undefined) },
+      approvalBroker: { cancelSession: vi.fn() },
+      questionBroker: { cancelSession: vi.fn() },
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    chat.workbench.update({
+      sessionId: session.id,
+      revision: 0,
+      steps: [
+        {
+          id: "done",
+          content: "Completed before rewrite",
+          status: "completed",
+          priority: "medium",
+          dependsOn: [],
+          updatedAt: "",
+        },
+      ],
+      breakpoints: ["done"],
+    });
+    const messagesBefore = repository.getMessages(session.id);
+    const sessionBefore = repository.getSession(session.id);
+    const planBefore = chat.workbench.state(session.id).plan;
+    database.exec(`
+      create trigger fail_rewrite_metadata before update on sessions
+      when new.title = 'Replacement request'
+      begin select raise(abort, 'Fixture metadata failure'); end;
+    `);
+
+    try {
+      await expect(
+        chat.rewriteAndSend({
+          sessionId: session.id,
+          messageId: original.id,
+          text: "Replacement request",
+        }),
+      ).rejects.toThrow("Fixture metadata failure");
+      expect(repository.getMessages(session.id)).toEqual(messagesBefore);
+      expect(repository.getSession(session.id)).toEqual(sessionBefore);
+      expect(chat.workbench.state(session.id).plan).toEqual(planBefore);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects subagent delegation from an edit or retry before creating a child run", async () => {
+    const target = {
+      id: "message-1",
+      sessionId: "session",
+      seq: 4,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Original" }],
+      createdAt: new Date().toISOString(),
+    };
+    const repository = {
+      getSession: () => ({
+        id: "session",
+        agentMode: "code",
+        archived: false,
+        status: "idle",
+      }),
+      getMessage: () => target,
+      listAgentProfiles: () => [
+        {
+          id: "general",
+          name: "General",
+          role: "subagent",
+          enabled: true,
+          applicableModes: ["code"],
+        },
+      ],
+    };
+    const chat = new ChatService({
+      repository,
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      sendWithContext: ReturnType<typeof vi.fn>;
+    };
+    const sendWithContext = vi.spyOn(internal, "sendWithContext");
+
+    await expect(
+      chat.rewriteAndSend({
+        sessionId: "session",
+        messageId: target.id,
+        text: "@General inspect this",
+      }),
+    ).rejects.toThrow("编辑重发不支持 @子 Agent 委派");
+    expect(sendWithContext).not.toHaveBeenCalled();
   });
 });

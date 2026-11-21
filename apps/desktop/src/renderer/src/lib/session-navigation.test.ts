@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SessionView } from "../../../shared/domain";
-import { SessionNavigationIndex, visibleSessionRows } from "./session-navigation";
+import {
+  branchNavigationGroups,
+  SessionNavigationIndex,
+  visibleSessionRows,
+} from "./session-navigation";
 
 const session = (id: string, time: number, parent: string | null = null) =>
   ({
@@ -66,5 +70,45 @@ describe("conversation hierarchy and incremental search", () => {
         "task-11999",
       ),
     ).toHaveLength(0);
+  });
+  it("groups session families by recorded branch and keeps unrecorded history explicit", () => {
+    const sessions = [
+      session("main", 4),
+      session("child", 3, "main"),
+      session("old", 2),
+      session("worktree", 1),
+    ];
+    const workspaceGroup = new SessionNavigationIndex().groups(sessions, "")[0];
+    if (!workspaceGroup) throw new Error("missing workspace group");
+    const groups = branchNavigationGroups(workspaceGroup ? [workspaceGroup] : [], {
+      main: {
+        sessionId: "main",
+        workspacePath: "C:\\Project",
+        branch: "feature/palette",
+        worktree: false,
+        recordedAt: "2026-11-20T00:00:00.000Z",
+      },
+      worktree: {
+        sessionId: "worktree",
+        workspacePath: "C:\\Project",
+        branch: "feature/palette",
+        worktree: true,
+        recordedAt: "2026-11-20T00:00:00.000Z",
+      },
+    });
+    expect(groups.map((group) => group.key)).toEqual([
+      `${workspaceGroup.key}::branch:host:feature/palette`,
+      `${workspaceGroup.key}::branch:host:`,
+      `${workspaceGroup.key}::branch:worktree:feature/palette`,
+    ]);
+    expect(
+      groups
+        .find((group) => group.key.includes("host:feature/palette"))
+        ?.sessions.map((item) => item.id),
+    ).toEqual(["main", "child"]);
+    expect(groups.find((group) => group.key.endsWith("host:"))).toMatchObject({
+      branch: null,
+      branchRecorded: false,
+    });
   });
 });

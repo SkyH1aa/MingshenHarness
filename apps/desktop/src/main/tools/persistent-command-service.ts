@@ -60,8 +60,10 @@ interface ManagedCommand extends CommandOwner {
   reason: string;
   failed: boolean;
   closedAt: number;
+  terminationError: string;
   cleanupError: string;
   cleanup: (() => Promise<void>) | undefined;
+  manualStopConfirmed: boolean;
   closed: Promise<void>;
   resolveClosed: () => void;
   timer: ReturnType<typeof setTimeout>;
@@ -87,7 +89,7 @@ function killTree(child: ChildProcess): Promise<void> {
       ["/PID", String(child.pid), "/T", "/F"],
       { windowsHide: true, timeout: 10_000 },
       (error) => {
-        if (error && child.exitCode === null && child.signalCode === null) reject(error);
+        if (error) reject(error);
         else resolveKill();
       },
     );
@@ -112,6 +114,19 @@ export class PersistentCommandService {
 
   inspect(id: string, owner: CommandOwner): CommandSessionInfo {
     return this.info(this.require(id, owner));
+  }
+
+  confirmRunStopped(runId: string): number {
+    const commands = [...this.commands.values()].filter((command) => command.runId === runId);
+    const active = commands.filter(
+      (command) => !command.finished && !this.unconfirmedCleanup(command),
+    );
+    if (active.length)
+      throw new Error(
+        `COMMAND_RUN_STILL_ACTIVE: ${active.length} command session(s) in run ${runId} are still running without unconfirmed cleanup. Stop them or wait for completion before confirming the run stopped.`,
+      );
+    for (const command of commands) this.discardCommand(command);
+    return commands.length;
   }
 
   async start(
@@ -161,24 +176,24 @@ export class PersistentCommandService {
       reason: "",
       failed: false,
       closedAt: 0,
+      terminationError: "",
       cleanupError: "",
       cleanup: launch.cleanup,
+      manualStopConfirmed: false,
       closed,
       resolveClosed,
       timer: setTimeout(() => {
         command.failed = true;
         void this.stop(command, `Command timed out after ${options.timeoutMs} ms.`).catch(
-          (error) => {
-            command.cleanupError = String(error);
-          },
+          () => undefined,
         );
       }, options.timeoutMs),
       signal: options.signal,
       abort: () => {
         command.failed = true;
-        void this.stop(command, "Command canceled. Inspect any partial effects.").catch((error) => {
-          command.cleanupError = String(error);
-        });
+        void this.stop(command, "Command canceled. Inspect any partial effects.").catch(
+          () => undefined,
+        );
       },
       stopping: null,
       operation: Promise.resolve(),
@@ -263,15 +278,21 @@ export class PersistentCommandService {
 
   async cancelRun(runId: string): Promise<void> {
     const commands = [...this.commands.values()].filter((command) => command.runId === runId);
-    const results = await Promise.allSettled(
-      commands.map((command) => this.stop(command, "Command stopped at the end of its run.")),
+    const results = await Promise.all(
+      commands.map(async (command) => {
+        try {
+          await this.stop(command, "Command stopped at the end of its run.");
+          return { command, error: null };
+        } catch (error) {
+          return { command, error: String(error) };
+        }
+      }),
     );
-    const errors = results.flatMap((result) =>
-      result.status === "rejected" ? [String(result.reason)] : [],
-    );
+    const errors = results.flatMap((result) => (result.error === null ? [] : [result.error]));
+    for (const result of results)
+      if (result.error === null) this.commands.delete(result.command.id);
     if (errors.length)
       throw new Error(`COMMAND_CLEANUP_UNCONFIRMED: ${errors.join("\n").slice(0, 4000)}`);
-    for (const command of commands) this.commands.delete(command.id);
   }
 
   async shutdown(): Promise<void> {
@@ -305,6 +326,7 @@ export class PersistentCommandService {
       exitCode: command.exitCode,
       isError:
         command.failed ||
+        Boolean(command.terminationError) ||
         Boolean(command.cleanupError) ||
         (command.finished && command.exitCode !== 0),
     };
@@ -325,10 +347,9 @@ export class PersistentCommandService {
     clearTimeout(command.timer);
     command.signal.removeEventListener("abort", command.abort);
     try {
-      await command.cleanup?.();
-    } catch (error) {
-      command.cleanupError = String(error);
-      command.failed = true;
+      await this.confirmCleanup(command);
+    } catch {
+      // The retained error keeps the session and writer barrier unconfirmed.
     } finally {
       command.finished = true;
       command.closedAt = Date.now();
@@ -337,20 +358,22 @@ export class PersistentCommandService {
   }
 
   private async stop(command: ManagedCommand, reason: string): Promise<void> {
-    if (command.finished) {
-      if (command.cleanupError) throw new Error(command.cleanupError);
-      return;
-    }
+    if (command.manualStopConfirmed) return;
+    if (command.finished && !this.unconfirmedCleanup(command)) return;
     if (!command.stopping) {
-      command.reason ||= reason;
-      command.stopping = (async () => {
-        let failure: unknown;
-        try {
-          if (!command.processClosed)
-            await (this.dependencies.terminate ?? killTree)(command.child);
-        } catch (error) {
-          failure = error;
+      const attempt = (async () => {
+        if (command.finished) {
+          await this.retryUnconfirmedCleanup(command);
+          return;
         }
+        command.reason ||= reason;
+        let terminationFailure: unknown;
+        if (!command.processClosed || command.terminationError)
+          try {
+            await this.confirmTermination(command);
+          } catch (error) {
+            terminationFailure = error;
+          }
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -362,14 +385,87 @@ export class PersistentCommandService {
               );
             }),
           ]);
+        } catch (error) {
+          throw terminationFailure ?? error;
         } finally {
           if (timeout) clearTimeout(timeout);
         }
-        if (command.cleanupError) throw new Error(command.cleanupError);
-        if (failure && !command.processClosed) throw failure;
+        if (command.manualStopConfirmed) return;
+        const unconfirmed = this.unconfirmedCleanup(command);
+        if (unconfirmed) throw new Error(unconfirmed);
       })();
+      command.stopping = attempt;
+      try {
+        await attempt;
+      } finally {
+        if (command.stopping === attempt) command.stopping = null;
+      }
+      return;
     }
     await command.stopping;
+  }
+
+  private async retryUnconfirmedCleanup(command: ManagedCommand): Promise<void> {
+    let firstFailure: unknown;
+    if (command.terminationError)
+      try {
+        await this.confirmTermination(command);
+      } catch (error) {
+        firstFailure = error;
+      }
+    if (command.cleanupError || (command.cleanup && command.terminationError))
+      try {
+        await this.confirmCleanup(command);
+      } catch (error) {
+        firstFailure ??= error;
+      }
+    if (command.manualStopConfirmed) return;
+    const unconfirmed = this.unconfirmedCleanup(command);
+    if (unconfirmed) throw firstFailure ?? new Error(unconfirmed);
+  }
+
+  private async confirmTermination(command: ManagedCommand): Promise<void> {
+    try {
+      await (this.dependencies.terminate ?? killTree)(command.child);
+      if (!command.manualStopConfirmed) command.terminationError = "";
+    } catch (error) {
+      if (!command.manualStopConfirmed) command.terminationError = String(error);
+      throw error;
+    }
+  }
+
+  private async confirmCleanup(command: ManagedCommand): Promise<void> {
+    try {
+      await command.cleanup?.();
+      if (!command.manualStopConfirmed) {
+        command.cleanupError = "";
+        if (command.cleanup) command.terminationError = "";
+      }
+    } catch (error) {
+      if (!command.manualStopConfirmed) command.cleanupError = String(error);
+      throw error;
+    }
+  }
+
+  private unconfirmedCleanup(command: ManagedCommand): string {
+    return [command.terminationError, command.cleanupError].filter(Boolean).join("\n");
+  }
+
+  private discardCommand(command: ManagedCommand): void {
+    command.manualStopConfirmed = true;
+    command.terminationError = "";
+    command.cleanupError = "";
+    clearTimeout(command.timer);
+    command.signal.removeEventListener("abort", command.abort);
+    command.child.stdin?.destroy();
+    command.child.stdout?.destroy();
+    command.child.stderr?.destroy();
+    command.child.unref();
+    command.processClosed = true;
+    command.finished = true;
+    command.closedAt ||= Date.now();
+    command.resolveClosed();
+    this.commands.delete(command.id);
   }
 
   private async wait(command: ManagedCommand, yieldMs: number): Promise<void> {
@@ -409,6 +505,7 @@ export class PersistentCommandService {
       exitCode: command.exitCode,
       isError:
         command.failed ||
+        Boolean(command.terminationError) ||
         Boolean(command.cleanupError) ||
         (command.finished && command.exitCode !== 0),
       output: [
@@ -424,8 +521,8 @@ export class PersistentCommandService {
             ]
           : []),
         ...(command.reason ? [command.reason] : []),
-        ...(command.cleanupError
-          ? [`COMMAND_CLEANUP_UNCONFIRMED: ${command.cleanupError.slice(0, 2000)}`]
+        ...(this.unconfirmedCleanup(command)
+          ? [`COMMAND_CLEANUP_UNCONFIRMED: ${this.unconfirmedCleanup(command).slice(0, 2000)}`]
           : []),
         ...(!command.finished
           ? [
@@ -440,7 +537,7 @@ export class PersistentCommandService {
     for (const command of this.commands.values())
       if (
         command.finished &&
-        !command.cleanupError &&
+        !this.unconfirmedCleanup(command) &&
         command.readOffset >= command.baseOffset + command.buffer.length &&
         (Date.now() - command.closedAt > CLOSED_RETENTION_MS || this.commands.size >= MAX_SESSIONS)
       )

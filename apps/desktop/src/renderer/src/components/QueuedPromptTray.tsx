@@ -3,6 +3,7 @@ import {
   Check,
   Clock3,
   LoaderCircle,
+  MessageSquareText,
   Paperclip,
   Pencil,
   Play,
@@ -618,6 +619,18 @@ export function QueuedPromptTray({
                         </span>
                       ))}
                     </div>
+                  ) : null}
+                  {item.temporaryInstruction ? (
+                    <span
+                      className="queued-prompt-item__temporary-instruction"
+                      data-testid="queued-prompt-temporary-instruction"
+                      title={tr("临时指令：{0}", [item.temporaryInstruction])}
+                      aria-label={tr("含临时指令：{0}", [item.temporaryInstruction])}
+                      role="note"
+                    >
+                      <MessageSquareText aria-hidden="true" size={11} />
+                      {tr("含临时指令")}
+                    </span>
                   ) : null}
                   {blocker ? (
                     <p

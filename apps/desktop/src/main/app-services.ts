@@ -1,13 +1,16 @@
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatStreamEvent } from "../shared/domain";
+import type { InteractiveTerminalEvent } from "../shared/terminal";
 import { AgentProfileService } from "./agents/agent-profile-service";
 import { CustomCommandService } from "./agents/custom-command-service";
+import { DraftAssistService } from "./agents/draft-assist-service";
 import { LspDiagnosticsService } from "./agents/lsp-diagnostics-service";
 import { ProjectConfigService } from "./agents/project-config-service";
 import { ProjectInstructionService } from "./agents/project-instruction-service";
 import { ProjectToolingService } from "./agents/project-tooling-service";
 import { SessionBuiltinCapabilityService } from "./agents/session-builtin-capability-service";
+import { runAppServicesShutdown } from "./app-services-shutdown";
 import { BrowserService } from "./browser/browser-service";
 import { GitHubService } from "./browser/github-service";
 import { ChatService } from "./chat/chat-service";
@@ -15,6 +18,7 @@ import { QueuedPromptService } from "./chat/queued-prompt-service";
 import { recordRuntimeError } from "./diagnostics/runtime-log";
 import { ExtensionService } from "./extensions/extension-service";
 import { PluginHookService } from "./extensions/plugin-hook-service";
+import { ImageStudioService } from "./image-studio/image-studio-service";
 import { LocalPluginMarketplaceService } from "./marketplace/local-plugin-marketplace-service";
 import { SkillMarketplaceService } from "./marketplace/skill-marketplace-service";
 import { McpService } from "./mcp/mcp-service";
@@ -24,18 +28,23 @@ import { QuestionBroker } from "./permissions/question-broker";
 import { ProviderService } from "./providers/provider-service";
 import { ScheduledTaskService } from "./schedules/scheduled-task-service";
 import { HeadlessServerService } from "./server/headless-server-service";
+import { ProjectNavigationService } from "./sessions/project-navigation-service";
 import { SessionRetentionService } from "./sessions/session-retention-service";
 import { SessionService } from "./sessions/session-service";
 import { openDatabase } from "./storage/database";
 import { Repository } from "./storage/repository";
 import { SecretStore } from "./storage/secret-store";
+import { TerminalService } from "./terminal/terminal-service";
 import { CustomToolService } from "./tools/custom-tool-service";
 import { ToolRegistry } from "./tools/tool-registry";
 import { TrajectoryService } from "./trajectories/trajectory-service";
 import { DockerService } from "./workspace/docker-service";
 import { GitChangeService } from "./workspace/git-change-service";
+import { stopGuardedWorkspaceIo } from "./workspace/guarded-workspace-io";
+import { LocalReviewService } from "./workspace/local-review-service";
 import { NativeSandboxService } from "./workspace/native-sandbox-service";
 import { SnapshotService } from "./workspace/snapshot-service";
+import { WorkspaceSearchService } from "./workspace/workspace-search-service";
 import { WorkspaceService } from "./workspace/workspace-service";
 import { WorktreeService } from "./workspace/worktree-service";
 
@@ -43,9 +52,11 @@ export interface AppServices {
   database: DatabaseSync;
   repository: Repository;
   providerService: ProviderService;
+  draftAssistService: DraftAssistService;
   agentProfileService: AgentProfileService;
   sessionBuiltinCapabilityService: SessionBuiltinCapabilityService;
   customCommandService: CustomCommandService;
+  projectNavigationService: ProjectNavigationService;
   sessionService: SessionService;
   sessionRetentionService: SessionRetentionService;
   extensionService: ExtensionService;
@@ -55,6 +66,7 @@ export interface AppServices {
   githubService: GitHubService;
   mcpService: McpService;
   pluginHookService: PluginHookService;
+  imageStudioService: ImageStudioService;
   projectConfigService: ProjectConfigService;
   projectInstructionService: ProjectInstructionService;
   projectToolingService: ProjectToolingService;
@@ -70,8 +82,11 @@ export interface AppServices {
   customToolService: CustomToolService;
   approvalBroker: ApprovalBroker;
   questionBroker: QuestionBroker;
+  terminalService: TerminalService;
   workspaceService: WorkspaceService;
+  workspaceSearchService: WorkspaceSearchService;
   gitChangeService: GitChangeService;
+  localReviewService: LocalReviewService;
   dispose(): Promise<void>;
 }
 
@@ -82,6 +97,7 @@ export function createAppServices(input: {
   userDataDirectory: string;
   appVersion: string;
   emit: (event: ChatStreamEvent) => void;
+  emitTerminal?: (ownerId: number, event: InteractiveTerminalEvent) => void;
 }): AppServices {
   const database = openDatabase(input.databasePath);
   const repository = new Repository(database);
@@ -129,6 +145,7 @@ export function createAppServices(input: {
   };
   const secretStore = new SecretStore(database);
   const providerService = new ProviderService(repository, secretStore);
+  const draftAssistService = new DraftAssistService(repository, providerService);
   const agentProfileService = new AgentProfileService(repository);
   const customCommandService = new CustomCommandService(repository);
   let chatService: ChatService | null = null;
@@ -138,7 +155,15 @@ export function createAppServices(input: {
     (sessionId) => chatService?.isSessionBusy(sessionId) ?? false,
     (session) => chatService?.availableBuiltinPluginToolNames(session) ?? new Set(),
   );
-  const sessionService = new SessionService(repository, sessionBuiltinCapabilityService);
+  const worktreeService = new WorktreeService(join(input.userDataDirectory, "worktrees"));
+  const projectNavigationService = new ProjectNavigationService(repository, (sessionId) =>
+    worktreeService.get(sessionId),
+  );
+  const sessionService = new SessionService(
+    repository,
+    sessionBuiltinCapabilityService,
+    projectNavigationService,
+  );
   const extensionService = new ExtensionService(repository, input.extensionDirectory);
   const marketplaceService = new SkillMarketplaceService(
     join(input.userDataDirectory, "marketplace"),
@@ -157,6 +182,11 @@ export function createAppServices(input: {
   const githubService = new GitHubService(repository, secretStore);
   const mcpService = new McpService(repository, secretStore, input.appVersion);
   const pluginHookService = new PluginHookService(repository, mcpService);
+  const imageStudioService = new ImageStudioService(
+    repository,
+    providerService,
+    input.userDataDirectory,
+  );
   const projectConfigService = new ProjectConfigService(input.userDataDirectory);
   const projectInstructionService = new ProjectInstructionService(
     input.userDataDirectory,
@@ -170,7 +200,11 @@ export function createAppServices(input: {
     projectConfigService,
   );
   const snapshotService = new SnapshotService(join(input.userDataDirectory, "snapshots"));
-  const worktreeService = new WorktreeService(join(input.userDataDirectory, "worktrees"));
+  const terminalService = new TerminalService({
+    sessions: repository,
+    worktreePath: (sessionId) => worktreeService.get(sessionId),
+    ...(input.emitTerminal ? { emit: input.emitTerminal } : {}),
+  });
   const dockerService = new DockerService();
   const approvalBroker = new ApprovalBroker((state) => emit({ type: "approval_state", state }));
   const questionBroker = new QuestionBroker(
@@ -187,7 +221,13 @@ export function createAppServices(input: {
   );
   const customToolService = new CustomToolService(repository);
   const workspaceService = new WorkspaceService();
+  const workspaceSearchService = new WorkspaceSearchService((sessionId) =>
+    worktreeService.get(sessionId),
+  );
   const gitChangeService = new GitChangeService(join(input.userDataDirectory, "git-undo"));
+  const localReviewService = new LocalReviewService(repository, (sessionId) =>
+    worktreeService.get(sessionId),
+  );
   const chatServiceInstance = new ChatService({
     repository,
     providerService,
@@ -217,6 +257,17 @@ export function createAppServices(input: {
     emit,
     onRunSettled: (input) => queuedPromptService?.runSettled(input),
     onRunStopped: (sessionId) => queuedPromptService?.pause(sessionId),
+    beforeSessionRemoved: async (sessionId) => {
+      const cleanup = await Promise.allSettled([
+        terminalService.disposeSession(sessionId),
+        draftAssistService.disposeSession(sessionId),
+      ]);
+      const failures = cleanup.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      if (failures.length) throw new AggregateError(failures, "会话资源清理未确认，请重试。");
+    },
+    onSessionRemoved: (sessionId) => projectNavigationService.forget(sessionId),
     onDelegatedSubagentRunStarted: ({ sessionId, runId }) =>
       queuedPromptService?.runStarted(sessionId, runId),
   });
@@ -231,6 +282,7 @@ export function createAppServices(input: {
   const sessionRetentionService = new SessionRetentionService(repository, chatServiceInstance);
   const headlessService = new HeadlessServerService(
     repository,
+    sessionService,
     chatServiceInstance,
     agentProfileService,
     customCommandService,
@@ -247,9 +299,11 @@ export function createAppServices(input: {
     database,
     repository,
     providerService,
+    draftAssistService,
     agentProfileService,
     sessionBuiltinCapabilityService,
     customCommandService,
+    projectNavigationService,
     sessionService,
     sessionRetentionService,
     extensionService,
@@ -259,6 +313,7 @@ export function createAppServices(input: {
     githubService,
     mcpService,
     pluginHookService,
+    imageStudioService,
     lspDiagnosticsService,
     projectConfigService,
     projectInstructionService,
@@ -274,24 +329,31 @@ export function createAppServices(input: {
     customToolService,
     approvalBroker,
     questionBroker,
+    terminalService,
     workspaceService,
+    workspaceSearchService,
     gitChangeService,
+    localReviewService,
     dispose: async () => {
-      queuedPromptServiceInstance.dispose();
-      await sessionRetentionService.dispose();
-      const stopSchedules = scheduledTaskService.dispose();
-      const stopServer = headlessServerService?.stop();
-      const stopChat = chatServiceInstance.shutdown();
-      browserService.dispose();
-      mcpService.dispose();
-      await Promise.all([stopSchedules, stopServer, stopChat]);
-      try {
-        const cleanup = await localPluginMarketplaceService.cleanupStaleVersions();
-        if (cleanup.errors.length) recordRuntimeError("plugins.cleanup", cleanup.errors.join("\n"));
-      } catch (cause) {
-        recordRuntimeError("plugins.cleanup", cause);
-      }
-      database.close();
+      await runAppServicesShutdown({
+        steps: [
+          { name: "terminals", run: () => terminalService.dispose() },
+          { name: "draft-assist", run: () => draftAssistService.dispose() },
+          { name: "image-studio", run: () => imageStudioService.dispose() },
+          { name: "project-navigation", run: () => projectNavigationService.dispose() },
+          { name: "queued-prompts", run: () => queuedPromptServiceInstance.dispose() },
+          { name: "session-retention", run: () => sessionRetentionService.dispose() },
+          { name: "schedules", run: () => scheduledTaskService.dispose() },
+          { name: "server", run: () => headlessServerService?.stop() },
+          { name: "chat", run: () => chatServiceInstance.shutdown() },
+          { name: "browser", run: () => browserService.dispose() },
+          { name: "mcp", run: () => mcpService.dispose() },
+        ],
+        stopWorkspaceIo: stopGuardedWorkspaceIo,
+        cleanupPlugins: () => localPluginMarketplaceService.cleanupStaleVersions(),
+        closeDatabase: () => database.close(),
+        report: (scope, error) => recordRuntimeError(scope, error),
+      });
     },
   };
 }

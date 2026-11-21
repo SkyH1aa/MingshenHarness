@@ -15,6 +15,7 @@ import { ChatView } from "./components/ChatView";
 import { setLocale, tr, useLocale } from "./i18n/index";
 import { runtimeText } from "./i18n/runtime";
 import type { LiveRun } from "./lib/chat-types";
+import { composerDrafts } from "./lib/use-composer-draft";
 
 function errorText(cause: unknown): string {
   return runtimeText(cause instanceof Error ? cause.message : String(cause));
@@ -72,6 +73,7 @@ export function QuickChatApp() {
   const currentSessionId = useRef<string | null>(null);
   const snapshotGeneration = useRef(0);
   const actionSequence = useRef(0);
+  const runEventVersion = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -98,6 +100,7 @@ export function QuickChatApp() {
 
   const applySnapshot = useCallback((next: QuickChatState, focus = false) => {
     snapshotGeneration.current += 1;
+    runEventVersion.current += 1;
     const changed = currentSessionId.current !== (next.session?.id ?? null);
     currentSessionId.current = next.session?.id ?? null;
     setSnapshot(next);
@@ -156,6 +159,9 @@ export function QuickChatApp() {
                 : null;
       if (eventSessionId !== sessionId) return;
       switch (event.type) {
+        case "composer_draft_consumed":
+          void composerDrafts.accepted(sessionId, event.revision).catch(() => undefined);
+          return;
         case "session_updated":
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current
@@ -164,6 +170,7 @@ export function QuickChatApp() {
           );
           return;
         case "session_removed":
+          runEventVersion.current += 1;
           currentSessionId.current = null;
           setSnapshot((current) =>
             current ? { ...current, session: null, messages: [] } : current,
@@ -173,6 +180,7 @@ export function QuickChatApp() {
           setRunState(null);
           return;
         case "run_started": {
+          runEventVersion.current += 1;
           setError(null);
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current?.session
@@ -221,7 +229,7 @@ export function QuickChatApp() {
           );
           if (event.type === "assistant_message")
             setLive((current) =>
-              currentSessionId.current === sessionId && current
+              currentSessionId.current === sessionId && current?.runId === event.runId
                 ? { ...current, text: "", reasoning: "" }
                 : current,
             );
@@ -239,6 +247,7 @@ export function QuickChatApp() {
         case "run_completed":
         case "run_interrupted":
         case "run_failed":
+          runEventVersion.current += 1;
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current?.session
               ? {
@@ -273,9 +282,10 @@ export function QuickChatApp() {
               : current,
           );
           if (event.type === "run_failed") setError(runtimeText(event.error));
-          setLive(null);
+          setLive((current) => (current?.runId === event.runId ? null : current));
           return;
         case "conversation_rewound":
+          runEventVersion.current += 1;
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current
               ? { ...current, session: event.session }
@@ -358,13 +368,14 @@ export function QuickChatApp() {
     async (text: string, attachments: ChatAttachmentInput[], draftRevision: string) => {
       if (!session) throw new Error(tr("当前对话不可用。"));
       setError(null);
+      const version = runEventVersion.current;
       const result = await window.mingshen.sendChat({
         sessionId: session.id,
         text,
         attachments,
         draftRevision,
       });
-      if (currentSessionId.current !== session.id) return;
+      if (currentSessionId.current !== session.id || runEventVersion.current !== version) return;
       setSnapshot((current) =>
         currentSessionId.current === session.id && current?.session
           ? { ...current, session: { ...current.session, status: "running" } }
@@ -380,12 +391,13 @@ export function QuickChatApp() {
     async (messageId: string, text: string) => {
       if (!session) throw new Error(tr("当前对话不可用。"));
       setError(null);
+      const version = runEventVersion.current;
       const result = await window.mingshen.rewriteAndSendChat({
         sessionId: session.id,
         messageId,
         text,
       });
-      if (currentSessionId.current !== session.id) return;
+      if (currentSessionId.current !== session.id || runEventVersion.current !== version) return;
       setSnapshot((current) =>
         currentSessionId.current === session.id && current?.session
           ? { ...current, session: { ...current.session, status: "running" } }
@@ -400,8 +412,9 @@ export function QuickChatApp() {
   const stop = useCallback(async () => {
     if (!session) return;
     const sessionId = session.id;
+    const version = runEventVersion.current;
     await window.mingshen.stopChat(sessionId);
-    if (currentSessionId.current !== sessionId) return;
+    if (currentSessionId.current !== sessionId || runEventVersion.current !== version) return;
     setLive(null);
     setSnapshot((current) =>
       currentSessionId.current === sessionId && current?.session
@@ -416,8 +429,10 @@ export function QuickChatApp() {
   }, [session]);
 
   const compact = useCallback(async (sessionId: string) => {
+    const version = runEventVersion.current;
     const result = await window.mingshen.compactChat(sessionId);
-    if (currentSessionId.current !== sessionId) return result;
+    if (currentSessionId.current !== sessionId || runEventVersion.current !== version)
+      return result;
     setSnapshot((current) =>
       currentSessionId.current === sessionId && current?.session
         ? { ...current, session: { ...current.session, status: "running" } }

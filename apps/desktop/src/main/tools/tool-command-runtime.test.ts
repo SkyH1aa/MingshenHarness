@@ -121,7 +121,14 @@ describe("subagent command memory boundaries", () => {
         root,
         "Write-Output hello",
         context.signal,
-        expect.objectContaining({ readOnly: true }),
+        expect.objectContaining({
+          readOnly: true,
+          scope: {
+            sessionId: context.session.id,
+            runId: context.runId,
+            toolCallId: context.toolCallId,
+          },
+        }),
       );
       expect(spawn).not.toHaveBeenCalled();
       for (const name of [".harness-memory", ".harness-tencent-memory"]) {
@@ -133,7 +140,7 @@ describe("subagent command memory boundaries", () => {
   it("keeps approval-mode main commands writable in the native sandbox", async () => {
     const { root, context } = await fixture("host", [], false);
     context.session.permissionMode = "request_approval";
-    const run = vi.fn(async () => ({ output: "hello", exitCode: 0 }));
+    const run = vi.fn(async (..._args: unknown[]) => ({ output: "hello", exitCode: 0 }));
     const result = await new ToolRegistry({ run } as unknown as NativeSandboxService).execute(
       "run_command",
       { command: "Write-Output hello" },
@@ -145,8 +152,15 @@ describe("subagent command memory boundaries", () => {
       root,
       "Write-Output hello",
       context.signal,
-      expect.not.objectContaining({ readOnly: true }),
+      expect.objectContaining({
+        scope: {
+          sessionId: context.session.id,
+          runId: context.runId,
+          toolCallId: context.toolCallId,
+        },
+      }),
     );
+    expect(run.mock.calls[0]?.[3]).not.toHaveProperty("readOnly", true);
   });
 
   it("keeps main Docker workspaces writable", async () => {
@@ -185,11 +199,21 @@ describe("subagent command memory boundaries", () => {
         path: join(root, "ordinary.txt"),
         changeType: "created",
       });
-      expect(fileOperation).toHaveBeenLastCalledWith(
+      const expectedFileOperationArgs = [
         root,
         { operation: "write", path: "ordinary.txt", content: "managed-write" },
         context.signal,
-      );
+        ...(executionMode === "host"
+          ? [
+              {
+                sessionId: context.session.id,
+                runId: context.runId,
+                toolCallId: context.toolCallId,
+              },
+            ]
+          : []),
+      ];
+      expect(fileOperation).toHaveBeenLastCalledWith(...expectedFileOperationArgs);
       const calls = fileOperation.mock.calls.length;
       for (const name of [".harness-memory", ".harness-tencent-memory"]) {
         const blocked = await registry.execute(

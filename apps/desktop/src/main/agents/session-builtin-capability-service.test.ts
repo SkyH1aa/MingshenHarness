@@ -9,6 +9,7 @@ import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import { ToolRegistry } from "../tools/tool-registry";
 import { builtinPluginDiscoveryRecords } from "./builtin-plugins";
+import * as domainSkills from "./domain-skills";
 import { builtinCapabilityDiscoveryRecords, domainSkillCatalog } from "./domain-skills";
 import { SessionBuiltinCapabilityService } from "./session-builtin-capability-service";
 
@@ -339,7 +340,7 @@ describe("session built-in capability selection", () => {
     const code = createSession("code");
     const workCapabilities = await service.list(work.id);
     const codeCapabilities = await service.list(code.id);
-    expect(workCapabilities.filter((item) => item.type === "skill")).toHaveLength(140);
+    expect(workCapabilities.filter((item) => item.type === "skill")).toHaveLength(114);
     expect(codeCapabilities.filter((item) => item.type === "skill")).toHaveLength(9);
     for (const capabilities of [workCapabilities, codeCapabilities]) {
       expect(capabilities.filter((item) => item.type === "plugin")).toEqual([
@@ -446,6 +447,346 @@ describe("session built-in capability selection", () => {
     await expect(service.set(parent.id, "builtin:work-ppt-master", true)).rejects.toThrow(
       "会话或其子任务正在运行",
     );
+  });
+
+  it("maps stored old selections to the latest version without losing stricter permission rules", async () => {
+    const work = createSession("work");
+    const oldId = "builtin:work-source-pdf-0-2-1-pdf-viewer-430308a5";
+    const otherOldId = "builtin:work-source-pdf-0-2-2-pdf-viewer-7552e6cc";
+    const latestId = "builtin:work-source-pdf-0-2-3-pdf-viewer-7552e6cc";
+    const key = sessionBuiltinCapabilitiesSettingKey(work.id);
+    repository.setSetting(key, [oldId, otherOldId, "builtin:work-ppt-master"]);
+
+    expect((await service.list(work.id)).find((item) => item.id === latestId)?.selected).toBe(true);
+    expect((await service.list(work.id)).some((item) => item.id === oldId)).toBe(false);
+    expect(await service.selectedIdsForPrompt(work)).toContain(latestId);
+    expect(await service.legacyIdsForCapability(work, latestId)).toEqual([oldId, otherOldId]);
+    await service.set(work.id, latestId, true);
+    expect(repository.getSetting(key)).toEqual([oldId, otherOldId, "builtin:work-ppt-master"]);
+
+    let profile = {
+      permissions: {
+        use_skill: "allow",
+        [`use_skill:${oldId}`]: "deny",
+        [`use_skill:${otherOldId}`]: "ask",
+        [`use_skill:${latestId}`]: "allow",
+      },
+      readOnly: false,
+      toolAllowlist: ["use_skill"],
+    } as unknown as AgentProfileView;
+    vi.spyOn(repository, "getAgentProfile").mockImplementation(() => profile);
+    const chat = new ChatService({
+      repository,
+      extensionService: {} as ExtensionService,
+      promptDirectory,
+      sessionBuiltinCapabilityService: service,
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      buildPinnedBuiltinSkillContext: (
+        session: SessionView,
+        profile: AgentProfileView,
+        ids: string[],
+      ) => Promise<string>;
+      requestApproval: () => Promise<{ decision: "deny" }>;
+      executeOwnedToolCall: (
+        input: unknown,
+        release: () => void,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    const requestApproval = vi
+      .spyOn(internal, "requestApproval")
+      .mockResolvedValue({ decision: "deny" });
+    const execute = () =>
+      internal.executeOwnedToolCall(
+        {
+          session: work,
+          runId: "run",
+          signal: new AbortController().signal,
+          toolCall: {
+            name: "use_skill",
+            arguments: JSON.stringify({ name: latestId }),
+            callId: "call",
+            index: 0,
+          },
+        },
+        vi.fn(),
+      );
+
+    for (const action of ["deny", "ask"] as const) {
+      profile = {
+        ...profile,
+        permissions: {
+          use_skill: "allow",
+          [`use_skill:${oldId}`]: action,
+          [`use_skill:${otherOldId}`]: "ask",
+          [`use_skill:${latestId}`]: "allow",
+        },
+      };
+      const pinned = await internal.buildPinnedBuiltinSkillContext(work, profile, [latestId]);
+      expect(pinned).toContain(`Deferred skill id: ${latestId}`);
+      expect(pinned).not.toContain(`BEGIN PINNED SKILL ${latestId}`);
+      const result = await execute();
+      expect(result.isError).toBe(true);
+      expect(requestApproval).toHaveBeenCalledTimes(action === "ask" ? 1 : 0);
+    }
+
+    repository.updateSession(work.id, { agentMode: "code" });
+    const code = repository.getSession(work.id) as SessionView;
+    expect(await service.selectedIdsForPrompt(code)).not.toContain(latestId);
+    expect(repository.getSetting(key)).toEqual([oldId, otherOldId, "builtin:work-ppt-master"]);
+    repository.updateSession(work.id, { agentMode: "work" });
+    await service.set(work.id, latestId, false);
+    expect(repository.getSetting(key)).toEqual(["builtin:work-ppt-master"]);
+    expect(await service.legacyIdsForCapability(work, latestId)).toEqual([oldId, otherOldId]);
+    for (const selection of ["unselected", "reselected"] as const) {
+      if (selection === "reselected") await service.set(work.id, latestId, true);
+      for (const action of ["deny", "ask"] as const) {
+        profile = {
+          ...profile,
+          permissions: {
+            use_skill: "allow",
+            [`use_skill:${oldId}`]: action,
+            [`use_skill:${latestId}`]: "allow",
+          },
+        };
+        requestApproval.mockClear();
+        const pinned = await internal.buildPinnedBuiltinSkillContext(work, profile, [latestId]);
+        expect(pinned).toContain(`Deferred skill id: ${latestId}`);
+        expect(pinned).not.toContain(`BEGIN PINNED SKILL ${latestId}`);
+        expect((await execute()).isError).toBe(true);
+        expect(requestApproval).toHaveBeenCalledTimes(action === "ask" ? 1 : 0);
+      }
+    }
+  });
+
+  it("applies old scoped restrictions to an unpinned latest version without inheriting allows or other variants", async () => {
+    const work = createSession("work");
+    const oldId = "builtin:work-source-pdf-0-2-1-pdf-viewer-430308a5";
+    const latestId = "builtin:work-source-pdf-0-2-3-pdf-viewer-7552e6cc";
+    const otherVariant = "builtin:work-source-pdf-0-2-1-pdf-0016a97a";
+    const chat = new ChatService({
+      repository,
+      extensionService: {} as ExtensionService,
+      promptDirectory,
+      sessionBuiltinCapabilityService: service,
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      builtinSkillPermission: (
+        session: SessionView,
+        profile: AgentProfileView,
+        id: string,
+      ) => Promise<"allow" | "ask" | "deny" | null>;
+    };
+    const resolvePermission = (permissions: AgentProfileView["permissions"]) =>
+      internal.builtinSkillPermission(work, { permissions } as AgentProfileView, latestId);
+
+    expect(await service.selectedIdsForPrompt(work)).toEqual([]);
+    const resolveLegacy = vi.spyOn(service, "legacyIdsForCapability");
+    expect(await resolvePermission({ read: "allow" })).toBe("allow");
+    expect(resolveLegacy).not.toHaveBeenCalled();
+    expect(await resolvePermission({ [`use_skill:${oldId}`]: "deny" })).toBe("deny");
+    expect(await resolvePermission({ [`use_skill:${oldId}`]: "ask" })).toBe("ask");
+    expect(await resolvePermission({ [`use_skill:${oldId}`]: "allow" })).toBeNull();
+    expect(await resolvePermission({ [`use_skill:${otherVariant}`]: "deny" })).toBeNull();
+    expect(
+      await resolvePermission({
+        "use_skill:builtin:work-source-pdf-0-2-1-pdf-viewer-*": "deny",
+        [`use_skill:${latestId}`]: "allow",
+      }),
+    ).toBe("deny");
+    expect(
+      await resolvePermission({
+        read: "allow",
+        [`read_file:${oldId}`]: "ask",
+        [`use_skill:${latestId}`]: "allow",
+      }),
+    ).toBe("ask");
+    expect(await resolvePermission({ read: "ask", [`use_skill:${latestId}`]: "allow" })).toBe(
+      "allow",
+    );
+    expect(
+      await resolvePermission({
+        "use_skill:builtin:work-source-*": "deny",
+        [`use_skill:${latestId}`]: "allow",
+      }),
+    ).toBe("allow");
+    expect(
+      await resolvePermission({
+        use_skill: "allow",
+        [`read_file:${oldId}`]: "deny",
+        [`use_skill:${latestId}`]: "allow",
+      }),
+    ).toBe("allow");
+    expect(
+      await resolvePermission({
+        "use_skill:builtin:work-source-*": "deny",
+        [`read_file:${oldId}`]: "ask",
+        [`use_skill:${latestId}`]: "allow",
+      }),
+    ).toBe("allow");
+  });
+
+  it("requires approval for an old scoped rule before reading an unpinned latest skill", async () => {
+    const work = createSession("work");
+    const oldId = "builtin:work-source-pdf-0-2-1-pdf-viewer-430308a5";
+    const latestId = "builtin:work-source-pdf-0-2-3-pdf-viewer-7552e6cc";
+    const profile = {
+      permissions: { [`use_skill:${oldId}`]: "ask", [`use_skill:${latestId}`]: "allow" },
+      readOnly: false,
+      toolAllowlist: ["use_skill"],
+    } as unknown as AgentProfileView;
+    vi.spyOn(repository, "getAgentProfile").mockReturnValue(profile);
+    const chat = new ChatService({
+      repository,
+      extensionService: {} as ExtensionService,
+      promptDirectory,
+      sessionBuiltinCapabilityService: service,
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      requestApproval: () => Promise<{ approvalId: string; decision: "allow_once" }>;
+      executeOwnedToolCall: (
+        input: unknown,
+        release: () => void,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    const approval = vi
+      .spyOn(internal, "requestApproval")
+      .mockResolvedValue({ approvalId: "approval", decision: "allow_once" });
+    const result = await internal.executeOwnedToolCall(
+      {
+        session: work,
+        runId: "run",
+        signal: new AbortController().signal,
+        toolCall: {
+          name: "use_skill",
+          arguments: JSON.stringify({ name: latestId }),
+          callId: "call",
+          index: 0,
+        },
+      },
+      vi.fn(),
+    );
+    expect(await service.selectedIdsForPrompt(work)).toEqual([]);
+    expect(approval).toHaveBeenCalledOnce();
+    expect(result.isError).toBe(false);
+    expect(result.output).toContain(`Built-in skill: ${latestId}`);
+  });
+
+  it("counts equivalent versions once, retains aliases across copies and modes, and removes them together", async () => {
+    const work = createSession("work");
+    const key = sessionBuiltinCapabilitiesSettingKey(work.id);
+    const catalog = JSON.parse(
+      await readFile(resolve(promptDirectory, "skills/work-sources/catalog.json"), "utf8"),
+    ) as { entries: Array<{ id: string; version: string | null; sourcePath: string }> };
+    const paths = [
+      /^documents-1\/[^/]+\/skills\/docx\/SKILL\.md$/,
+      /^spreadsheets\/[^/]+\/skills\/xlsx\/SKILL\.md$/,
+      /^presentations\/[^/]+\/skills\/pptx\/SKILL\.md$/,
+    ];
+    const groups = paths.map((pattern) =>
+      catalog.entries.filter((item) => pattern.test(item.sourcePath)),
+    );
+    expect(groups.map((group) => group.length)).toEqual([5, 5, 5]);
+    const groupIds = groups.flatMap((group) => group.map((item) => item.id));
+    const latest = groups.map((group) => group.find((item) => item.version === "0.2.2")?.id);
+    expect(latest.every(Boolean)).toBe(true);
+    const capabilities = await service.list(work.id);
+    const available = capabilities.map((item) => item.id).filter((id) => !latest.includes(id));
+    const initial = [...groupIds, ...available.slice(0, 17)];
+    expect(initial).toHaveLength(32);
+    expect(
+      new Set(await domainSkills.canonicalBuiltinCapabilityIds(promptDirectory, initial)).size,
+    ).toBe(20);
+    repository.setSetting(key, initial);
+    expect((await service.list(work.id)).filter((item) => item.selected)).toHaveLength(20);
+
+    for (const id of available.slice(17, 29)) await service.set(work.id, id, true);
+    const expanded = repository.getSetting(key) as string[];
+    expect(expanded).toHaveLength(44);
+    expect(
+      new Set(await domainSkills.canonicalBuiltinCapabilityIds(promptDirectory, expanded)).size,
+    ).toBe(32);
+    const extra = available[29];
+    expect(extra).toBeDefined();
+    await expect(service.set(work.id, extra as string, true)).rejects.toThrow(
+      "BUILTIN_CAPABILITY_LIMIT",
+    );
+
+    const child = createSession("work", work.id);
+    const fork = repository.forkSession(work.id);
+    const copied = createSession("work");
+    service.copy(work.id, copied.id);
+    for (const session of [child, fork, copied]) {
+      expect(repository.getSetting(sessionBuiltinCapabilitiesSettingKey(session.id))).toEqual(
+        expanded,
+      );
+      expect((await service.list(session.id)).filter((item) => item.selected)).toHaveLength(32);
+    }
+
+    repository.updateSession(work.id, { agentMode: "code" });
+    expect(
+      await service.legacyIdsForCapability(
+        repository.getSession(work.id) as SessionView,
+        latest[0] as string,
+      ),
+    ).toEqual([]);
+    await expect(service.set(work.id, "builtin:code-debugging", true)).rejects.toThrow(
+      "BUILTIN_CAPABILITY_LIMIT",
+    );
+    expect(repository.getSetting(key)).toEqual(expanded);
+    repository.updateSession(work.id, { agentMode: "work" });
+    await service.set(work.id, latest[0] as string, false);
+    const afterRemoval = repository.getSetting(key) as string[];
+    expect(afterRemoval.some((id) => groups[0]?.some((item) => item.id === id))).toBe(false);
+    await service.set(work.id, latest[0] as string, true);
+    expect(repository.getSetting(key)).toEqual([...afterRemoval, latest[0]]);
+    expect(await service.legacyIdsForCapability(work, latest[0] as string)).toEqual(
+      groups[0]?.filter((item) => item.id !== latest[0]).map((item) => item.id),
+    );
+  });
+
+  it("rechecks session mode and concurrent selection changes after resolving aliases", async () => {
+    const work = createSession("work");
+    const key = sessionBuiltinCapabilitiesSettingKey(work.id);
+    const original = domainSkills.canonicalBuiltinCapabilityIds;
+    const spy = vi.spyOn(domainSkills, "canonicalBuiltinCapabilityIds");
+    try {
+      spy.mockImplementationOnce(async (directory, ids) => {
+        repository.setSetting(key, ["builtin:work-asd-ste100"]);
+        return original(directory, ids);
+      });
+      await service.set(work.id, "builtin:work-ppt-master", true);
+      expect(repository.getSetting(key)).toEqual([
+        "builtin:work-asd-ste100",
+        "builtin:work-ppt-master",
+      ]);
+
+      spy.mockImplementationOnce(async (directory, ids) => {
+        repository.updateSession(work.id, { agentMode: "code" });
+        return original(directory, ids);
+      });
+      await expect(service.set(work.id, "builtin:work-pdf", true)).rejects.toThrow(
+        "BUILTIN_CAPABILITY_STATE_CHANGED",
+      );
+      expect(repository.getSetting(key)).toEqual([
+        "builtin:work-asd-ste100",
+        "builtin:work-ppt-master",
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fails closed instead of silently truncating an oversized stored selection", async () => {
+    const work = createSession("work");
+    const key = sessionBuiltinCapabilitiesSettingKey(work.id);
+    const raw = Array.from(
+      { length: domainSkills.MAX_WORK_SOURCE_CATALOG_ENTRIES + 33 },
+      (_, index) => `builtin:fixture-${index}`,
+    );
+    repository.setSetting(key, raw);
+    await expect(service.list(work.id)).rejects.toThrow("BUILTIN_CAPABILITY_STORAGE_INVALID");
+    expect(repository.getSetting(key)).toEqual(raw);
   });
 
   it("enforces the selection budget and cleans the setting with the session", async () => {

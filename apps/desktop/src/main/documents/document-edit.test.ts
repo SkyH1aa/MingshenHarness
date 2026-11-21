@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { authorOfficeDocument, renderDocumentHtml } from "./document-author";
 import { documentAuthoringSchema } from "./document-authoring-schema";
 import { prepareDocxEdit, readDocxStructure } from "./document-edit";
+import { embedWorkbookInDocx, xlsxWithExternalLinkFixture } from "./office-package-test-fixtures";
 
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -226,6 +227,54 @@ describe("localized DOCX editing", () => {
     ).toBe(true);
     expect(part(output, "word/footnotes.xml")).toContain("KEEP_NOTE");
     expect(part(output, "word/footnotes.xml")).toContain("NEW_NOTE");
+  });
+
+  it("rejects external-link workbooks before preparing an old DOCX edit", async () => {
+    const source = embedWorkbookInDocx(await fixture(), xlsxWithExternalLinkFixture());
+    const spec = documentAuthoringSchema.parse(
+      editSpec(source, [
+        { type: "replace_text", paragraph: 2, old_text: "old draft", new_text: "new draft" },
+      ]),
+    );
+    await expect(prepareDocxEdit(source, required(spec.edit))).rejects.toThrow(
+      "OFFICE_UNSUPPORTED_PART",
+    );
+  });
+
+  it("rejects external-link workbooks through authorOfficeDocument edit", async () => {
+    const source = embedWorkbookInDocx(await fixture(), xlsxWithExternalLinkFixture());
+    await expect(
+      generate(
+        editSpec(source, [
+          { type: "replace_text", paragraph: 2, old_text: "old draft", new_text: "new draft" },
+        ]),
+        source,
+      ),
+    ).rejects.toThrow("OFFICE_UNSUPPORTED_PART");
+  });
+
+  it.each([
+    ["missing package relationship", { includeRelationship: false }, "OFFICE_PACKAGE_INVALID"],
+    ["missing content type", { includeContentType: false }, "OFFICE_PACKAGE_INVALID"],
+    ["duplicate package relationship", { duplicateRelationship: true }, "OFFICE_PACKAGE_DUPLICATE"],
+    [
+      "missing relationship target",
+      { relationshipTarget: "embeddings/missing.xlsx" },
+      "OFFICE_PACKAGE_INVALID",
+    ],
+    [
+      "macro-enabled content type",
+      {
+        contentType: "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+      },
+      "Signed or macro-enabled templates",
+    ],
+  ])("rejects embedded XLSX with %s", async (_label, options, error) => {
+    const source = embedWorkbookInDocx(await fixture(), xlsxWithExternalLinkFixture(), options);
+    const spec = documentAuthoringSchema.parse(
+      editSpec(source, [{ type: "format_paragraph", paragraph: 1, layout: { align: "left" } }]),
+    );
+    await expect(prepareDocxEdit(source, required(spec.edit))).rejects.toThrow(error);
   });
 
   it("rejects ambiguous repeated text", async () => {

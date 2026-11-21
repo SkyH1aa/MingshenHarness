@@ -23,6 +23,7 @@ export interface SessionPage {
 }
 export interface SessionCatalogDelta {
   revision: number;
+  /** When true, reload the visible page and active Chat list before accepting this revision. */
   reset: boolean;
   sessions: SessionView[];
   removed: string[];

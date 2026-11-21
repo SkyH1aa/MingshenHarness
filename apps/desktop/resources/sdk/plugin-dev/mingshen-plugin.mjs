@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
+  rename,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -20,6 +23,8 @@ const MAX_FILES = 20_000;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_DECLARATION_BYTES = 1024 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
+const MARKETPLACE_LOCK_TIMEOUT_MS = 15_000;
+const MARKETPLACE_LOCK_STALE_MS = 60_000;
 const PLUGIN_NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const COMMAND_NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -38,6 +43,7 @@ const ROOT_TOKENS = [
 ];
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".cache", "dist", "out"]);
 const UNRESOLVED_PLACEHOLDER = /\bTODO\b|\bFIXME\b|<your[-_ ][^>]+>|YOUR_API_KEY/iu;
+const marketplaceQueues = new Map();
 
 function issue(code, message, path) {
   return path ? { code, message, path } : { code, message };
@@ -58,6 +64,82 @@ function containsUnresolvedPlaceholder(value) {
 function pathInside(root, target) {
   const local = relative(root, target);
   return Boolean(local) && local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+function enqueueMarketplaceWrite(key, task) {
+  const previous = marketplaceQueues.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(task);
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  marketplaceQueues.set(key, tail);
+  return current.finally(() => {
+    if (marketplaceQueues.get(key) === tail) marketplaceQueues.delete(key);
+  });
+}
+
+async function acquireMarketplaceFileLock(lockPath) {
+  const deadline = Date.now() + MARKETPLACE_LOCK_TIMEOUT_MS;
+  const owner = JSON.stringify({
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    token: randomUUID(),
+  });
+  while (true) {
+    let handle = null;
+    try {
+      handle = await open(lockPath, "wx");
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    if (handle) {
+      try {
+        await handle.writeFile(owner, "utf8");
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await rm(lockPath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        await handle.close().catch(() => undefined);
+        const current = await readFile(lockPath, "utf8").catch(() => "");
+        if (current === owner) await rm(lockPath, { force: true }).catch(() => undefined);
+      };
+    }
+
+    const metadata = await stat(lockPath).catch(() => null);
+    if (metadata && Date.now() - metadata.mtimeMs > MARKETPLACE_LOCK_STALE_MS) {
+      throw new Error(
+        `Marketplace write lock appears stale after 60 seconds: ${lockPath}. ` +
+          "Confirm no marketplace writer is active, then delete only this lock file and retry. " +
+          "The marketplace catalog was not modified.",
+      );
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for the marketplace write lock: ${lockPath}`);
+    }
+    await sleep(20 + Math.floor(Math.random() * 30));
+  }
+}
+
+function withMarketplaceWriteLock(root, task) {
+  const key = join(root, MARKETPLACE_FILE);
+  return enqueueMarketplaceWrite(key, async () => {
+    const release = await acquireMarketplaceFileLock(`${key}.lock`);
+    try {
+      return await task();
+    } finally {
+      await release();
+    }
+  });
 }
 
 async function canonicalRoot(value, label) {
@@ -684,46 +766,81 @@ export async function upsertMarketplace(marketRoot, marketName, pluginPaths) {
     return created;
   });
   const catalogPath = join(root, MARKETPLACE_FILE);
-  let catalog = { name: marketName, plugins: [] };
-  const existing = await readFile(catalogPath, "utf8").catch(() => null);
-  if (existing) {
-    const parsed = JSON.parse(existing);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("Existing marketplace.json must contain an object.");
-    catalog = parsed;
-  }
-  if (catalog.name !== undefined && catalog.name !== marketName)
-    throw new Error(`Existing marketplace name is ${catalog.name}, not ${marketName}.`);
-  catalog.name = marketName;
-  catalog.plugins = Array.isArray(catalog.plugins) ? catalog.plugins : [];
-
-  const added = [];
+  const prepared = [];
   for (const pluginPath of pluginPaths) {
     const plugin = await validatePlugin(pluginPath);
     if (!plugin.ok) throw new Error(`Plugin preflight failed: ${plugin.rootPath}`);
     const source = normalizeSource(root, plugin.rootPath);
-    const existingIndex = catalog.plugins.findIndex((entry) => entry?.name === plugin.name);
-    const next = {
+    prepared.push({
       name: plugin.name,
       source,
       version: plugin.version,
       description: plugin.description,
-    };
-    if (existingIndex >= 0) {
-      const current = asRecord(catalog.plugins[existingIndex]);
-      if (current.source && current.source !== source)
-        throw new Error(
-          `Marketplace plugin ${plugin.name} already points to ${current.source}, not ${source}.`,
-        );
-      catalog.plugins[existingIndex] = { ...current, ...next };
-    } else {
-      catalog.plugins.push(next);
-    }
-    added.push(next);
+    });
   }
-  catalog.plugins.sort((left, right) => String(left?.name ?? "").localeCompare(String(right?.name ?? "")));
-  await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
-  return { catalogPath, rootPath: root, marketName, plugins: added };
+
+  return withMarketplaceWriteLock(root, async () => {
+    let catalog = { name: marketName, plugins: [] };
+    const existing = await readFile(catalogPath, "utf8").catch(() => null);
+    if (existing) {
+      const parsed = JSON.parse(existing);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("Existing marketplace.json must contain an object.");
+      catalog = parsed;
+    }
+    if (catalog.name !== undefined && catalog.name !== marketName)
+      throw new Error(`Existing marketplace name is ${catalog.name}, not ${marketName}.`);
+    catalog.name = marketName;
+    catalog.plugins = Array.isArray(catalog.plugins) ? catalog.plugins : [];
+
+    const added = [];
+    for (const next of prepared) {
+      const existingIndex = catalog.plugins.findIndex((entry) => entry?.name === next.name);
+      if (existingIndex >= 0) {
+        const current = asRecord(catalog.plugins[existingIndex]);
+        if (current.source && current.source !== next.source)
+          throw new Error(
+            `Marketplace plugin ${next.name} already points to ${current.source}, not ${next.source}.`,
+          );
+        catalog.plugins[existingIndex] = { ...current, ...next };
+      } else {
+        catalog.plugins.push(next);
+      }
+      added.push(next);
+    }
+    catalog.plugins.sort((left, right) =>
+      String(left?.name ?? "").localeCompare(String(right?.name ?? "")),
+    );
+    const expectedEntries = catalog.plugins.map((entry) => ({
+      name: entry?.name,
+      source: entry?.source,
+      version: entry?.version,
+    }));
+    const temporaryPath = join(
+      root,
+      `.${MARKETPLACE_FILE}.${process.pid}.${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+      await rename(temporaryPath, catalogPath);
+    } finally {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+    const committed = JSON.parse(await readFile(catalogPath, "utf8"));
+    if (
+      !Array.isArray(committed.plugins) ||
+      committed.plugins.length !== expectedEntries.length ||
+      expectedEntries.some(
+        (expected, index) =>
+          committed.plugins[index]?.name !== expected.name ||
+          committed.plugins[index]?.source !== expected.source ||
+          committed.plugins[index]?.version !== expected.version,
+      )
+    ) {
+      throw new Error(`Marketplace catalog verification failed after commit: ${catalogPath}`);
+    }
+    return { catalogPath, rootPath: root, marketName, plugins: added };
+  });
 }
 
 function skillTemplate(pluginName, displayName) {

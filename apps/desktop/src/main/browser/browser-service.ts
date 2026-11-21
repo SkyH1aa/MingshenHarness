@@ -1,19 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { webContents as electronWebContents, type WebContents } from "electron";
+import { displayBrowserUrl, LOCAL_FILE_APPROVAL_PARAM } from "../../shared/browser-address";
 import type {
   BrowserProvider,
   BrowserStatus,
   ChatStreamEvent,
   ToolResultImage,
 } from "../../shared/domain";
+import { statGuardedPath } from "../workspace/guarded-workspace-io";
+import { safeFilePath } from "../workspace/safe-file-path";
 import { normalizeBrowserUrl } from "./browser-url";
 
 interface BrowserSession {
   provider: BrowserProvider;
   guest: WebContents | null;
   approvedLocalFileUrl: string | null;
+  approvedLocalFileToken: string | null;
+  approvedLocalFileRoot: string | null;
   pending: {
     resolve: (status: BrowserStatus) => void;
     reject: (error: Error) => void;
@@ -42,10 +48,23 @@ export class BrowserService {
     url = "about:blank",
   ): Promise<BrowserStatus> {
     const normalizedUrl = await normalizeBrowserUrl(url, this.getWorkspacePath(sessionId));
+    const localFileRoot = normalizedUrl.startsWith("file:")
+      ? this.getWorkspacePath(sessionId)
+      : null;
+    if (normalizedUrl.startsWith("file:") && !localFileRoot) {
+      throw new Error("打开本地文件需要先为当前会话选择工作目录。");
+    }
+    const localFileToken = localFileRoot ? randomUUID() : null;
+    const loadUrl =
+      localFileToken && localFileRoot
+        ? withLocalFileApproval(normalizedUrl, localFileToken)
+        : normalizedUrl;
     const existing = this.sessions.get(sessionId);
     if (existing?.provider === provider && existing.guest && !existing.guest.isDestroyed()) {
-      existing.approvedLocalFileUrl = normalizedUrl.startsWith("file:") ? normalizedUrl : null;
-      await existing.guest.loadURL(normalizedUrl);
+      existing.approvedLocalFileUrl = localFileToken ? normalizedUrl : null;
+      existing.approvedLocalFileToken = localFileToken;
+      existing.approvedLocalFileRoot = localFileRoot;
+      await existing.guest.loadURL(loadUrl);
       return this.statusFromGuest(sessionId, existing.guest, provider);
     }
     if (existing) {
@@ -60,14 +79,16 @@ export class BrowserService {
       this.sessions.set(sessionId, {
         provider,
         guest: null,
-        approvedLocalFileUrl: normalizedUrl.startsWith("file:") ? normalizedUrl : null,
+        approvedLocalFileUrl: localFileToken ? normalizedUrl : null,
+        approvedLocalFileToken: localFileToken,
+        approvedLocalFileRoot: localFileRoot,
         pending: { resolve, reject, timeout },
       });
       this.emit({
         type: "browser_open_requested",
         sessionId,
         provider,
-        url: normalizedUrl,
+        url: loadUrl,
       });
     });
   }
@@ -93,6 +114,8 @@ export class BrowserService {
       provider,
       guest,
       approvedLocalFileUrl: previous?.approvedLocalFileUrl ?? null,
+      approvedLocalFileToken: previous?.approvedLocalFileToken ?? null,
+      approvedLocalFileRoot: previous?.approvedLocalFileRoot ?? null,
       pending: null,
     });
     guest.on("will-navigate", (event, url) => {
@@ -100,7 +123,11 @@ export class BrowserService {
         return;
       }
       const current = this.sessions.get(sessionId);
-      if (current?.guest?.id !== guest.id || current.approvedLocalFileUrl !== url) {
+      if (
+        current?.guest?.id !== guest.id ||
+        !current ||
+        !this.sessionApprovesLocalFile(current, url)
+      ) {
         event.preventDefault();
       }
     });
@@ -133,6 +160,54 @@ export class BrowserService {
       return await this.statusFromGuest(sessionId, session.guest, session.provider);
     } catch {
       return { connected: false, provider: null, url: null, title: null };
+    }
+  }
+
+  isApprovedLocalFileUrl(url: string, provider?: BrowserProvider, guestId?: number): boolean {
+    let approval: { url: string; token: string };
+    try {
+      approval = parseLocalFileApproval(url);
+    } catch {
+      return false;
+    }
+    for (const session of this.sessions.values()) {
+      if (provider && session.provider !== provider) continue;
+      if (guestId !== undefined && session.guest?.id !== guestId) continue;
+      if (this.sessionApprovesLocalFile(session, url, approval)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async isApprovedLocalFileRequest(
+    webContentsId: number | undefined,
+    url: string,
+    resourceType: string,
+  ): Promise<boolean> {
+    if (!webContentsId) return false;
+    const current = [...this.sessions.values()].find(
+      (session) => session.guest?.id === webContentsId && !session.guest.isDestroyed(),
+    );
+    if (!current?.approvedLocalFileRoot) return false;
+    if (resourceType === "mainFrame") {
+      return this.sessionApprovesLocalFile(current, url);
+    }
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "file:" || !isFileUrlWithinRoot(url, current.approvedLocalFileRoot)) {
+        return false;
+      }
+      const target = fileURLToPath(parsed);
+      const relativePath = relative(resolve(current.approvedLocalFileRoot), resolve(target));
+      if (!relativePath) return false;
+      await safeFilePath(current.approvedLocalFileRoot, relativePath);
+      const guarded = await statGuardedPath(current.approvedLocalFileRoot, relativePath, {
+        timeoutMs: 10_000,
+      });
+      return guarded.state === "file" && !guarded.directory;
+    } catch {
+      return false;
     }
   }
 
@@ -172,12 +247,28 @@ export class BrowserService {
           );
           const session = this.sessions.get(sessionId);
           if (session) {
-            session.approvedLocalFileUrl = url.startsWith("file:") ? url : null;
+            if (url.startsWith("file:")) {
+              const root = this.getWorkspacePath(sessionId);
+              if (!root || !isFileUrlWithinRoot(url, root)) {
+                throw new Error("浏览器预览仅支持打开当前工作区内的本地文件。");
+              }
+              session.approvedLocalFileUrl = url;
+              session.approvedLocalFileToken = randomUUID();
+              session.approvedLocalFileRoot = root;
+            } else {
+              session.approvedLocalFileUrl = null;
+              session.approvedLocalFileToken = null;
+              session.approvedLocalFileRoot = null;
+            }
           }
-          await guest.loadURL(url);
+          const navigationUrl =
+            session?.approvedLocalFileUrl === url && session.approvedLocalFileToken
+              ? withLocalFileApproval(url, session.approvedLocalFileToken)
+              : url;
+          await guest.loadURL(navigationUrl);
           await sleep(400);
           return {
-            output: `已打开 ${guest.getTitle() || url}\n${guest.getURL()}`,
+            output: `已打开 ${guest.getTitle() || url}\n${displayBrowserUrl(guest.getURL())}`,
             isError: false,
           };
         }
@@ -209,7 +300,7 @@ export class BrowserService {
           }
           await sleep(350);
           return {
-            output: `已点击。当前页面：${guest.getTitle() || guest.getURL()}`,
+            output: `已点击。当前页面：${guest.getTitle() || displayBrowserUrl(guest.getURL())}`,
             isError: false,
           };
         }
@@ -235,7 +326,7 @@ export class BrowserService {
           guest.sendInputEvent({ type: "keyUp", keyCode: key });
           await sleep(300);
           return {
-            output: `已按下 ${key}。当前页面：${guest.getTitle() || guest.getURL()}`,
+            output: `已按下 ${key}。当前页面：${guest.getTitle() || displayBrowserUrl(guest.getURL())}`,
             isError: false,
           };
         }
@@ -300,7 +391,7 @@ export class BrowserService {
           }
           await sleep(350);
           return {
-            output: `已返回。当前页面：${guest.getTitle() || guest.getURL()}`,
+            output: `已返回。当前页面：${guest.getTitle() || displayBrowserUrl(guest.getURL())}`,
             isError: false,
           };
         }
@@ -355,7 +446,7 @@ export class BrowserService {
     return {
       connected: true,
       provider,
-      url: guest.getURL() || "about:blank",
+      url: displayBrowserUrl(guest.getURL() || "about:blank"),
       title: guest.getTitle() || "",
     };
   }
@@ -366,6 +457,26 @@ export class BrowserService {
       return;
     }
     session.guest = guest;
+  }
+
+  private sessionApprovesLocalFile(
+    session: BrowserSession,
+    url: string,
+    approval = (() => {
+      try {
+        return parseLocalFileApproval(url);
+      } catch {
+        return null;
+      }
+    })(),
+  ): boolean {
+    return Boolean(
+      approval &&
+        session.approvedLocalFileUrl === approval.url &&
+        session.approvedLocalFileToken === approval.token &&
+        session.approvedLocalFileRoot &&
+        isFileUrlWithinRoot(approval.url, session.approvedLocalFileRoot),
+    );
   }
 }
 
@@ -378,6 +489,39 @@ function requireString(value: unknown, field: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withLocalFileApproval(url: string, token: string): string {
+  const approved = new URL(url);
+  approved.searchParams.set(LOCAL_FILE_APPROVAL_PARAM, token);
+  return approved.toString();
+}
+
+function parseLocalFileApproval(url: string): { url: string; token: string } {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "file:") {
+    throw new Error("Not a local file URL.");
+  }
+  const token = parsed.searchParams.get(LOCAL_FILE_APPROVAL_PARAM) ?? "";
+  if (!token) {
+    throw new Error("Local file approval token is missing.");
+  }
+  parsed.searchParams.delete(LOCAL_FILE_APPROVAL_PARAM);
+  return { url: parsed.toString(), token };
+}
+
+function isFileUrlWithinRoot(url: string, root: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "file:") return false;
+    const relativePath = relative(resolve(root), resolve(fileURLToPath(parsed)));
+    return (
+      relativePath === "" ||
+      (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function buildSnapshotScript(): string {

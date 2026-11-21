@@ -144,7 +144,14 @@ export class ProjectMemoryService {
       throw error;
     }
   }
-  private async write(root: string, file: string, text: string, expected?: string): Promise<void> {
+  private async write(
+    root: string,
+    file: string,
+    text: string,
+    expected?: string,
+    beforeCommit?: () => boolean,
+  ): Promise<boolean> {
+    if (beforeCommit && !beforeCommit()) return false;
     const target = await this.path(root, file);
     if (expected !== undefined && digest(await this.read(root, file)) !== expected)
       throw new Error("Memory changed on disk. Refresh before saving; no content was overwritten.");
@@ -157,7 +164,9 @@ export class ProjectMemoryService {
       if (expected !== undefined && digest(await this.read(root, file)) !== expected)
         throw new Error("Memory changed on disk. Refresh before saving.");
       await this.path(root, file);
+      if (beforeCommit && !beforeCommit()) return false;
       await rename(temporary, target);
+      return true;
     } finally {
       await handle.close().catch(() => undefined);
       await rm(temporary, { force: true });
@@ -314,11 +323,30 @@ export class ProjectMemoryService {
     root: string,
     kind: MemoryDocument,
     text: string,
+    category?: string,
+    signal?: AbortSignal,
+  ): Promise<string>;
+  async add(
+    root: string,
+    kind: MemoryDocument,
+    text: string,
+    category: string | undefined,
+    signal: AbortSignal | undefined,
+    canCommit: () => boolean,
+  ): Promise<string | null>;
+  async add(
+    root: string,
+    kind: MemoryDocument,
+    text: string,
     category = "decision",
     signal?: AbortSignal,
-  ): Promise<string> {
+    canCommit?: () => boolean,
+  ): Promise<string | null> {
+    signal?.throwIfAborted();
+    if (canCommit && !canCommit()) return null;
     return this.serial(root, async () => {
       signal?.throwIfAborted();
+      if (canCommit && !canCommit()) return null;
       const clean = redactSecrets(text).replace(/\0/g, "").trim();
       if (!clean || clean.length > (kind === "preferences" ? 400 : 1200))
         throw new Error("Memory must be concise (preference 400 / diary 1200 characters maximum).");
@@ -333,7 +361,10 @@ export class ProjectMemoryService {
               .flatMap((item) => entries(item.text, kind))
           : items;
       const duplicate = candidates.find((item) => normalize(item.body) === normalize(clean));
-      if (duplicate) return duplicate.id;
+      if (duplicate) {
+        if (canCommit && !canCommit()) return null;
+        return duplicate.id;
+      }
       const entry: Entry = {
         id: `${kind === "preferences" ? "p" : "m"}-${randomUUID()}`,
         body: clean.replace(/^## /gm, "\\## "),
@@ -349,15 +380,27 @@ export class ProjectMemoryService {
         if ((await this.archiveNames(root)).length >= 40)
           throw new Error("Memory archive limit reached; clean old entries.");
         const old = items.splice(0, Math.max(1, Math.floor(items.length / 2)));
-        await this.write(
+        if (canCommit && !canCommit()) return null;
+        const archived = await this.write(
           root,
           `archive/${randomUUID()}.md`,
           render(old, "Archived task summaries"),
+          undefined,
+          () => {
+            signal?.throwIfAborted();
+            return canCommit?.() ?? true;
+          },
         );
+        if (!archived) return null;
         next = render(items, "Project diary");
       }
       signal?.throwIfAborted();
-      await this.write(root, file, next, digest(current));
+      if (canCommit && !canCommit()) return null;
+      const committed = await this.write(root, file, next, digest(current), () => {
+        signal?.throwIfAborted();
+        return canCommit?.() ?? true;
+      });
+      if (!committed) return null;
       await this.refreshIndex(root);
       return entry.id;
     });

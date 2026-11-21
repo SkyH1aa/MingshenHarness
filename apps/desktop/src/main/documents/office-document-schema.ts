@@ -6,8 +6,17 @@ const MAX_PATH = 32_767;
 const MAX_CELLS = 50_000;
 const MAX_OPERATIONS = 500;
 const MAX_TEXT = 100_000;
+const MAX_SPREADSHEET_WORK_UNITS = 100_000;
+const MAX_SPREADSHEET_COLUMNS = 16_384;
 const ARGB = /^(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 const A1_RANGE = /^\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}(?::\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})?$/i;
+const ACTIVE_FORMULA =
+  /(?:^|[^A-Z0-9_.])(?:_xl(?:fn|ws)\.)?(?:WEBSERVICE|RTD|DDE|DDEAUTO|EXEC|CALL|IMAGE|STOCKHISTORY|CUBE[A-Z0-9_.]*)\s*\(/i;
+const CLASSIC_DDE_REFERENCE = /\|[^!\r\n]*!/;
+const EXTERNAL_WORKBOOK_REFERENCE =
+  /(?:\[[^\]\r\n]+\.(?:xlsx?|xlsm|xlsb|xls|csv|ods|txt)\]|\[\d+\])[^!\r\n]*!/i;
+const EXTERNAL_FORMULA =
+  /(?:(?:^|[^A-Z0-9_.])EXTERNAL\s*\(|(?:https?|ftp|file):\/\/|(?:^|[^A-Za-z0-9])\\\\|(?:^|[^A-Za-z0-9])\/\/)/i;
 
 function hasUnsupportedControlCharacter(value: string): boolean {
   for (const character of value) {
@@ -16,6 +25,165 @@ function hasUnsupportedControlCharacter(value: string): boolean {
       return true;
   }
   return false;
+}
+
+export function officeFormulaIsUnsafe(formula: string): boolean {
+  // Defense in depth only: this denylist reduces active external behavior but
+  // cannot prove that a formula is safe, especially after Excel adds new functions.
+  return (
+    ACTIVE_FORMULA.test(formula) ||
+    CLASSIC_DDE_REFERENCE.test(formula) ||
+    EXTERNAL_FORMULA.test(formula) ||
+    EXTERNAL_WORKBOOK_REFERENCE.test(formula)
+  );
+}
+
+function decodeColumn(value: string): number {
+  let result = 0;
+  for (const character of value.toUpperCase()) {
+    result = result * 26 + character.charCodeAt(0) - 64;
+  }
+  return result;
+}
+
+function rangeCellCount(range: string): number {
+  const normalized = range.replaceAll("$", "").toUpperCase();
+  const match = /^([A-Z]{1,3})([1-9][0-9]{0,6})(?::([A-Z]{1,3})([1-9][0-9]{0,6}))?$/.exec(
+    normalized,
+  );
+  if (!match?.[1] || !match[2]) return Number.POSITIVE_INFINITY;
+  const startColumn = decodeColumn(match[1]);
+  const startRow = Number(match[2]);
+  const endColumn = match[3] ? decodeColumn(match[3]) : startColumn;
+  const endRow = match[4] ? Number(match[4]) : startRow;
+  if (
+    startColumn > MAX_SPREADSHEET_COLUMNS ||
+    endColumn > MAX_SPREADSHEET_COLUMNS ||
+    endColumn < startColumn ||
+    endRow < startRow
+  )
+    return Number.POSITIVE_INFINITY;
+  return (endRow - startRow + 1) * (endColumn - startColumn + 1);
+}
+
+function addBudgetRange(
+  ctx: z.RefinementCtx,
+  range: string | undefined,
+  budget: { used: number; path: Array<string | number> },
+): void {
+  if (!range) return;
+  const cells = rangeCellCount(range);
+  if (!Number.isFinite(cells)) {
+    ctx.addIssue({
+      code: "custom",
+      path: budget.path,
+      message: "Excel 范围超出有效行列边界。",
+    });
+    return;
+  }
+  budget.used += cells;
+}
+
+type SpreadsheetPresentationBudget = {
+  title_range?: string | undefined;
+  header_range?: string | undefined;
+  body_range?: string | undefined;
+  print_area?: string | undefined;
+};
+
+type CreateSpreadsheetBudgetInput = {
+  workbook: {
+    sheets: Array<{
+      cells: readonly unknown[];
+      columns?: readonly unknown[] | undefined;
+      merges?: readonly string[] | undefined;
+      tables?: readonly { range: string }[] | undefined;
+      filter?: string | undefined;
+      presentation?: SpreadsheetPresentationBudget | undefined;
+    }>;
+  };
+};
+
+type SpreadsheetOperationBudget =
+  | { type: "add_sheet" }
+  | { type: "rename_sheet" }
+  | { type: "delete_sheet" }
+  | { type: "set_cells"; cells: readonly unknown[] }
+  | { type: "set_range"; rows: ReadonlyArray<readonly unknown[]> }
+  | { type: "append_rows"; rows: ReadonlyArray<readonly unknown[]> }
+  | { type: "style_range"; range: string }
+  | { type: "merge_range"; range: string }
+  | { type: "unmerge_range"; range: string }
+  | { type: "set_columns"; start: number; end: number }
+  | { type: "filter"; range: string }
+  | { type: "add_table"; range: string }
+  | { type: "freeze" }
+  | { type: "format_sheet"; presentation: SpreadsheetPresentationBudget };
+
+type EditSpreadsheetBudgetInput = {
+  operations: SpreadsheetOperationBudget[];
+};
+
+function spreadsheetWorkUnits(input: CreateSpreadsheetBudgetInput, ctx: z.RefinementCtx): number {
+  let total = 0;
+  for (const [sheetIndex, sheet] of input.workbook.sheets.entries()) {
+    const budget = { used: 0, path: ["workbook", "sheets", sheetIndex] as Array<string | number> };
+    budget.used += sheet.cells.length;
+    budget.used += sheet.columns?.length ?? 0;
+    for (const range of sheet.merges ?? []) addBudgetRange(ctx, range, budget);
+    for (const table of sheet.tables ?? []) addBudgetRange(ctx, table.range, budget);
+    addBudgetRange(ctx, sheet.filter, budget);
+    addBudgetRange(ctx, sheet.presentation?.title_range, budget);
+    addBudgetRange(ctx, sheet.presentation?.header_range, budget);
+    addBudgetRange(ctx, sheet.presentation?.body_range, budget);
+    addBudgetRange(ctx, sheet.presentation?.print_area, budget);
+    total += budget.used;
+  }
+  return total;
+}
+
+function spreadsheetEditWorkUnits(input: EditSpreadsheetBudgetInput, ctx: z.RefinementCtx): number {
+  let total = 0;
+  for (const [index, operation] of input.operations.entries()) {
+    const budget = { used: 1, path: ["operations", index] as Array<string | number> };
+    switch (operation.type) {
+      case "set_cells":
+        budget.used += operation.cells.length;
+        break;
+      case "set_range":
+        budget.used += operation.rows.reduce((count, row) => count + row.length, 0);
+        break;
+      case "append_rows":
+        budget.used += operation.rows.reduce((count, row) => count + row.length, 0);
+        break;
+      case "style_range":
+        addBudgetRange(ctx, operation.range, budget);
+        break;
+      case "merge_range":
+      case "unmerge_range":
+        addBudgetRange(ctx, operation.range, budget);
+        break;
+      case "set_columns":
+        budget.used += operation.end - operation.start + 1;
+        break;
+      case "filter":
+        addBudgetRange(ctx, operation.range, budget);
+        break;
+      case "add_table":
+        addBudgetRange(ctx, operation.range, budget);
+        break;
+      case "format_sheet":
+        addBudgetRange(ctx, operation.presentation.title_range, budget);
+        addBudgetRange(ctx, operation.presentation.header_range, budget);
+        addBudgetRange(ctx, operation.presentation.body_range, budget);
+        addBudgetRange(ctx, operation.presentation.print_area, budget);
+        break;
+      default:
+        break;
+    }
+    total += budget.used;
+  }
+  return total;
 }
 
 const pathSchema = z
@@ -79,7 +247,11 @@ export const officeCellValueSchema = z.union([
   scalarValueSchema,
   z
     .object({
-      formula: z.string().min(1).max(8_192),
+      formula: z
+        .string()
+        .min(1)
+        .max(8_192)
+        .refine((value) => !officeFormulaIsUnsafe(value), "公式含主动外部调用或危险函数。"),
       result: scalarValueSchema.optional(),
     })
     .strict(),
@@ -197,7 +369,10 @@ const spreadsheetOperationSchema = z.discriminatedUnion("type", [
       type: z.literal("set_range"),
       sheet: z.string().min(1).max(31),
       range: rangeSchema,
-      rows: z.array(z.array(officeCellValueSchema).min(1)).min(1).max(10_000),
+      rows: z
+        .array(z.array(officeCellValueSchema).min(1).max(MAX_SPREADSHEET_COLUMNS))
+        .min(1)
+        .max(10_000),
       style: cellStyleSchema.optional(),
     })
     .strict(),
@@ -205,7 +380,10 @@ const spreadsheetOperationSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("append_rows"),
       sheet: z.string().min(1).max(31),
-      rows: z.array(z.array(officeCellValueSchema).min(1)).min(1).max(10_000),
+      rows: z
+        .array(z.array(officeCellValueSchema).min(1).max(MAX_SPREADSHEET_COLUMNS))
+        .min(1)
+        .max(10_000),
       style: cellStyleSchema.optional(),
     })
     .strict(),
@@ -314,65 +492,80 @@ const presentationOperationSchema = z.discriminatedUnion("type", [
     .strict(),
 ]);
 
-export const officeDocumentSchema = z.discriminatedUnion("operation", [
-  z
-    .object({
-      operation: z.literal("inspect"),
-      path: pathSchema,
-    })
-    .strict(),
-  z
-    .object({
-      operation: z.literal("create_spreadsheet"),
-      path: pathSchema,
-      overwrite: z.boolean().default(false),
-      workbook: z
-        .object({
-          design: spreadsheetThemeSchema.optional(),
-          sheets: z.array(sheetSchema).min(1).max(200),
-        })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      operation: z.literal("edit_spreadsheet"),
-      path: pathSchema,
-      overwrite: z.boolean().default(false),
-      source: z.object({ path: pathSchema, expected_sha256: sha256Schema }).strict(),
-      operations: z.array(spreadsheetOperationSchema).min(1).max(MAX_OPERATIONS),
-    })
-    .strict(),
-  z
-    .object({
-      operation: z.literal("edit_presentation"),
-      path: pathSchema,
-      overwrite: z.boolean().default(false),
-      source: z.object({ path: pathSchema, expected_sha256: sha256Schema }).strict(),
-      operations: z.array(presentationOperationSchema).min(1).max(MAX_OPERATIONS),
-    })
-    .strict(),
-  z
-    .object({
-      operation: z.literal("verify"),
-      path: pathSchema,
-      overwrite: z.boolean().default(false),
-      render: z.boolean().default(true),
-      recalculate: z.boolean().default(false),
-      timeout_ms: z.number().int().min(5_000).max(180_000).default(60_000),
-      render_path: pathSchema.optional(),
-      output_path: pathSchema.optional(),
-    })
-    .strict()
-    .refine((input) => !input.render_path || input.render, {
-      message: "render_path 需要 render:true。",
-      path: ["render_path"],
-    })
-    .refine((input) => !input.output_path || input.recalculate, {
-      message: "output_path 需要 recalculate:true。",
-      path: ["output_path"],
-    }),
-]);
+export const officeDocumentSchema = z
+  .discriminatedUnion("operation", [
+    z
+      .object({
+        operation: z.literal("inspect"),
+        path: pathSchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal("create_spreadsheet"),
+        path: pathSchema,
+        overwrite: z.boolean().default(false),
+        workbook: z
+          .object({
+            design: spreadsheetThemeSchema.optional(),
+            sheets: z.array(sheetSchema).min(1).max(200),
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal("edit_spreadsheet"),
+        path: pathSchema,
+        overwrite: z.boolean().default(false),
+        source: z.object({ path: pathSchema, expected_sha256: sha256Schema }).strict(),
+        operations: z.array(spreadsheetOperationSchema).min(1).max(MAX_OPERATIONS),
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal("edit_presentation"),
+        path: pathSchema,
+        overwrite: z.boolean().default(false),
+        source: z.object({ path: pathSchema, expected_sha256: sha256Schema }).strict(),
+        operations: z.array(presentationOperationSchema).min(1).max(MAX_OPERATIONS),
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal("verify"),
+        path: pathSchema,
+        overwrite: z.boolean().default(false),
+        render: z.boolean().default(true),
+        recalculate: z.boolean().default(false),
+        timeout_ms: z.number().int().min(5_000).max(180_000).default(60_000),
+        render_path: pathSchema.optional(),
+        output_path: pathSchema.optional(),
+      })
+      .strict()
+      .refine((input) => !input.render_path || input.render, {
+        message: "render_path 需要 render:true。",
+        path: ["render_path"],
+      })
+      .refine((input) => !input.output_path || input.recalculate, {
+        message: "output_path 需要 recalculate:true。",
+        path: ["output_path"],
+      }),
+  ])
+  .superRefine((input, ctx) => {
+    if (input.operation !== "create_spreadsheet" && input.operation !== "edit_spreadsheet") return;
+    const total =
+      input.operation === "create_spreadsheet"
+        ? spreadsheetWorkUnits(input, ctx)
+        : spreadsheetEditWorkUnits(input, ctx);
+    if (total > MAX_SPREADSHEET_WORK_UNITS) {
+      ctx.addIssue({
+        code: "custom",
+        path: input.operation === "create_spreadsheet" ? ["workbook"] : ["operations"],
+        message: `电子表格请求累计工作量不能超过 ${MAX_SPREADSHEET_WORK_UNITS} 个单元格/范围单位。请拆分为较小批次。`,
+      });
+    }
+  });
 
 export type OfficeDocumentInput = z.infer<typeof officeDocumentSchema>;
 export type OfficeSpreadsheetSpec = z.infer<typeof sheetSchema>;

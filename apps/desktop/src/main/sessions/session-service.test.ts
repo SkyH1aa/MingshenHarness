@@ -280,6 +280,7 @@ describe("Workspace conversation creation", () => {
       workspacePath: null,
       agentProfileId: "primary",
       permissionMode: "request_approval",
+      chatNetworkEnabled: true,
       approvalMode: "manual",
       executionMode: "host",
       patchOnly: false,
@@ -337,6 +338,449 @@ describe("Workspace conversation creation", () => {
       agentMode: "chat",
       title: "Renamed pure chat",
     });
+  });
+
+  it("persists ChatAgent network controls and locks them while the task is active", () => {
+    const chat = service.create({
+      providerId,
+      modelId,
+      agentMode: "chat",
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    expect(chat.chatNetworkEnabled).toBe(true);
+    expect(
+      service.update({ sessionId: chat.id, chatNetworkEnabled: false }).chatNetworkEnabled,
+    ).toBe(false);
+    expect(repository.getSession(chat.id)?.chatNetworkEnabled).toBe(false);
+    expect(
+      service.update({ sessionId: chat.id, chatNetworkEnabled: true }).chatNetworkEnabled,
+    ).toBe(true);
+
+    repository.updateSession(chat.id, { status: "running" });
+    expect(() => service.update({ sessionId: chat.id, chatNetworkEnabled: false })).toThrow(
+      "任务运行期间不能切换",
+    );
+
+    const code = service.create({
+      providerId,
+      modelId,
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    expect(() => service.update({ sessionId: code.id, chatNetworkEnabled: false })).toThrow(
+      "仅适用于 ChatAgent",
+    );
+  });
+
+  it("validates network controls before creating a session", () => {
+    expect(() =>
+      service.create({
+        providerId,
+        modelId,
+        agentMode: "chat",
+        workspacePath: null,
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+        chatNetworkEnabled: "false" as unknown as boolean,
+      }),
+    ).toThrow("ChatAgent 联网状态无效");
+
+    expect(() =>
+      service.create({
+        providerId,
+        modelId,
+        workspacePath: null,
+        reasoningLevel: null,
+        permissionMode: "request_approval",
+        chatNetworkEnabled: false,
+      }),
+    ).toThrow("仅适用于 ChatAgent");
+
+    const blocked = service.create({
+      providerId,
+      modelId,
+      agentMode: "chat",
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+      chatNetworkEnabled: false,
+    });
+    expect(blocked.chatNetworkEnabled).toBe(false);
+  });
+
+  it("creates a chat from the latest updated chat in the selected group", () => {
+    const group = service.createChatGroup("Ideas");
+    const otherGroup = service.createChatGroup("Other");
+    const source = service.create({
+      title: "Latest in group",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: group.id,
+      workspacePath: null,
+      systemPrompt: "Keep the chat instructions",
+      reasoningLevel: "high",
+      permissionMode: "request_approval",
+      compactionModel: { mode: "current", providerId: null, modelId: null },
+    });
+    const older = service.create({
+      title: "Pinned but older",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: group.id,
+      workspacePath: null,
+      reasoningLevel: "low",
+      permissionMode: "request_approval",
+    });
+    service.create({
+      title: "Newest elsewhere",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: otherGroup.id,
+      workspacePath: null,
+      reasoningLevel: "low",
+      permissionMode: "request_approval",
+    });
+    repository.insertExtension({
+      id: "chat-skill",
+      type: "skill",
+      name: "Chat skill",
+      description: "",
+      sourcePath: "C:\\chat-skill",
+      installedPath: "C:\\chat-skill-copy",
+      manifestJson: "{}",
+      contentHash: "chat-fixture",
+    });
+    repository.setSessionExtension(source.id, "chat-skill", true);
+    service.update({ sessionId: source.id, chatNetworkEnabled: false });
+    database
+      .prepare("update sessions set updated_at = ?, pinned = 1 where id = ?")
+      .run("2026-05-01T00:00:00Z", older.id);
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2026-06-01T00:00:00Z", source.id);
+
+    const created = service.createChatSessionInGroup(group.id);
+    expect(created).toMatchObject({
+      title: "新会话",
+      agentMode: "chat",
+      chatGroupId: group.id,
+      providerId,
+      modelId,
+      agentProfileId: "primary",
+      workspacePath: null,
+      systemPrompt: "Keep the chat instructions",
+      reasoningLevel: "high",
+      permissionMode: "request_approval",
+      chatNetworkEnabled: false,
+      approvalMode: "manual",
+      compactionModel: { mode: "current", providerId: null, modelId: null },
+      executionMode: "host",
+      patchOnly: false,
+      parentSessionId: null,
+      archived: false,
+      pinned: false,
+    });
+    expect(repository.getMessages(created.id)).toEqual([]);
+    expect(repository.listSessionExtensionIds(created.id)).toEqual([]);
+  });
+
+  it("falls back to the latest active chat when the selected group is empty", () => {
+    const emptyGroup = service.createChatGroup("Empty");
+    const sourceGroup = service.createChatGroup("Source");
+    const archivedGroup = service.createChatGroup("Archived");
+    const olderSource = service.create({
+      title: "Older source",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: sourceGroup.id,
+      workspacePath: null,
+      systemPrompt: "Older",
+      reasoningLevel: "low",
+      permissionMode: "request_approval",
+    });
+    const source = service.create({
+      title: "Latest active source",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: sourceGroup.id,
+      workspacePath: null,
+      systemPrompt: "Latest fallback",
+      reasoningLevel: "high",
+      permissionMode: "request_approval",
+    });
+    const archived = service.create({
+      title: "Newest archived",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: archivedGroup.id,
+      workspacePath: null,
+      systemPrompt: "Archived",
+      reasoningLevel: "low",
+      permissionMode: "request_approval",
+    });
+    repository.updateSession(archived.id, { archived: true });
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2026-07-01T00:00:00Z", olderSource.id);
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2026-08-01T00:00:00Z", source.id);
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2026-09-01T00:00:00Z", archived.id);
+
+    expect(service.createChatSessionInGroup(emptyGroup.id)).toMatchObject({
+      chatGroupId: emptyGroup.id,
+      providerId,
+      modelId,
+      systemPrompt: "Latest fallback",
+      reasoningLevel: "high",
+      permissionMode: "request_approval",
+    });
+  });
+
+  it("uses the first enabled text model when no chat exists yet", () => {
+    database.prepare("update models set enabled = 0 where id = ?").run(modelId);
+    const secondProvider = repository.insertProvider({
+      name: "Second provider",
+      baseUrl: "https://second.example.com/v1",
+      protocol: "openai_responses",
+      authMode: "bearer",
+      customHeaderName: null,
+    });
+    repository.insertModel({
+      providerId: secondProvider.id,
+      modelId: "image-only",
+      displayName: "Image only",
+      contextWindow: 128000,
+      maxOutputTokens: 4096,
+      inputModalities: ["image"],
+      outputModalities: ["text"],
+      toolCalls: false,
+      parallelToolCalls: false,
+      reasoningLevels: [],
+      anthropicNoneBehavior: "disabled",
+    });
+    repository.insertModel({
+      providerId: secondProvider.id,
+      modelId: "chat-default",
+      displayName: "Chat default",
+      contextWindow: 128000,
+      maxOutputTokens: 4096,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      toolCalls: false,
+      parallelToolCalls: false,
+      reasoningLevels: [],
+      anthropicNoneBehavior: "disabled",
+    });
+    const chatModel = repository
+      .getProvider(secondProvider.id)
+      ?.models.find((model) => model.modelId === "chat-default");
+
+    expect(service.createChatSessionInGroup(null)).toMatchObject({
+      agentMode: "chat",
+      chatGroupId: null,
+      providerId: secondProvider.id,
+      modelId: chatModel?.id,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+      workspacePath: null,
+    });
+  });
+
+  it("explains how to recover when no enabled text model is available", () => {
+    database.prepare("update models set enabled = 0 where id = ?").run(modelId);
+    expect(() => service.createChatSessionInGroup(null)).toThrow(
+      "没有可用于 ChatAgent 的已启用文本模型，请先在设置中启用或添加模型。",
+    );
+    expect(service.list()).toEqual([]);
+  });
+
+  it("rejects image-only models for session creation, updates and inherited chats", () => {
+    repository.insertModel({
+      providerId,
+      modelId: "image-only-output",
+      displayName: "Image",
+      contextWindow: 128000,
+      maxOutputTokens: 4096,
+      inputModalities: ["text"],
+      outputModalities: ["image"],
+      toolCalls: false,
+      parallelToolCalls: false,
+      reasoningLevels: [],
+      anthropicNoneBehavior: "disabled",
+    });
+    const image = repository
+      .getProvider(providerId)
+      ?.models.find((item) => item.modelId === "image-only-output");
+    if (!image) throw new Error("Missing image fixture model");
+    const input = {
+      providerId,
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval" as const,
+    };
+    expect(() => service.create({ ...input, modelId: image.id })).toThrow("文本输入和输出");
+    const chat = service.create({ ...input, modelId, agentMode: "chat" });
+    expect(() => service.update({ sessionId: chat.id, modelId: image.id })).toThrow(
+      "文本输入和输出",
+    );
+    expect(repository.getSession(chat.id)?.modelId).toBe(modelId);
+
+    database
+      .prepare("update models set output_modalities = ? where id = ?")
+      .run('["image"]', modelId);
+    expect(() => service.createChatSessionInGroup(null)).toThrow("已失效");
+    expect(service.update({ sessionId: chat.id, title: "Still editable" }).title).toBe(
+      "Still editable",
+    );
+  });
+
+  it("skips an enabled image-output model when choosing a first Chat model", () => {
+    const original = repository.getModel(modelId);
+    if (!original) throw new Error("Missing fixture model");
+    repository.updateModel(modelId, { ...original, outputModalities: ["image"] });
+    repository.insertModel({
+      providerId,
+      modelId: "text-fallback",
+      displayName: "Text fallback",
+      contextWindow: 128000,
+      maxOutputTokens: 4096,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      toolCalls: false,
+      parallelToolCalls: false,
+      reasoningLevels: [],
+      anthropicNoneBehavior: "disabled",
+    });
+    const fallback = repository
+      .getProvider(providerId)
+      ?.models.find((item) => item.modelId === "text-fallback");
+    if (!fallback) throw new Error("Missing text fallback fixture model");
+    expect(service.createChatSessionInGroup(null).modelId).toBe(fallback.id);
+  });
+
+  it.each([
+    {
+      condition: "disabled model",
+      expected: "已失效",
+      invalidate: (targetModelId: string) => {
+        database.prepare("update models set enabled = 0 where id = ?").run(targetModelId);
+      },
+    },
+    {
+      condition: "changed reasoning level",
+      expected: "思考等级",
+      invalidate: (targetModelId: string) => {
+        database
+          .prepare("update models set reasoning_levels = ? where id = ?")
+          .run('["low"]', targetModelId);
+      },
+    },
+  ])(
+    "does not fall back to an older valid chat when the latest template has a $condition",
+    ({ expected, invalidate }) => {
+      const group = service.createChatGroup("Invalid template");
+      const templateProvider = repository.insertProvider({
+        name: "Template provider",
+        baseUrl: "https://template.example.com/v1",
+        protocol: "openai_responses",
+        authMode: "bearer",
+        customHeaderName: null,
+      });
+      repository.insertModel({
+        providerId: templateProvider.id,
+        modelId: "template-model",
+        displayName: "Template model",
+        contextWindow: 128000,
+        maxOutputTokens: 4096,
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        toolCalls: true,
+        parallelToolCalls: false,
+        reasoningLevels: ["low", "high"],
+        anthropicNoneBehavior: "disabled",
+      });
+      const templateModelId = repository
+        .getProvider(templateProvider.id)
+        ?.models.find((model) => model.modelId === "template-model")?.id as string;
+      const older = service.create({
+        title: "Older valid chat",
+        providerId,
+        modelId,
+        agentMode: "chat",
+        chatGroupId: group.id,
+        workspacePath: null,
+        reasoningLevel: "high",
+        permissionMode: "request_approval",
+      });
+      const latest = service.create({
+        title: "Latest invalid template",
+        providerId: templateProvider.id,
+        modelId: templateModelId,
+        agentMode: "chat",
+        chatGroupId: group.id,
+        workspacePath: null,
+        reasoningLevel: "high",
+        permissionMode: "request_approval",
+      });
+      database
+        .prepare("update sessions set updated_at = ? where id = ?")
+        .run("2026-01-01T00:00:00Z", older.id);
+      database
+        .prepare("update sessions set updated_at = ? where id = ?")
+        .run("2026-02-01T00:00:00Z", latest.id);
+      invalidate(templateModelId);
+      const before = service.list().length;
+
+      expect(() => service.createChatSessionInGroup(group.id)).toThrow(expected);
+      expect(service.list()).toHaveLength(before);
+    },
+  );
+
+  it("rejects invalid groups and does not skip a latest chat with invalid configuration", () => {
+    const group = service.createChatGroup("Validation");
+    expect(() => service.createChatSessionInGroup("missing-group")).toThrow("分组不存在");
+    expect(() => service.createChatSessionInGroup("   ")).toThrow("分组无效");
+
+    service.create({
+      title: "Older valid chat",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: group.id,
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    const latest = service.create({
+      title: "Latest invalid chat",
+      providerId,
+      modelId,
+      agentMode: "chat",
+      chatGroupId: group.id,
+      workspacePath: null,
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+    });
+    database
+      .prepare("update sessions set updated_at = ? where id = ?")
+      .run("2026-10-01T00:00:00Z", latest.id);
+    database.prepare("delete from models where id = ?").run(modelId);
+    const before = service.list().length;
+
+    expect(() => service.createChatSessionInGroup(group.id)).toThrow("已失效");
+    expect(service.list()).toHaveLength(before);
   });
 
   it("switches CodeAgent to WorkAgent only while stopped and honors profile applicability", () => {

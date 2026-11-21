@@ -13,6 +13,7 @@ import type {
   ProviderUpdateKeyInput,
   ProviderView,
 } from "../../shared/domain";
+import { isImageOutputModel } from "../../shared/model-capabilities";
 import {
   normalizePromptCachingSettings,
   providerPromptCachingKey,
@@ -23,9 +24,11 @@ import { redactSecrets as redactDiagnostic } from "../security/redact";
 import type { Repository } from "../storage/repository";
 import type { SecretStore } from "../storage/secret-store";
 import { geminiModelPath, geminiRecord } from "./gemini-format";
+import { parseImageGenerationResponse } from "./image-generation";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_DIAGNOSTIC_BODY = 50_000;
+const MAX_CONNECTION_TEST_RESPONSE_BYTES = 36 * 1024 * 1024;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const PROTOCOLS = [
   "anthropic_messages",
@@ -34,6 +37,10 @@ const PROTOCOLS = [
   "gemini_generate_content",
 ];
 const AUTH_MODES = ["bearer", "x_api_key", "api_key", "x_goog_api_key", "custom"];
+const IMAGE_GENERATION_PROTOCOLS = new Set<ProviderProtocol>([
+  "openai_chat_completions",
+  "openai_responses",
+]);
 
 interface ProviderWireContext {
   baseUrl: string;
@@ -405,10 +412,33 @@ function validateModelInput(input: ModelCreateInput | ModelUpdateInput): Normali
   };
 }
 
+function assertImageOutputProtocol(
+  protocol: ProviderProtocol,
+  outputModalities: readonly InputModality[],
+): void {
+  if (outputModalities.includes("image") && !IMAGE_GENERATION_PROTOCOLS.has(protocol)) {
+    throw new Error(
+      "图片输出模型的供应商协议必须为 OpenAI Chat Completions 或 OpenAI Responses 兼容协议。",
+    );
+  }
+}
+
 function buildConnectionTestRequest(
   protocol: ProviderProtocol,
   model: ModelConfig,
 ): { path: string; body: Record<string, unknown> } {
+  if (isImageOutputModel(model)) {
+    return {
+      path: "/images/generations",
+      body: {
+        model: model.modelId,
+        prompt: "Generate one small test image.",
+        n: 1,
+        size: "1024x1024",
+        response_format: "b64_json",
+      },
+    };
+  }
   switch (protocol) {
     case "gemini_generate_content":
       return {
@@ -446,6 +476,63 @@ function buildConnectionTestRequest(
         },
       };
   }
+}
+
+async function readBoundedResponse(response: Response, maxBytes: number): Promise<string> {
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error("供应商连接测试响应超过安全上限。");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > maxBytes) throw new Error("供应商连接测试响应超过安全上限。");
+    return bytes.toString("utf8");
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("供应商连接测试响应超过安全上限。");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+function summarizeImageResponse(payload: unknown): string {
+  const record =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  const first = Array.isArray(record?.data)
+    ? (record.data[0] as Record<string, unknown> | undefined)
+    : undefined;
+  const summary: Record<string, unknown> = {};
+  if (first && typeof first.b64_json === "string") {
+    summary.b64_json = `[base64 omitted, ${first.b64_json.length} characters]`;
+  }
+  if (first && typeof first.url === "string") summary.url = "[URL omitted]";
+  if (first && typeof first.revised_prompt === "string") {
+    summary.revised_prompt = first.revised_prompt.slice(0, 1_000);
+  }
+  if (record?.error && typeof record.error === "object") summary.error = record.error;
+  return Object.keys(summary).length > 0
+    ? JSON.stringify(
+        { data: first ? [summary] : [], ...(record?.error ? { error: record.error } : {}) },
+        null,
+        2,
+      )
+    : "[image response omitted]";
 }
 
 export class ProviderService {
@@ -663,6 +750,7 @@ export class ProviderService {
   createModel(input: ModelCreateInput): ProviderView {
     const provider = this.requireProvider(input.providerId);
     const normalized = validateModelInput(input);
+    assertImageOutputProtocol(provider.protocol, normalized.outputModalities);
     this.repository.insertModel({
       ...normalized,
       providerId: provider.id,
@@ -672,6 +760,10 @@ export class ProviderService {
 
   updateModel(input: ModelUpdateInput): ProviderView {
     const normalized = validateModelInput(input);
+    const current = this.repository.getModel(input.id);
+    if (!current) throw new Error("模型配置不存在。");
+    const provider = this.requireProvider(current.providerId);
+    assertImageOutputProtocol(provider.protocol, normalized.outputModalities);
     const providerId = this.repository.updateModel(input.id, normalized);
     return this.requireProvider(providerId);
   }
@@ -774,6 +866,12 @@ export class ProviderService {
     if (!model || model.providerId !== providerId) {
       throw new Error("模型配置不存在或不属于该供应商。");
     }
+    const imageTest = isImageOutputModel(model);
+    if (imageTest && !IMAGE_GENERATION_PROTOCOLS.has(provider.protocol)) {
+      throw new Error(
+        "图片输出模型的供应商协议必须为 OpenAI Chat Completions 或 OpenAI Responses 兼容协议。",
+      );
+    }
 
     const apiKey = this.readActiveKey(provider);
     const request = buildConnectionTestRequest(provider.protocol, model);
@@ -788,7 +886,7 @@ export class ProviderService {
         body: JSON.stringify(request.body),
         signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
       });
-      const raw = await response.text();
+      const raw = await readBoundedResponse(response, MAX_CONNECTION_TEST_RESPONSE_BYTES);
       const latencyMs = Math.round(performance.now() - startedAt);
       let payload: unknown = null;
       let body = raw;
@@ -800,8 +898,20 @@ export class ProviderService {
         payload = null;
       }
 
-      const safeBody = redactSecrets(body || response.statusText, apiKey);
-      const responseText = extractResponseText(payload);
+      const safeBody = redactSecrets(
+        imageTest ? summarizeImageResponse(payload) : body || response.statusText,
+        apiKey,
+      );
+      let responseText = imageTest ? "" : extractResponseText(payload);
+      let imageError: string | null = null;
+      if (imageTest && response.ok) {
+        try {
+          const image = await parseImageGenerationResponse(payload);
+          responseText = `图片生成测试成功（${image.mimeType}，${image.byteLength} bytes）。`;
+        } catch (error) {
+          imageError = error instanceof Error ? error.message : String(error);
+        }
+      }
       const candidates = geminiRecord(payload)?.candidates;
       const candidate = geminiRecord(Array.isArray(candidates) ? candidates[0] : null);
       const nativeError =
@@ -809,23 +919,25 @@ export class ProviderService {
         (!responseText.trim() || candidate?.finishReason !== "STOP")
           ? "Gemini 连接测试未返回完整文字，请检查安全拦截、模型输出预算和响应详情。"
           : null;
-      if (!response.ok)
+      if (!response.ok || imageError)
         recordRuntimeError(
           "provider.test",
-          `${response.status} ${response.statusText}\n${safeBody}`,
+          `${response.status} ${response.statusText}\n${safeBody}\n${imageError ?? ""}`,
           { providerId, modelId: modelConfigId, status: response.status },
           [apiKey],
         );
 
       return {
-        ok: response.ok && !nativeError,
+        ok: response.ok && !nativeError && !imageError,
         status: response.status,
         latencyMs,
         requestUrl: url,
         modelId: model.modelId,
         responseText: redactSecrets(responseText, apiKey),
         responseBody: safeBody,
-        error: response.ok ? nativeError : `HTTP ${response.status} ${response.statusText}`.trim(),
+        error: response.ok
+          ? (nativeError ?? imageError)
+          : `HTTP ${response.status} ${response.statusText}`.trim(),
         usage: extractUsage(payload, provider.protocol),
       };
     } catch (error) {

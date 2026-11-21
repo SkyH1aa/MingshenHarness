@@ -20,7 +20,10 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 const labels = {
   edit: ['\u7f16\u8f91\u539f\u6587', 'Edit source'],
   preview: ['\u683c\u5f0f\u9884\u89c8', 'Formatted preview'],
-  setting: ['\u7c98\u8d34\u65f6\u663e\u793a Markdown \u548c\u516c\u5f0f\u683c\u5f0f', 'Render Markdown and math on paste'],
+  setting: [
+    '\u5728\u8f93\u5165\u533a\u663e\u793a Markdown \u548c\u516c\u5f0f\u9884\u89c8\u5f00\u5173',
+    'Show the Markdown and math preview controls in the composer',
+  ],
 };
 const richSource = [
   '## \u516c\u5f0f\u4e0e Markdown',
@@ -159,6 +162,11 @@ async function edit() {
   if (await renderer.evaluate(previewVisible)) await click(formatButton('edit'));
   await until('(()=>{const e=document.querySelector(".composer > textarea");return Boolean(e&&!e.disabled&&e.getClientRects().length)})()');
   await renderer.evaluate('document.querySelector(".composer > textarea").focus({preventScroll:true});true');
+}
+
+async function openPreview() {
+  if (!(await renderer.evaluate(previewVisible))) await click(formatButton('preview'));
+  await until(previewVisible);
 }
 
 async function clear() {
@@ -347,7 +355,14 @@ try {
   assert.equal((await renderer.evaluate('window.mingshen.getUiPreferences()')).composerRichPaste, true);
   await presentation('simple', 'zh-CN', 'night', 1440, 900);
   await paste(richSource);
-  await until(previewVisible);
+  assert.equal(await renderer.evaluate(previewVisible), false);
+  assert.equal(
+    await renderer.evaluate('document.activeElement===document.querySelector(".composer > textarea")'),
+    true,
+    'Text paste must retain source focus',
+  );
+  assert.equal(await value(), richSource);
+  await openPreview();
   assert.equal(await value(), richSource);
   const structure = await renderer.evaluate(`(()=>{
     const p=document.querySelector('.composer-preview');
@@ -364,7 +379,7 @@ try {
   assert.equal(structure.textareaHidden, true);
   await geometry('simple-zh-night-1440');
   await shot('simple-zh-night-1440');
-  record('A paste automatically replaces raw syntax in the composer with Markdown, table, code and KaTeX while retaining exact source');
+  record('Text paste stays in the exact editable source; manual preview renders Markdown, tables, code and KaTeX without changing source');
 
   await renderer.evaluate('document.querySelector(".composer-preview").focus();true');
   await key('Escape', 'Escape', 27);
@@ -379,7 +394,8 @@ try {
   await clear();
   await renderer.send('Input.insertText', { text: 'Prefix KEEP suffix' });
   await paste('**Replacement** $x^2$', { start: 7, end: 11 });
-  await until(previewVisible);
+  assert.equal(await renderer.evaluate(previewVisible), false);
+  await openPreview();
   assert.equal(await value(), 'Prefix **Replacement** $x^2$ suffix');
   await renderer.evaluate('document.querySelector(".composer-preview").focus();true');
   await key('z', 'KeyZ', 90, 2);
@@ -390,7 +406,7 @@ try {
 
   await clear();
   await paste(richSource);
-  await until(previewVisible);
+  await openPreview();
   await renderer.evaluate('document.querySelector(".composer-preview").focus();true');
   await key('a', 'KeyA', 65, 2);
   await until('document.activeElement===document.querySelector(".composer > textarea")&&!document.querySelector(".composer > textarea").hidden');
@@ -430,7 +446,7 @@ try {
   for (const kind of ['empty', 'unsupported-html']) {
     await clear();
     await paste('**Retained draft** $r$');
-    await until(previewVisible);
+    await openPreview();
     const after = await renderer.evaluate(`(()=>{
       const preview=document.querySelector('.composer-preview');preview.focus();
       const data=new DataTransfer();
@@ -457,20 +473,21 @@ try {
   assert.equal(await renderer.evaluate(previewVisible), false);
   await clear();
   await paste('**First** $x$');
-  await until(previewVisible);
+  await openPreview();
   await paste('\n\n**Second** $y$', { target: '.composer-preview' });
-  await until(previewVisible);
+  await until('!document.querySelector(".composer > textarea").hidden&&document.activeElement===document.querySelector(".composer > textarea")');
+  assert.equal(await renderer.evaluate(previewVisible), false);
   assert.equal(await value(), '**First** $x$\n\n**Second** $y$');
   record('Emulated Chinese composition commits in source mode and a further paste from preview reaches the retained native editor');
 
   await clear();
   await paste(rawWithSpacing);
-  await until(previewVisible);
+  await openPreview();
   await sendAndAssert(rawWithSpacing);
   record('Enter from preview sends one request with exact Markdown/LaTeX source and interior whitespace, then clears the draft');
 
   await paste(richSource);
-  await until(previewVisible);
+  await openPreview();
   await openAppearance();
   await toggleSetting(false);
   await shot('setting-off-zh-night');
@@ -492,8 +509,9 @@ try {
   await closeSettings();
   await clear();
   await paste(richSource);
-  await until(previewVisible);
-  record('Appearance toggle applies to the existing draft immediately, disables automatic rendering, persists across reload and can be re-enabled');
+  assert.equal(await renderer.evaluate(previewVisible), false);
+  await openPreview();
+  record('Preview controls apply immediately, persist across reload, and never open preview merely because text was pasted');
 
   await clear();
   const payload = [
@@ -504,7 +522,8 @@ try {
     '[External](https://example.invalid/composer-preview-forbidden) [Local](C:/composer-preview-forbidden.txt)',
   ].join('\n\n');
   await paste(payload);
-  await until(previewVisible);
+  assert.equal(await renderer.evaluate(previewVisible), false);
+  await openPreview();
   const safe = await renderer.evaluate(`(()=>{
     const preview=document.querySelector('.composer-preview');
     return {active:preview.querySelectorAll('img,iframe,object,embed,video,audio,source,style,script,input,button,textarea,select,form').length,
@@ -519,7 +538,7 @@ try {
   assert.equal(await value(), payload);
   await clear();
   await paste('**Malformed formula**\n\n$$\\notAValidMacro{\\frac{1}{ $$');
-  await until(previewVisible);
+  await openPreview();
   assert.ok((await value()).includes('\\notAValidMacro'));
   assert.equal(await renderer.evaluate('Boolean(document.querySelector(".composer-preview .katex-error"))'), true);
   record('Pasted HTML has no active controls, media requests, styles, scripts or navigable links; malformed math remains recoverable with its source');
@@ -534,7 +553,7 @@ try {
   assert.ok(Date.now() - started < 5000, 'A text-budget fallback must not stall the renderer');
   await clear();
   await paste('**Image paste retains this draft** $z$');
-  await until(previewVisible);
+  await openPreview();
   const imagePaste = await renderer.evaluate(`(()=>{
     const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aen8AAAAASUVORK5CYII='),v=>v.charCodeAt(0));
     const data=new DataTransfer();data.items.add(new File([bytes],'synthetic.png',{type:'image/png'}));
@@ -558,7 +577,8 @@ try {
   ]) {
     await presentation(style, locale, theme, width, height);
     await paste(richSource);
-    await until(previewVisible);
+    assert.equal(await renderer.evaluate(previewVisible), false);
+    await openPreview();
     const label = `${style}-${locale}-${theme}-${width}`;
     await geometry(label);
     await shot(label);

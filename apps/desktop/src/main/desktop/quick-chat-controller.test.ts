@@ -111,6 +111,7 @@ describe("Quick chat ten minute sliding session", () => {
       type: "session_updated",
       session: first.session,
     });
+    sessionService.update({ sessionId: first.session?.id ?? "", chatNetworkEnabled: false });
 
     now += 5 * 60 * 1000;
     const readOnly = await quick.state();
@@ -126,7 +127,7 @@ describe("Quick chat ten minute sliding session", () => {
     now += 10 * 60 * 1000;
     const replacement = await quick.activate();
     expect(replacement.session?.id).not.toBe(first.session?.id);
-    expect(replacement.session?.agentMode).toBe("chat");
+    expect(replacement.session).toMatchObject({ agentMode: "chat", chatNetworkEnabled: false });
     const chats = repository.listSessions().filter((session) => session.agentMode === "chat");
     expect(chats).toHaveLength(2);
     expect(chats.some((session) => session.id === first.session?.id)).toBe(true);
@@ -188,6 +189,22 @@ describe("Quick chat ten minute sliding session", () => {
     const recovered = await quick.activate();
     expect(recovered.session).toMatchObject({ providerId, modelId, agentMode: "chat" });
     expect(recovered.error).toBeNull();
+  });
+
+  it("does not reuse an image-output model as a quick chat model", async () => {
+    const quick = controller();
+    const first = await quick.activate();
+    expect(first.session?.modelId).toBe(modelId);
+    const original = repository.getModel(modelId);
+    if (!original) throw new Error("Missing fixture model");
+    repository.updateModel(modelId, { ...original, outputModalities: ["image"] });
+
+    expect((await quick.state()).error).toBeTruthy();
+    expect((await quick.activate()).session).toBeNull();
+    expect(repository.listSessions()).toHaveLength(1);
+
+    const fallback = addModel(providerId, "text-fallback", "Text fallback");
+    expect((await quick.activate()).session?.modelId).toBe(fallback);
   });
 
   it("keeps a creation failure in state until a later successful activation", async () => {
@@ -328,6 +345,21 @@ describe("Quick chat ten minute sliding session", () => {
     );
     expect(quick.permitsIpc(IPC_CHANNELS.sessionMessages, [active.id])).toBe(true);
     expect(quick.permitsIpc(IPC_CHANNELS.sessionMessages, ["other"])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.runSteeringGet, [active.id])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.runSteeringGet, ["other"])).toBe(false);
+    expect(
+      quick.permitsIpc(IPC_CHANNELS.runSteeringSend, [
+        { sessionId: active.id, runId: "run", requestId: "request", text: "Use the new scope" },
+      ]),
+    ).toBe(true);
+    expect(
+      quick.permitsIpc(IPC_CHANNELS.runSteeringSend, [
+        { sessionId: "other", runId: "run", requestId: "request", text: "Use the new scope" },
+      ]),
+    ).toBe(false);
+    expect(
+      quick.permitsIpc(IPC_CHANNELS.runSteeringSend, [{ sessionId: active.id }, "extra"]),
+    ).toBe(false);
     expect(quick.permitsIpc(IPC_CHANNELS.composerDraftClear, [active.id, "revision"])).toBe(true);
     expect(quick.permitsIpc(IPC_CHANNELS.composerDraftClear, ["other", "revision"])).toBe(false);
     expect(
@@ -339,6 +371,7 @@ describe("Quick chat ten minute sliding session", () => {
           modelId,
           reasoningLevel: "low",
           compactionModel: { mode: "default", providerId: null, modelId: null },
+          chatNetworkEnabled: false,
         },
       ]),
     ).toBe(true);
@@ -412,5 +445,11 @@ describe("Quick chat ten minute sliding session", () => {
         sessionId: active.id,
       }),
     ).toBe(true);
+  });
+
+  it("rejects grouped-chat creation IPC from the compact window", () => {
+    const quick = controller();
+    expect(quick.permitsIpc(IPC_CHANNELS.sessionCreateInChatGroup, [null])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.sessionCreateInChatGroup, ["group-id"])).toBe(false);
   });
 });

@@ -21,16 +21,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CompletionNotice } from "../../../shared/desktop";
 import type { SessionRunState, SessionUpdateInput, SessionView } from "../../../shared/domain";
+import type { SessionProjectContexts } from "../../../shared/project-navigation";
 import type { SessionWorkspaceGroup } from "../../../shared/session-catalog";
 import { useLocale } from "../i18n";
 import { tr } from "../i18n/index";
 import { formatDuration, formatRelativeTime } from "../lib/format";
 import {
+  branchNavigationGroups,
   SessionNavigationIndex,
   visibleSessionRows,
   workspaceKey,
 } from "../lib/session-navigation";
 import { useDialog } from "./DialogProvider";
+import { ProjectNavigator } from "./ProjectNavigator";
 import { useUiPreferences } from "./UiPreferences";
 import { VirtualSessionRows } from "./VirtualSessionRows";
 
@@ -90,6 +93,14 @@ export function SessionSidebar({
   const [pages, setPages] = useState<Record<string, { cursor: string | null; total: number }>>({});
   const [searchRows, setSearchRows] = useState<SessionView[] | null>(null);
   const [searchCursor, setSearchCursor] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"project" | "branch">(() => {
+    try {
+      return localStorage.getItem("session-sidebar-view-mode") === "branch" ? "branch" : "project";
+    } catch {
+      return "project";
+    }
+  });
+  const [projectContexts, setProjectContexts] = useState<SessionProjectContexts["contexts"]>({});
   const searchRef = useRef(search);
   searchRef.current = search;
   const withAncestors = useCallback(async (items: SessionView[]) => {
@@ -267,15 +278,19 @@ export function SessionSidebar({
       await act(() => onRemove(session.id));
   };
   const navigation = useRef(new SessionNavigationIndex());
-  const groups = useMemo(() => {
+  const workspaceGroups = useMemo(() => {
     const result = [...navigation.current.groups(searchRows ?? sessions, search)];
     if (!search.trim())
       for (const summary of catalogGroups)
         if (!result.some((item) => item.key === workspaceKey(summary.path)))
           result.push({
             key: workspaceKey(summary.path),
+            workspaceKey: workspaceKey(summary.path),
             path: summary.path,
             label: summary.path?.split(/[\\/]/).at(-1) ?? "",
+            branch: null,
+            branchRecorded: false,
+            worktree: false,
             roots: [],
             children: new Map(),
             sessions: [],
@@ -283,17 +298,64 @@ export function SessionSidebar({
           });
     return result;
   }, [sessions, search, searchRows, catalogGroups]);
+  const groups = useMemo(
+    () =>
+      viewMode === "branch"
+        ? branchNavigationGroups(workspaceGroups, projectContexts)
+        : workspaceGroups,
+    [projectContexts, viewMode, workspaceGroups],
+  );
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
   const [rowLimits, setRowLimits] = useState<Record<string, number>>({});
   const unreadIds = useMemo(
     () => new Set(unreadCompletions.map((item) => item.sessionId)),
     [unreadCompletions],
   );
+  useEffect(() => {
+    if (viewMode !== "branch") return;
+    const ids = [
+      ...new Set(sessions.filter((session) => !session.archived).map((session) => session.id)),
+    ];
+    if (!ids.length) {
+      setProjectContexts({});
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      const contexts: SessionProjectContexts["contexts"] = {};
+      for (let index = 0; index < ids.length; index += 2_000) {
+        const result = await window.mingshen.getProjectContexts(ids.slice(index, index + 2_000));
+        Object.assign(contexts, result.contexts);
+        if (!alive) return;
+      }
+      setProjectContexts(contexts);
+    })().catch((cause) => {
+      if (alive) setActionError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [sessions, viewMode]);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [showAllGroups, setShowAllGroups] = useState<Set<string>>(new Set());
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
+  );
+  const projects = useMemo(
+    () =>
+      workspaceGroups
+        .filter((group): group is typeof group & { path: string } => Boolean(group.path))
+        .map((group) => ({
+          workspacePath: group.path,
+          label: group.label || group.path,
+          unreadCount: group.sessions.reduce(
+            (count, session) => count + Number(unreadIds.has(session.id)),
+            0,
+          ),
+          active: workspaceKey(group.path) === workspaceKey(selectedSession?.workspacePath ?? null),
+        })),
+    [selectedSession?.workspacePath, unreadIds, workspaceGroups],
   );
   const selectedGroup = groups.find((group) =>
     group.sessions.some((item) => item.id === selectedSessionId),
@@ -323,6 +385,40 @@ export function SessionSidebar({
       }
       return next;
     });
+  };
+  const selectProject = (path: string) => {
+    onSearchChange("");
+    const projectGroups = workspaceGroups.filter(
+      (group) => workspaceKey(group.path) === workspaceKey(path),
+    );
+    const matchingGroups =
+      viewMode === "branch"
+        ? branchNavigationGroups(projectGroups, projectContexts)
+        : projectGroups;
+    setExpandedGroups(
+      (current) => new Set([...current, ...matchingGroups.map((group) => group.key)]),
+    );
+    setShowAllGroups(
+      (current) => new Set([...current, ...matchingGroups.map((group) => group.key)]),
+    );
+    const latest = workspaceGroups
+      .filter((group) => workspaceKey(group.path) === workspaceKey(path))
+      .flatMap((group) => group.roots)
+      .sort(
+        (left, right) =>
+          Number(right.pinned) - Number(left.pinned) ||
+          Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+      )[0];
+    if (latest && latest.id !== selectedSessionId) onSelect(latest.id);
+    if (!latest) void loadPage(path, false);
+  };
+  const changeViewMode = (mode: "project" | "branch") => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem("session-sidebar-view-mode", mode);
+    } catch {
+      // The preference is optional in restricted renderer contexts.
+    }
   };
 
   return (
@@ -360,6 +456,35 @@ export function SessionSidebar({
         ) : null}
       </button>
 
+      <ProjectNavigator
+        projects={projects}
+        activeWorkspacePath={selectedSession?.workspacePath}
+        onSelectProject={selectProject}
+      />
+
+      <div className="session-view-toggle" data-testid="session-view-toggle">
+        <button
+          type="button"
+          data-view-mode="project"
+          aria-pressed={viewMode === "project"}
+          title={en ? "Group by project" : "按项目分组"}
+          onClick={() => changeViewMode("project")}
+        >
+          <Folder aria-hidden="true" size={12} />
+          <span>{en ? "Project" : "项目"}</span>
+        </button>
+        <button
+          type="button"
+          data-view-mode="branch"
+          aria-pressed={viewMode === "branch"}
+          title={en ? "Group by branch and worktree" : "按 Git 分支和 worktree 分组"}
+          onClick={() => changeViewMode("branch")}
+        >
+          <GitBranch aria-hidden="true" size={12} />
+          <span>{en ? "Branch" : "分支"}</span>
+        </button>
+      </div>
+
       <label className="session-search">
         <Search aria-hidden="true" size={14} />
         <input
@@ -384,7 +509,11 @@ export function SessionSidebar({
 
       <nav
         className="session-groups"
-        aria-label={tr("\u6309\u5DE5\u4F5C\u6587\u4EF6\u5939\u5206\u7C7B\u7684\u4F1A\u8BDD")}
+        aria-label={
+          viewMode === "branch"
+            ? tr("按 Git 分支和工作树分类的会话")
+            : tr("\u6309\u5DE5\u4F5C\u6587\u4EF6\u5939\u5206\u7C7B\u7684\u4F1A\u8BDD")
+        }
       >
         {groups.length === 0 ? (
           <p className="session-list__empty">
@@ -405,15 +534,38 @@ export function SessionSidebar({
           );
           const rowLimit = rowLimits[`${group.key}:${search}`] ?? 100;
           const renderedSessions = visibleSessions.slice(0, rowLimit);
-          const GroupFolderIcon = expanded ? FolderOpen : Folder;
+          const GroupFolderIcon =
+            viewMode === "branch" ? GitBranch : expanded ? FolderOpen : Folder;
+          const branchLabel = group.branch
+            ? group.branch
+            : group.branchRecorded
+              ? en
+                ? "No branch"
+                : "无可用分支"
+              : en
+                ? "Branch not recorded"
+                : "分支未记录";
+          const groupTitle =
+            viewMode === "branch"
+              ? `${group.path ?? group.label} · ${branchLabel}${group.worktree ? (en ? " · worktree" : " · 工作树") : ""}`
+              : (group.path ?? group.label);
           return (
-            <section className="session-group" key={group.key}>
+            <section
+              className="session-group"
+              key={group.key}
+              data-testid="session-group"
+              data-session-group-key={group.key}
+              data-workspace-key={group.workspaceKey}
+              data-branch={group.branch ?? ""}
+              data-branch-recorded={group.branchRecorded ? "true" : "false"}
+              data-worktree={group.worktree ? "true" : "false"}
+            >
               <div className="session-group__heading">
                 <button
                   className="session-group__header"
                   type="button"
                   aria-expanded={expanded}
-                  title={group.path ?? group.label}
+                  title={groupTitle}
                   onClick={() => {
                     toggleGroup(group.key);
                     if (!group.roots.length) void loadPage(group.path, false);
@@ -425,10 +577,26 @@ export function SessionSidebar({
                     <ChevronRight aria-hidden="true" size={14} />
                   )}
                   <GroupFolderIcon aria-hidden="true" size={14} />
-                  <span>{group.label || tr("未选择文件夹")}</span>
+                  {viewMode === "branch" ? (
+                    <span className="session-group__branch">
+                      <span>{group.label || tr("未选择文件夹")}</span>
+                      <code>/</code>
+                      <strong>{branchLabel}</strong>
+                      {group.worktree ? (
+                        <span className="session-group__worktree">
+                          {en ? "WORKTREE" : "工作树"}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span>{group.label || tr("未选择文件夹")}</span>
+                  )}
                   <code>
-                    {catalogGroups.find((item) => workspaceKey(item.path) === group.key)?.total ??
-                      group.roots.length}
+                    {viewMode === "branch"
+                      ? group.roots.length
+                      : (catalogGroups.find(
+                          (item) => workspaceKey(item.path) === group.workspaceKey,
+                        )?.total ?? group.roots.length)}
                   </code>
                   {group.sessions.some((item) => unreadIds.has(item.id)) ? (
                     <span

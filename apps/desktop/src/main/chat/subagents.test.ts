@@ -290,7 +290,7 @@ describe("Subagent concurrency", () => {
 
     await expect(
       internal.runSubagent(parent, signal, { task: "inspect", agent: "worker" }, "parent-run"),
-    ).resolves.toEqual({ output: "Child finished", isError: false });
+    ).resolves.toEqual({ output: "Child finished", isError: false, childSessionId: "child" });
     expect(runPluginHooks).toHaveBeenCalledExactlyOnceWith(
       "SubagentStop",
       parent,

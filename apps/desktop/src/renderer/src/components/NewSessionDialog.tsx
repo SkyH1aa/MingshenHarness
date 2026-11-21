@@ -9,6 +9,7 @@ import type {
   SessionExecutionMode,
   SessionView,
 } from "../../../shared/domain";
+import { textOutputProviders } from "../../../shared/model-capabilities";
 import type { MemoryBackend, ProjectMemorySelection } from "../../../shared/project-memory";
 import { tr } from "../i18n/index";
 import { agentLabel } from "../lib/agent-labels";
@@ -43,7 +44,8 @@ export function NewSessionDialog({
       ),
     [agentProfiles, initialAgentMode],
   );
-  const firstProvider = providers.find((provider) => provider.models.length > 0);
+  const textProviders = textOutputProviders(providers);
+  const firstProvider = textProviders[0];
   const [selection, setSelection] = useState<ModelSelection | null>(
     firstProvider?.models[0]
       ? { providerId: firstProvider.id, configId: firstProvider.models[0].id }
@@ -67,7 +69,7 @@ export function NewSessionDialog({
   const [memoryRefresh, setMemoryRefresh] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const selectedProvider = providers.find((provider) => provider.id === selection?.providerId);
+  const selectedProvider = textProviders.find((provider) => provider.id === selection?.providerId);
   const selectedModel = selectedProvider?.models.find((model) => model.id === selection?.configId);
   const initialReasoning =
     selectedModel?.reasoningLevels.find((level) => level !== "none") ??

@@ -1,0 +1,45 @@
+.agent-workflow { min-width: 0; padding: 5px 8px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.agent-workflow__actions { display: flex; align-items: center; gap: 4px; }
+.agent-workflow__actions .btn { min-height: 28px; padding: 4px 6px; font-size: 12px; }
+.agent-workflow__phase { margin-left: auto; color: var(--muted); }
+.agent-workflow__phase[data-phase="completed"] { color: var(--success); }
+.agent-workflow__phase[data-phase="failed"] { color: var(--danger); }
+.agent-workflow__coordination { margin-top: 4px; overflow-wrap: anywhere; }
+.agent-workflow__coordination > summary { display: flex; gap: 6px; align-items: center; cursor: pointer; padding: 5px 0; }
+.agent-workflow__coordination > summary > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-workflow__coordination > summary > strong { flex-shrink: 0; font-size: 11px; }
+.agent-workflow__coordination > ol { padding: 0; list-style: none; }
+.agent-workflow__coordination > ol > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 7px 0; border-top: 1px solid var(--line); }
+.agent-workflow__coordination small { display: block; color: var(--muted); }
+.agent-workflow__coordination p { white-space: pre-wrap; line-height: 1.5; max-height: 120px; overflow: auto; }
+.agent-workflow__coordination li > p { grid-column: 1 / -1; margin: 0; }
+.agent-workflow__error { margin: 6px 0; color: var(--danger); overflow-wrap: anywhere; font-size: 12px; }
+.autodrive-layer { position: fixed; inset: 0; z-index: 1600; display: grid; place-items: center; padding: 24px; }
+.autodrive-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: rgb(0 0 0 / 45%); }
+.autodrive-dialog { position: relative; display: flex; flex-direction: column; width: min(900px, 100%); max-height: min(760px, calc(100dvh - 48px)); border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 18px 60px rgb(0 0 0 / 24%); overflow: hidden; }
+.autodrive-dialog > header, .autodrive-dialog > footer { display: flex; align-items: center; gap: 12px; padding: 16px 20px; flex-shrink: 0; }
+.autodrive-dialog > header { justify-content: space-between; border-bottom: 1px solid var(--line); }
+.autodrive-dialog > header span { color: var(--brand); font-size: 12px; }
+.autodrive-dialog h2 { font-size: 19px; margin: 4px 0 0; }
+.autodrive-dialog__content { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); min-height: 0; overflow: auto; }
+.autodrive-dialog__content > nav { padding: 12px; border-right: 1px solid var(--line); }
+.autodrive-dialog__content > nav > button { display: grid; grid-template-columns: 20px minmax(0, 1fr) 15px; align-items: start; gap: 8px; width: 100%; margin-bottom: 6px; padding: 12px 10px; text-align: left; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.autodrive-dialog__content > nav > button[aria-pressed="true"] { border-color: var(--line-strong); background: var(--surface-hover); color: var(--text); }
+.autodrive-dialog__content > nav > button > span { color: var(--brand); font-size: 11px; }
+.autodrive-dialog__content > nav svg { margin-top: 2px; }
+.autodrive-dialog article { padding: 20px 24px; font-size: 13px; line-height: 1.7; min-width: 0; overflow-wrap: anywhere; }
+.autodrive-dialog h3 { font-size: 17px; margin: 0 0 12px; }
+.autodrive-dialog h4 { font-size: 13px; margin: 20px 0 6px; }
+.autodrive-dialog article ol, .autodrive-dialog article ul { padding-left: 20px; }
+.autodrive-dialog article li { margin-bottom: 5px; }
+.autodrive-rationale { color: var(--muted); }
+.autodrive-dialog > footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.autodrive-dialog > .agent-workflow__error { padding: 0 20px; }
+@media (max-width: 650px) {
+  .autodrive-layer { padding: 12px; }
+  .autodrive-dialog { max-height: calc(100dvh - 24px); }
+  .autodrive-dialog__content { grid-template-columns: minmax(0, 1fr); }
+  .autodrive-dialog__content > nav { border-right: 0; border-bottom: 1px solid var(--line); }
+  .autodrive-dialog__content > nav > button { padding: 7px 10px; }
+  .autodrive-dialog article { padding: 16px; }
+}

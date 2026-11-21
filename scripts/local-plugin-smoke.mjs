@@ -1507,10 +1507,10 @@ try {
     workInventory.pages > 1,
     `Work inventory must exercise pagination: ${workInventory.pages} page`,
   );
-  assert.equal(workSources.length, 124, JSON.stringify(workInventory.matches));
+  assert.equal(workSources.length, 98, JSON.stringify(workInventory.matches));
   assert.equal(workFoundationSkills.length, 16, JSON.stringify(workInventory.matches));
-  assert.equal(workInventory.matches.length, 140, JSON.stringify(workInventory.matches));
-  assert.equal(uniqueWorkSourceShas.size, 104);
+  assert.equal(workInventory.matches.length, 114, JSON.stringify(workInventory.matches));
+  assert.equal(uniqueWorkSourceShas.size, 98);
   assert.ok(
     workSources.every(
       (source) =>
@@ -1527,7 +1527,7 @@ try {
     "Work source matches must expose exact ids, source hashes and compatibility",
   );
   passed.push(
-    "Paginated Work discovery exposes 124 exact source ids backed by 104 unique source bodies",
+    "Paginated Work discovery exposes 98 active source ids backed by 98 unique source bodies",
   );
   const workPluginInventory = await discoverPages(
     workSession,
@@ -1539,7 +1539,7 @@ try {
     ["builtin:plugin-browser", "builtin:plugin-github"],
   );
   passed.push(
-    "Skill and plugin inventory counts are separated: Code has 9 Skills plus 2 plugins, and Work has 16 foundation Skills plus 124 sources and the same 2 plugins",
+    "Skill and plugin inventory counts are separated: Code has 9 Skills plus 2 plugins, and Work has 16 foundation Skills plus 98 active sources and the same 2 plugins",
   );
 
   const workPdfDiscovery = await discoverPages(
@@ -1556,23 +1556,18 @@ try {
         /(^|\/)pdf/i.test(match.source_path ?? "")),
   );
   const pdfShas = new Set(workPdfSources.map((source) => source.source_sha256));
-  assert.equal(workPdfSources.length, 10, JSON.stringify(workPdfSources));
-  assert.equal(pdfShas.size, 5, JSON.stringify(workPdfSources));
-  const legacyPdfViewer = workPdfSources.find(
-    (source) =>
-      source.source_path === "pdf-1/0.2.1/skills/pdf-viewer/SKILL.md",
+  assert.equal(workPdfSources.length, 4, JSON.stringify(workPdfSources));
+  assert.equal(pdfShas.size, 4, JSON.stringify(workPdfSources));
+  const alternatePdfSkill = workPdfSources.find(
+    (source) => source.source_path === "pdf-reading/SKILL.md",
   );
   const currentPdfViewer = workPdfSources.find(
     (source) =>
-      source.source_path === "pdf-1/0.2.2/skills/pdf-viewer/SKILL.md",
+      source.source_path === "pdf-1/0.2.3/skills/pdf-viewer/SKILL.md",
   );
-  assert.ok(legacyPdfViewer, JSON.stringify(workPdfSources));
+  assert.ok(alternatePdfSkill, JSON.stringify(workPdfSources));
   assert.ok(currentPdfViewer, JSON.stringify(workPdfSources));
-  assert.notEqual(legacyPdfViewer.id, currentPdfViewer.id);
-  assert.notEqual(
-    legacyPdfViewer.source_sha256,
-    currentPdfViewer.source_sha256,
-  );
+  assert.ok(!workPdfSources.some((source) => /\/0\.2\.[12]\//.test(source.source_path)));
   const firstPdfRequest = workPdfDiscovery.requestBatches[0]?.[0];
   assert.ok(
     (firstPdfRequest?.tools ?? []).some(
@@ -1589,27 +1584,17 @@ try {
       ),
     "The host must not pre-inject catalog source ids into instructions or tools",
   );
-  const pdfSelections = [legacyPdfViewer, currentPdfViewer];
-  const selectedPdfShas = new Set([
-    legacyPdfViewer.source_sha256,
-    currentPdfViewer.source_sha256,
-  ]);
-  for (const source of workPdfSources) {
-    if (selectedPdfShas.has(source.source_sha256)) continue;
-    selectedPdfShas.add(source.source_sha256);
-    pdfSelections.push(source);
-    if (pdfSelections.length === 5) break;
-  }
-  assert.equal(pdfSelections.length, 5);
+  const pdfSelections = workPdfSources;
+  assert.equal(pdfSelections.length, 4);
   assert.equal(
     new Set(pdfSelections.map((source) => source.source_sha256)).size,
-    5,
-    "The loaded PDF set must contain five distinct source bodies",
+    4,
+    "The loaded PDF set must contain four distinct source bodies",
   );
   const pdfLoaded = await loadWorkSources(
     workSession,
     pdfSelections,
-    "Load all five distinct PDF source bodies returned by paginated discovery.",
+    "Load all four distinct active PDF sources returned by paginated discovery.",
   );
   const pdfBodies = new Set();
   pdfSelections.forEach((source, index) => {
@@ -1620,20 +1605,9 @@ try {
     assert.ok(body.length >= 80, result.output);
     pdfBodies.add(body);
   });
-  assert.equal(pdfBodies.size, 5);
-  const legacyPdfIndex = pdfSelections.findIndex(
-    (source) => source.id === legacyPdfViewer.id,
-  );
-  const currentPdfIndex = pdfSelections.findIndex(
-    (source) => source.id === currentPdfViewer.id,
-  );
-  assert.ok(legacyPdfIndex >= 0 && currentPdfIndex >= 0);
-  assert.notEqual(
-    workSourceBody(pdfLoaded.results[legacyPdfIndex].output),
-    workSourceBody(pdfLoaded.results[currentPdfIndex].output),
-  );
+  assert.equal(pdfBodies.size, 4);
   passed.push(
-    "The model discovers 10 paginated PDF sources, including both viewer versions, and loads five distinct source bodies by exact id",
+    "The model discovers and loads four distinct current PDF sources by exact id",
   );
 
   const chosenIds = new Set();
@@ -1696,41 +1670,17 @@ try {
   });
   assert.ok(sampleBodies.size >= 4, "Authored Work source families must not collapse into one body");
 
-  historicalWorkSources = [
-    "documents-1/0.2.1/skills/docx-viewer/SKILL.md",
-    "documents-1/0.2.2/skills/docx-viewer/SKILL.md",
-  ].map((sourcePath) => {
-    const source = workSources.find(
-      (candidate) => candidate.source_path === sourcePath,
-    );
-    assert.ok(source, `Missing historical Work viewer source: ${sourcePath}`);
-    return source;
-  });
-  assert.equal(
-    new Set(historicalWorkSources.map((source) => source.id)).size,
-    2,
-  );
-  assert.equal(
-    new Set(historicalWorkSources.map((source) => source.source_sha256)).size,
-    1,
-  );
+  historicalWorkSources = [{ id: "builtin:work-source-documents-0-2-1-docx-viewer-dee7d8d6" }];
   const historicalLoad = await loadWorkSources(
     workSession,
     historicalWorkSources,
-    "Load two historical exact ids that share one source SHA.",
+    "Attempt to load a superseded Word viewer version.",
   );
-  const historicalBodies = historicalLoad.results.map((result) => {
-    assert.equal(result.isError, false, result.output);
-    return workSourceBody(result.output);
-  });
-  assert.equal(historicalBodies[0], historicalBodies[1]);
-  assert.notEqual(
-    historicalLoad.results[0].output,
-    historicalLoad.results[1].output,
-    "Historical exact ids must retain distinct metadata in the full output",
-  );
+  assert.equal(historicalLoad.results[0].isError, true);
+  assert.ok(historicalLoad.results[0].output.includes("SKILL_VERSION_SUPERSEDED"));
+  assert.ok(historicalLoad.results[0].output.includes(workSourceSamples[3].source.id));
   passed.push(
-    "Word, Excel, PowerPoint, viewer and design samples load on demand; historical same-SHA ids remain exact and compatible",
+    "Word, Excel, PowerPoint, viewer and design samples load on demand; superseded viewer ids point to the current version",
   );
 
   pinnedWorkSession = await api("createSession", {
@@ -1761,34 +1711,34 @@ try {
     "builtin:work-asd-ste100",
   );
   await toggleBuiltinPickerCapability(
-    "pdf-viewer",
-    "0.2.1",
-    legacyPdfViewer.id,
+    "pdf-reading",
+    null,
+    alternatePdfSkill.id,
   );
   assert.deepEqual(
     (await selectedBuiltinChipNames()).sort(),
-    ["pdf-viewer", "work-asd-ste100", "work-ppt-master"],
+    ["pdf-reading", "work-asd-ste100", "work-ppt-master"],
   );
   const firstPinnedSelectionIds = await selectedBuiltinIds(pinnedWorkSession.id);
   assert.ok(firstPinnedSelectionIds.includes("builtin:work-ppt-master"));
   assert.ok(firstPinnedSelectionIds.includes("builtin:work-asd-ste100"));
-  assert.ok(firstPinnedSelectionIds.includes(legacyPdfViewer.id));
+  assert.ok(firstPinnedSelectionIds.includes(alternatePdfSkill.id));
   assert.ok(!firstPinnedSelectionIds.includes(currentPdfViewer.id));
 
   assert.equal(
     await renderer.evaluate(
-      `(${builtinChipMatchesExpression(legacyPdfViewer.id)}).length`,
+      `(${builtinChipMatchesExpression(alternatePdfSkill.id)}).length`,
     ),
     1,
   );
-  await removeBuiltinChip(legacyPdfViewer.id);
+  await removeBuiltinChip(alternatePdfSkill.id);
   assert.deepEqual(
     (await selectedBuiltinIds(pinnedWorkSession.id)).sort(),
     ["builtin:work-asd-ste100", "builtin:work-ppt-master"],
   );
   await toggleBuiltinPickerCapability(
     "pdf-viewer",
-    "0.2.2",
+    "0.2.3",
     currentPdfViewer.id,
   );
   await click(".extension-trigger:not(.extension-trigger--attachment)");
@@ -1818,7 +1768,7 @@ try {
     (capability) => capability.id === currentPdfViewer.id,
   );
   assert.ok(selectedPdfCapability);
-  assert.equal(selectedPdfCapability.version, "0.2.2");
+  assert.equal(selectedPdfCapability.version, "0.2.3");
   assert.equal(
     selectedPdfCapability.sourcePath,
     currentPdfViewer.source_path,
@@ -1828,7 +1778,7 @@ try {
     currentPdfViewer.source_sha256,
   );
   passed.push(
-    "The real capability picker selects PPTMaster, ASD-STE100 and exact PDF viewer 0.2.1, cancels its chip, and replaces it with 0.2.2 while IPC retains the exact ids and source metadata",
+    "The real capability picker selects and removes a distinct PDF reading skill, then selects the current PDF viewer with exact source metadata",
   );
 
   const previousUiPreferences = await api("getUiPreferences");
@@ -1925,38 +1875,40 @@ try {
   await setCaptureLocale("zh-CN");
   await setCaptureTheme("day");
 
-  const pdfSameNameIds = [legacyPdfViewer.id, currentPdfViewer.id];
-  const pdfSameNameSelectors = pdfSameNameIds.map(
+  const pdfViewerSelectors = [currentPdfViewer.id].map(
     (id) =>
       `[data-testid="builtin-capability-item"][data-capability-id="${id}"]`,
   );
   await openBuiltinPicker("pdf-viewer");
   await until(
-    pdfSameNameSelectors
+    pdfViewerSelectors
       .map((selector) => `Boolean(document.querySelector(${JSON.stringify(selector)}))`)
       .join("&&"),
   );
-  const pdfSameNameItems = await renderer.evaluate(`(()=>{
-    return ${JSON.stringify(pdfSameNameIds)}.map(id=>{
+  const pdfViewerItems = await renderer.evaluate(`(()=>{
+    return ${JSON.stringify([currentPdfViewer.id])}.map(id=>{
       const item=document.querySelector('[data-testid="builtin-capability-item"][data-capability-id="'+id+'"]');
       return item?{id,label:item.querySelector(".extension-item__copy strong")?.textContent.trim()??"",version:item.querySelector("code")?.textContent.trim()??""}:null;
     });
   })()`);
   assert.deepEqual(
-    pdfSameNameItems.map((item) => item?.label),
-    ["pdf-viewer", "pdf-viewer"],
+    pdfViewerItems.map((item) => item?.label),
+    ["pdf-viewer"],
   );
   assert.deepEqual(
-    pdfSameNameItems.map((item) => item?.version),
-    ["v0.2.1", "v0.2.2"],
+    pdfViewerItems.map((item) => item?.version),
+    ["v0.2.3"],
   );
+  assert.equal(await renderer.evaluate(
+    'document.querySelectorAll(\'[data-testid="builtin-capability-item"] .extension-item__copy strong\').length',
+  ), 1);
   await captureCurrentScreen(
     "work-capability-picker-pdf-versions-orbit-day",
     1440,
     960,
     {
       targetSelector: '[data-testid="capability-picker-panel"]',
-      requiredSelectors: pdfSameNameSelectors,
+      requiredSelectors: pdfViewerSelectors,
       overflowSelectors: [
         '[data-testid="capability-picker-panel"]',
         ".extension-panel__header",
@@ -1970,7 +1922,7 @@ try {
   await click(".extension-trigger:not(.extension-trigger--attachment)");
   await until('!document.querySelector(".extension-panel")');
   passed.push(
-    "Work capability picker screenshots cover PPTMaster and ASD-STE100 in Orbit day, night and English at 800 pixels, plus both exact PDF viewer versions with the same displayed name",
+    "Work capability picker screenshots cover PPTMaster and ASD-STE100 in Orbit day, night and English at 800 pixels, plus the single current PDF viewer",
   );
 
   const pinnedRun = await run(pinnedWorkSession, [], {
@@ -2551,7 +2503,7 @@ try {
   pinnedCapabilityEvidence = {
     sessionId: pinnedWorkSession.id,
     selectedIds: pinnedCapabilityIds,
-    legacyPdfViewerId: legacyPdfViewer.id,
+    alternatePdfSkillId: alternatePdfSkill.id,
     currentPdfViewerId: currentPdfViewer.id,
     currentPdfViewerSourcePath: currentPdfViewer.source_path,
     currentPdfViewerSourceSha256: currentPdfViewer.source_sha256,
@@ -3159,7 +3111,7 @@ try {
       pdfSourceIds: workPdfSources.map((source) => source.id),
       pdfDiscoveryPages: workPdfDiscovery.pages,
       loadedPdfSourceIds: pdfSelections.map((source) => source.id),
-      legacyPdfViewerId: legacyPdfViewer.id,
+      alternatePdfSkillId: alternatePdfSkill.id,
       currentPdfViewerId: currentPdfViewer.id,
       sampleSources: workSourceSamples.map(({ label, source }) => ({
         label,
@@ -3167,7 +3119,7 @@ try {
         compatibility: source.compatibility,
         sourceSha256: source.source_sha256,
       })),
-      historicalSameShaIds: historicalWorkSources.map((source) => source.id),
+      supersededSourceIds: historicalWorkSources.map((source) => source.id),
     },
     persistence: {
       marketId,

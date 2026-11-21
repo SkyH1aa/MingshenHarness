@@ -28,7 +28,11 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 const sse = (...events: unknown[]) =>
-  new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  new Response(
+    events
+      .map((event) => `data: ${typeof event === "string" ? event : JSON.stringify(event)}\n\n`)
+      .join(""),
+  );
 const tool = (name: string, args: unknown, id = "call") =>
   sse(
     {
@@ -39,11 +43,60 @@ const tool = (name: string, args: unknown, id = "call") =>
   );
 const answer = (text = "Done") =>
   sse({ type: "response.output_text.delta", delta: text }, { type: "response.completed" });
+const outputLimitedAfterReasoning = () =>
+  sse(
+    {
+      type: "response.reasoning_summary_text.delta",
+      delta: "Internal planning consumed the budget.",
+    },
+    {
+      type: "response.incomplete",
+      response: { incomplete_details: { reason: "max_output_tokens" } },
+    },
+  );
+const chatCompletionTool = (id: string, name: string, args: unknown, reasoning: string) =>
+  sse(
+    {
+      choices: [
+        {
+          delta: {
+            reasoning_content: reasoning,
+            tool_calls: [
+              {
+                index: 0,
+                id,
+                type: "function",
+                function: { name, arguments: JSON.stringify(args) },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    "[DONE]",
+  );
+const chatCompletionAnswer = (text: string, reasoning: string) =>
+  sse(
+    {
+      choices: [
+        {
+          delta: { reasoning_content: reasoning, content: text },
+          finish_reason: null,
+        },
+      ],
+    },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+    "[DONE]",
+  );
 interface ModelRequest {
   model: string;
   instructions: string;
   input: Array<{ role: string; content: string }>;
   tools?: unknown[];
+  max_output_tokens?: number;
+  reasoning?: unknown;
 }
 const requestBody = (init?: RequestInit) => JSON.parse(String(init?.body)) as ModelRequest;
 const memoryStage = (body: ModelRequest) =>
@@ -53,6 +106,26 @@ const memoryStage = (body: ModelRequest) =>
       ? "dedup"
       : "chat";
 const memoryInput = (body: ModelRequest) => body.input.map((item) => item.content).join("\n");
+async function awaitStarted(
+  signal: Promise<void>,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} did not start within ${timeoutMs}ms.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const memoryExtraction = (body: ModelRequest, content?: string) => {
   const ids = [...memoryInput(body).matchAll(/^\[([^\]]+)\] \[(?:user|assistant)\] /gm)].map(
     (match) => match[1],
@@ -97,21 +170,28 @@ const twoSteps = (guard = "ready") => ({
     },
   ],
 });
-async function fixture(backend: MemoryBackend = "native") {
+interface FixtureProviderOptions {
+  protocol?: "openai_responses" | "openai_chat_completions";
+  baseUrl?: string;
+  modelId?: string;
+  reasoningLevel?: string | null;
+}
+
+async function fixture(backend: MemoryBackend = "native", options: FixtureProviderOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "mingshen-decision-memory-"));
   const db = openDatabase(":memory:");
   const repository = new Repository(db);
   commitProjectMemoryBackend(repository, root, backend);
   const provider = repository.insertProvider({
     name: "Local fixture",
-    baseUrl: "https://fixture.invalid/v1",
-    protocol: "openai_responses",
+    baseUrl: options.baseUrl ?? "https://fixture.invalid/v1",
+    protocol: options.protocol ?? "openai_responses",
     authMode: "bearer",
     customHeaderName: null,
   });
   repository.insertModel({
     providerId: provider.id,
-    modelId: "fixture",
+    modelId: options.modelId ?? "fixture",
     displayName: "Fixture",
     contextWindow: 128000,
     maxOutputTokens: 2048,
@@ -141,7 +221,7 @@ async function fixture(backend: MemoryBackend = "native") {
     workspacePath: root,
     agentProfileId: profile.id,
     systemPrompt: "",
-    reasoningLevel: null,
+    reasoningLevel: options.reasoningLevel ?? null,
     permissionMode: "full_access",
     executionMode: "host",
     patchOnly: false,
@@ -240,6 +320,31 @@ function analysisModel(f: Awaited<ReturnType<typeof fixture>>, name: string): Mo
   return { providerId: provider.id, modelId: model.id };
 }
 
+async function blockNextMemoryWrite(memory: ChatService["projectMemory"]) {
+  const internal = memory as unknown as {
+    write: (root: string, file: string, text: string, expected?: string) => Promise<void>;
+  };
+  const original = internal.write.bind(memory);
+  let release: () => void = () => undefined;
+  let started: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let first = true;
+  vi.spyOn(internal, "write").mockImplementation(async (...args) => {
+    if (first) {
+      first = false;
+      started();
+      await gate;
+    }
+    await original(...args);
+  });
+  return { blocked, release };
+}
+
 describe("decision reuse runtime", () => {
   it("returns rendered Work pages to the model when write receipts use absolute workspace paths", async () => {
     const f = await fixture();
@@ -261,6 +366,15 @@ describe("decision reuse runtime", () => {
       return {
         output: preview ? "Microsoft Office verified; PDF exported." : "Workbook created.",
         isError: false,
+        ...(preview
+          ? {
+              officeVerification: {
+                status: "verified" as const,
+                render: "verified" as const,
+                recalculation: "not_requested" as const,
+              },
+            }
+          : {}),
         fileChanges: [
           {
             path: join(f.root, String(preview ? args.render_path : args.path)),
@@ -329,6 +443,51 @@ describe("decision reuse runtime", () => {
     ]);
     expect(results.map((part) => part.callId)).toEqual(calls.map((part) => part.callId));
     expect(f.chat.workbench.state(f.session.id).checkpoint?.uncertainTools).toEqual([]);
+    expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+  });
+
+  it("collapses execution-chain steps into a valid DeepSeek thinking tool history", async () => {
+    const f = await fixture("native", {
+      protocol: "openai_chat_completions",
+      baseUrl: "https://api.deepseek.com/v1",
+      modelId: "deepseek-reasoner",
+      reasoningLevel: "high",
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return bodies.length === 1
+          ? chatCompletionTool("chain-root", "execute_tool_chain", twoSteps(), "Plan native chain.")
+          : chatCompletionAnswer("Done", "Review native chain.");
+      }),
+    );
+
+    await f.run();
+
+    expect(bodies).toHaveLength(2);
+    const messages = bodies[1]?.messages as Array<Record<string, unknown>>;
+    const assistants = messages.filter((message) => message.role === "assistant");
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]).toMatchObject({
+      reasoning_content: "Plan native chain.",
+      tool_calls: [{ id: "chain-root", function: { name: "execute_tool_chain" } }],
+    });
+    const rootResult = messages.find(
+      (message) => message.role === "tool" && message.tool_call_id === "chain-root",
+    );
+    expect(rootResult?.content).toEqual(expect.stringContaining("ready"));
+    expect(rootResult?.content).toEqual(expect.stringContaining("next result"));
+    expect(
+      messages
+        .flatMap((message) =>
+          Array.isArray(message.tool_calls)
+            ? (message.tool_calls as Array<Record<string, unknown>>)
+            : [],
+        )
+        .map((call) => call.id),
+    ).toEqual(["chain-root"]);
     expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
   });
 
@@ -440,20 +599,29 @@ describe("decision reuse runtime", () => {
       vi.fn(async () => (++count === 1 ? tool("execute_tool_chain", twoSteps()) : answer())),
     );
     const pending = f.run();
-    await vi.waitFor(() => expect(f.broker.state().requests).toHaveLength(1));
-    const request = f.broker.state().requests[0];
-    if (!request) throw new Error("Expected approval");
-    expect(request.toolName).toBe("read_file");
-    f.broker.decide({ approvalId: request.id, decision: "deny" });
-    await pending;
-    const results = f.repository
-      .getMessages(f.session.id)
-      .flatMap((message) => message.parts.filter((part) => part.type === "tool_result"));
-    expect(results).toHaveLength(2);
-    expect(results[1]?.isError).toBe(true);
-    expect(f.broker.state().requests).toEqual([]);
-    expect(count).toBe(2);
-  });
+    void pending.catch(() => undefined);
+    try {
+      await vi.waitFor(() => expect(f.broker.state().requests).toHaveLength(1), {
+        timeout: 10_000,
+      });
+      const request = f.broker.state().requests[0];
+      if (!request) throw new Error("Expected approval");
+      expect(request.toolName).toBe("read_file");
+      f.broker.decide({ approvalId: request.id, decision: "deny" });
+      await pending;
+      const results = f.repository
+        .getMessages(f.session.id)
+        .flatMap((message) => message.parts.filter((part) => part.type === "tool_result"));
+      expect(results).toHaveLength(2);
+      expect(results[1]?.isError).toBe(true);
+      expect(f.broker.state().requests).toEqual([]);
+      expect(count).toBe(2);
+    } finally {
+      f.controller.abort();
+      f.broker.cancelSession(f.session.id);
+      await pending;
+    }
+  }, 20_000);
 
   it("charges each cached action against the tool budget instead of allowing a fresh tool round", async () => {
     const f = await fixture();
@@ -1012,6 +1180,10 @@ describe("memory runtime", () => {
       const pendingAnalysis = new Promise<void>((resolve) => {
         release = resolve;
       });
+      let analysisStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => {
+        analysisStarted = resolve;
+      });
       const requests: ModelRequest[] = [];
       vi.stubGlobal(
         "fetch",
@@ -1020,6 +1192,7 @@ describe("memory runtime", () => {
           requests.push(body);
           if (memoryStage(body) === "chat")
             return answer("Atomic cache snapshot validation passed.");
+          analysisStarted();
           await pendingAnalysis;
           return memoryExtraction(
             body,
@@ -1029,9 +1202,8 @@ describe("memory runtime", () => {
       );
       const pending = f.run();
       try {
-        await vi.waitFor(() =>
-          expect(requests.map((body) => body.model)).toEqual(["fixture", "memory-primary"]),
-        );
+        await awaitStarted(started, "Tencent memory analysis request");
+        expect(requests.map((body) => body.model)).toEqual(["fixture", "memory-primary"]);
         if (change === "cancel") f.controller.abort();
         else if (change === "disable") await f.chat.setProjectMemoryEnabled(f.session.id, false);
         else {
@@ -1079,6 +1251,211 @@ describe("memory runtime", () => {
     await expect(f.chat.projectMemoryCommand(f.session.id, "/memory unknown")).rejects.toThrow(
       "stats",
     );
+  });
+
+  it.each(["disable", "backend"] as const)(
+    "does not save a native diary queued behind another write after %s",
+    async (change) => {
+      const f = await fixture();
+      await f.chat.setProjectMemoryEnabled(f.session.id, true);
+      const writer = await blockNextMemoryWrite(f.chat.projectMemory);
+      const originalAdd = f.chat.projectMemory.add.bind(f.chat.projectMemory);
+      let secondAddStarted: () => void = () => undefined;
+      const secondAdd = new Promise<void>((resolve) => {
+        secondAddStarted = resolve;
+      });
+      let addCalls = 0;
+      const addMemory = vi
+        .spyOn(f.chat.projectMemory, "add")
+        .mockImplementation(async (...args: Parameters<typeof f.chat.projectMemory.add>) => {
+          addCalls++;
+          if (addCalls === 2) secondAddStarted();
+          return await originalAdd(...args);
+        });
+      let first: Promise<string> | null = null;
+      const concise =
+        "本次完成支付模块重试策略检查，确认断线后保留已完成操作，避免重复写入，并决定采用精简偏好与按需检索降低上下文开销，后续保留诊断和取消边界测试。";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url, init) => {
+          const body = requestBody(init);
+          if (!body.instructions.includes("[PROJECT_MEMORY_SUMMARY]"))
+            return answer("Task complete.");
+          first = f.chat.projectMemory.add(f.root, "memory", "Existing queued project decision.");
+          await writer.blocked;
+          return answer(concise);
+        }),
+      );
+      const pending = f.run();
+      try {
+        await awaitStarted(secondAdd, "second queued project-memory add");
+        expect(addMemory).toHaveBeenCalledTimes(2);
+        if (change === "disable") await f.chat.setProjectMemoryEnabled(f.session.id, false);
+        else {
+          const key = projectMemoryBackendKey(f.root);
+          const configuration = f.repository.getSetting(key) as Record<string, unknown>;
+          f.repository.setSetting(key, { ...configuration, backend: "tencentdb" });
+        }
+      } finally {
+        writer.release();
+        if (first) await first;
+        await pending;
+      }
+
+      expect(await readFile(join(f.root, ".harness-memory", "memory.md"), "utf8")).not.toContain(
+        concise,
+      );
+      expect(
+        f.events.some(
+          (event) =>
+            event.type === "activity" &&
+            event.activity.title === "已保存项目记忆" &&
+            event.activity.status === "completed",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("retries a reasoning-exhausted diary with a larger visible-output budget", async () => {
+    const f = await fixture();
+    await f.chat.setProjectMemoryEnabled(f.session.id, true);
+    f.model.maxOutputTokens = 8192;
+    f.model.reasoningLevels = ["high"];
+    const concise =
+      "本次完成支付模块重试策略检查，确认断线后保留已完成操作，避免重复写入，并决定采用精简偏好与按需检索降低上下文开销，后续保留诊断和取消边界测试。";
+    const summaryRequests: ModelRequest[] = [];
+    const addMemory = vi.spyOn(f.chat.projectMemory, "add");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        const body = requestBody(init);
+        if (!body.instructions.includes("[PROJECT_MEMORY_SUMMARY]"))
+          return answer("Task complete.");
+        summaryRequests.push(body);
+        return summaryRequests.length === 1 ? outputLimitedAfterReasoning() : answer(concise);
+      }),
+    );
+
+    await f.run();
+
+    expect(summaryRequests).toHaveLength(2);
+    expect(summaryRequests[0]?.max_output_tokens).toBe(2048);
+    expect(summaryRequests[1]?.max_output_tokens).toBe(8192);
+    expect(summaryRequests.every((body) => body.reasoning === undefined)).toBe(true);
+    expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(1);
+    const summaryCommit = addMemory.mock.calls.find(
+      ([, kind, text]) => kind === "memory" && text === concise,
+    );
+    expect(summaryCommit?.[4]).toBeInstanceOf(AbortSignal);
+    expect(summaryCommit?.[4]).not.toBe(f.controller.signal);
+    expect(summaryCommit?.[5]).toBeTypeOf("function");
+    expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+    expect(
+      f.events.some(
+        (event) =>
+          event.type === "activity" &&
+          event.activity.title === "项目记忆摘要未保存" &&
+          event.activity.status === "failed",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not retry a native diary after memory is disabled during the request", async () => {
+    const f = await fixture();
+    await f.chat.setProjectMemoryEnabled(f.session.id, true);
+    f.model.maxOutputTokens = 8192;
+    let summaryRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        const body = requestBody(init);
+        if (!body.instructions.includes("[PROJECT_MEMORY_SUMMARY]"))
+          return answer("Task complete.");
+        summaryRequests++;
+        await f.chat.setProjectMemoryEnabled(f.session.id, false);
+        return outputLimitedAfterReasoning();
+      }),
+    );
+
+    await f.run();
+
+    expect(summaryRequests).toBe(1);
+    expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(0);
+    expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+  });
+
+  it("reports a small model output limit without saving a partial diary", async () => {
+    const f = await fixture();
+    await f.chat.setProjectMemoryEnabled(f.session.id, true);
+    f.model.maxOutputTokens = 512;
+    f.model.reasoningLevels = ["high"];
+    const summaryRequests: ModelRequest[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        const body = requestBody(init);
+        if (!body.instructions.includes("[PROJECT_MEMORY_SUMMARY]"))
+          return answer("Task complete.");
+        summaryRequests.push(body);
+        return outputLimitedAfterReasoning();
+      }),
+    );
+
+    await f.run();
+
+    expect(summaryRequests).toHaveLength(1);
+    expect(summaryRequests[0]?.max_output_tokens).toBe(512);
+    expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(0);
+    expect(
+      f.events.some(
+        (event) =>
+          event.type === "activity" &&
+          event.activity.title === "项目记忆摘要未保存" &&
+          event.activity.status === "failed",
+      ),
+    ).toBe(true);
+    expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+  });
+
+  it("does not save a diary response that completes after the user stops the run", async () => {
+    const f = await fixture();
+    await f.chat.setProjectMemoryEnabled(f.session.id, true);
+    const concise =
+      "本次完成支付模块重试策略检查，确认断线后保留已完成操作，避免重复写入，并决定采用精简偏好与按需检索降低上下文开销，后续保留诊断和取消边界测试。";
+    let releaseSummary: () => void = () => undefined;
+    const summaryGate = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    let summaryRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        const body = requestBody(init);
+        if (!body.instructions.includes("[PROJECT_MEMORY_SUMMARY]"))
+          return answer("Task complete.");
+        summaryRequests++;
+        await summaryGate;
+        return answer(concise);
+      }),
+    );
+    const pending = f.run();
+    try {
+      await vi.waitFor(() => expect(summaryRequests).toBe(1));
+      f.controller.abort();
+    } finally {
+      releaseSummary();
+      await pending;
+    }
+
+    expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(0);
+    expect(
+      f.events.some(
+        (event) =>
+          event.type === "activity" &&
+          event.activity.title === "已保存项目记忆" &&
+          event.activity.status === "completed",
+      ),
+    ).toBe(false);
   });
 
   it("saves a successful concise summary and catches malformed summaries without failing the task", async () => {

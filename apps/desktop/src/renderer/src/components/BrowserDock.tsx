@@ -8,6 +8,7 @@ import {
   Search,
 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import { displayBrowserUrl } from "../../../shared/browser-address";
 import type { BrowserProvider } from "../../../shared/domain";
 import { tr } from "../i18n/index";
 
@@ -35,7 +36,9 @@ const USER_AGENTS: Record<BrowserProvider, string> = {
 
 export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProps) {
   const webviewRef = useRef<WebviewElement>(null);
-  const [address, setAddress] = useState(initialUrl === "about:blank" ? "" : initialUrl);
+  const registeredGuestKey = useRef<string | null>(null);
+  const guestKey = `${sessionId}:${provider}`;
+  const [address, setAddress] = useState(() => displayBrowserUrl(initialUrl));
   const [title, setTitle] = useState(tr("\u65B0\u6807\u7B7E\u9875"));
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
@@ -49,6 +52,10 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
       return;
     }
     let cancelled = false;
+    if (registeredGuestKey.current !== guestKey) {
+      setConnected(false);
+      setLoading(true);
+    }
 
     const syncNavigation = () => {
       try {
@@ -63,13 +70,13 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
       setLoading(false);
       void window.mingshen
         .registerBrowserWebContents(sessionId, provider, webview.getWebContentsId())
-        .then(() => {
+        .then((status) => {
           if (!cancelled) {
+            registeredGuestKey.current = guestKey;
             setConnected(true);
             setError(null);
-            if (initialUrl && initialUrl !== "about:blank") {
-              setAddress(initialUrl);
-            }
+            const visibleUrl = status.url && status.url !== "about:blank" ? status.url : initialUrl;
+            setAddress(displayBrowserUrl(visibleUrl));
             syncNavigation();
           }
         })
@@ -90,7 +97,7 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
     const onNavigate = (event: Event) => {
       const url = (event as Event & { url?: string }).url;
       if (url) {
-        setAddress(url === "about:blank" ? "" : url);
+        setAddress(displayBrowserUrl(url));
       }
       syncNavigation();
     };
@@ -128,10 +135,15 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
       webview.removeEventListener("page-title-updated", onTitle);
       webview.removeEventListener("destroyed", onDestroyed);
     };
-  }, [initialUrl, provider, sessionId]);
+  }, [guestKey, initialUrl, provider, sessionId]);
 
   useEffect(() => {
-    if (!connected || !webviewRef.current || !initialUrl) {
+    if (
+      !connected ||
+      registeredGuestKey.current !== guestKey ||
+      !webviewRef.current ||
+      !initialUrl
+    ) {
       return;
     }
     const current = webviewRef.current;
@@ -142,7 +154,7 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
     } catch {
       // Initial URL is already handled by the webview src attribute.
     }
-  }, [connected, initialUrl]);
+  }, [connected, guestKey, initialUrl]);
 
   const navigate = async (event: FormEvent) => {
     event.preventDefault();
@@ -153,9 +165,7 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
     setLoading(true);
     try {
       const status = await window.mingshen.openBrowser(sessionId, provider, address);
-      if (status.url) {
-        setAddress(status.url);
-      }
+      setAddress(displayBrowserUrl(status.url ?? address));
     } catch (cause) {
       setLoading(false);
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -220,9 +230,10 @@ export function BrowserDock({ sessionId, provider, initialUrl }: BrowserDockProp
         {title}
       </div>
       <webview
+        key={guestKey}
         ref={webviewRef as never}
         className="browser-dock__webview"
-        src={initialUrl || "about:blank"}
+        src="about:blank"
         partition={`persist:mingshen-${provider}`}
         useragent={USER_AGENTS[provider]}
         webpreferences="contextIsolation=yes,sandbox=yes,nodeIntegration=no"

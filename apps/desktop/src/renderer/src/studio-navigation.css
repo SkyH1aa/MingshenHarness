@@ -1,0 +1,64 @@
+.surface-navigation {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.surface-navigation button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.surface-navigation button[aria-pressed="true"] {
+  background: var(--surface-hover);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.surface-navigation button:hover { color: var(--text); background: var(--surface-hover); }
+.surface-navigation button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.app-studio-host { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.app-studio-host > * { flex: 1; min-height: 0; min-width: 0; }
+.surface-error { display: flex; align-items: center; gap: 12px; padding: 8px 16px; font-size: 13px; color: var(--danger); background: var(--surface); border-bottom: 1px solid var(--line); }
+.surface-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.app-topbar[data-app-surface]:not([data-app-surface="conversation"]) .topbar-session,
+.app-topbar[data-app-surface]:not([data-app-surface="conversation"]) .orbit-topbar-state,
+.app-topbar[data-app-surface]:not([data-app-surface="conversation"]) .connection-state { display: none; }
+
+@media (max-width: 1280px) {
+  .surface-navigation button > span { display: none; }
+  .surface-navigation button { width: 32px; padding: 0; }
+  .app-topbar .topbar-session { min-width: 0; }
+}
+
+@media (max-width: 900px) {
+  .app-topbar .topbar-session { display: none; }
+  .app-topbar .agent-mode-switcher { margin-inline: 0; }
+  .app-topbar .agent-mode-switcher__mode[aria-pressed="true"] span { display: none; }
+  :root[data-interface-style="orbit"] .app-topbar--orbit .brand__copy small { display: none; }
+  :root[data-interface-style="orbit"] .orbit-topbar-state > span { display: none; }
+  .surface-navigation { gap: 0; }
+  .desktop-caption .app-topbar { gap: 4px; }
+  .app-topbar .topbar-actions { gap: 2px; }
+  :root[data-interface-style="orbit"] .desktop-caption .app-topbar--orbit { gap: 4px; }
+  :root[data-interface-style="orbit"] .app-topbar--orbit .topbar-actions { gap: 4px; }
+  :root .desktop-caption .desktop-caption__actions .desktop-update-trigger {
+    width: 32px;
+    flex: 0 0 32px;
+    justify-content: center;
+    padding: 0;
+  }
+  .desktop-caption .desktop-caption__actions .desktop-update-trigger > span { display: none; }
+}

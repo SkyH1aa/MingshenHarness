@@ -37,6 +37,7 @@ const sourceAfter = sourceBefore.replace(
   '  return { inspector: true, tasks: false };',
   '  // Keep review and task progress visible together.\n  return { inspector: true, tasks: true };',
 );
+class NetworkOnlySmokeComplete extends Error {}
 const notes = '# Workbench verification\n\nThe review pane and task progress remain visible together.\n';
 const commandTail = 'ORBIT_COMMAND_COMPLETE_TAIL_29c7';
 const diagnostic = ['ORBIT_COMMAND_START', ...Array.from({ length: 24 }, (_, index) =>
@@ -252,6 +253,15 @@ async function until(expression, timeout = 30000) {
     await sleep(70);
   }
   throw new Error(`Timed out: ${expression}${lastError ? ` (${lastError})` : ''}`);
+}
+
+async function untilOn(target, expression, timeout = 30000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (await target.evaluate(expression)) return;
+    await sleep(70);
+  }
+  throw new Error(`Timed out on secondary surface: ${expression}`);
 }
 
 async function click(selector, text) {
@@ -488,6 +498,49 @@ async function composerGeometry(label) {
   return state;
 }
 
+async function chatNetworkGeometry(label, enabled) {
+  const state = await renderer.evaluate(`(()=>{
+    const control=document.querySelector('.chat-network-control');
+    const allow=control?.querySelector('[data-network-action="allow"]');
+    const deny=control?.querySelector('[data-network-action="deny"]');
+    const rect=el=>{
+      const r=el?.getBoundingClientRect();
+      return r&&r.width>1&&r.height>1
+        ?{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}
+        :null;
+    };
+    const overlaps=(a,b)=>Boolean(a&&b&&Math.min(a.right,b.right)-Math.max(a.left,b.left)>1&&
+      Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top)>1);
+    const controlRect=rect(control),composerRect=rect(document.querySelector('.composer'));
+    const modelRect=rect(document.querySelector('.chat-model-picker'));
+    return {
+      viewport:{width:innerWidth,height:innerHeight},
+      overflow:document.documentElement.scrollWidth>innerWidth+1,
+      control:controlRect,composer:composerRect,model:modelRect,
+      allow:rect(allow),deny:rect(deny),
+      allowPressed:allow?.getAttribute('aria-pressed')==='true',
+      denyPressed:deny?.getAttribute('aria-pressed')==='true',
+      disabled:Boolean(allow?.disabled||deny?.disabled),
+      overlap:overlaps(controlRect,modelRect),
+    };
+  })()`);
+  assert.ok(state.control && state.allow && state.deny,
+    `Internet controls must remain visible at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.overflow, false, `Internet controls caused page overflow at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.allowPressed, enabled, `Allow state is incorrect at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.denyPressed, !enabled, `Block state is incorrect at ${label}: ${JSON.stringify(state)}`);
+  assert.equal(state.disabled, false, `Idle internet controls must be enabled at ${label}`);
+  assert.equal(state.overlap, false, `Internet controls overlap the model picker at ${label}`);
+  assert.ok(state.control.left >= state.composer.left - 1 &&
+    state.control.right <= state.composer.right + 1 &&
+    state.control.top >= state.composer.top - 1 &&
+    state.control.bottom <= state.composer.bottom + 1 &&
+    state.control.left >= -1 && state.control.right <= state.viewport.width + 1 &&
+    state.control.top >= -1 && state.control.bottom <= state.viewport.height + 1,
+  `Internet controls escaped their composer or viewport at ${label}: ${JSON.stringify(state)}`);
+  return state;
+}
+
 async function workspaceGeometry(label) {
   const state = await renderer.evaluate(`(()=>{
     const box=selector=>{
@@ -602,23 +655,32 @@ async function agentLayoutEvidence() {
   await click('[data-testid="agent-mode-chat"]');
   await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"');
   await click('[data-testid="new-chat"]');
-  await until('Boolean(document.querySelector("[data-testid=new-chat-dialog]"))');
-  await click('[data-testid="new-chat-dialog"] button[type="submit"]');
   await until('!document.querySelector("[data-testid=new-chat-dialog]")&&Boolean(document.querySelector(".chat-session-row--selected"))');
   const chatId = await renderer.evaluate('document.querySelector(".chat-session-row--selected").dataset.sessionId');
   const chat = await renderer.evaluate(`window.mingshen.getSession(${JSON.stringify(chatId)})`);
   assert.equal(chat.agentMode, 'chat');
   assert.equal(chat.workspacePath, null);
+  assert.equal(chat.chatNetworkEnabled, true, 'A source-less Chat should preserve the allowed default');
+  await click('[data-testid="chat-network-deny"]');
+  await until(`window.mingshen.getSession(${JSON.stringify(chatId)}).then(session=>session?.chatNetworkEnabled===false)`);
+  await chatNetworkGeometry('ChatAgent blocked at 1440x900', false);
+  await click('[data-testid="chat-network-allow"]');
+  await until(`window.mingshen.getSession(${JSON.stringify(chatId)}).then(session=>session?.chatNetworkEnabled===true)`);
+  await chatNetworkGeometry('ChatAgent allowed at 1440x900', true);
+  await click('[data-testid="chat-network-deny"]');
+  await until(`window.mingshen.getSession(${JSON.stringify(chatId)}).then(session=>session?.chatNetworkEnabled===false)`);
 
   for (const theme of ['night', 'day']) {
     await renderer.evaluate(`localStorage.setItem('mingshen.theme',${JSON.stringify(theme)});true`);
     await renderer.send('Page.reload');
     await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"&&Boolean(document.querySelector(".composer textarea"))');
     await viewport(1440, 900);
+    await chatNetworkGeometry(`ChatAgent ${theme} 1440x900`, false);
     await captionGeometry(`ChatAgent zh-CN ${theme} 1440x900`);
     await composerGeometry(`ChatAgent zh-CN ${theme} 1440x900`);
     await shot(`chat-zh-${theme}-1440`);
     await viewport(800, 600);
+    await chatNetworkGeometry(`ChatAgent ${theme} 800x600`, false);
     if (await renderer.evaluate('Boolean(document.querySelector(".chat-sidebar-scrim"))')) {
       await click('.chat-sidebar-scrim');
     }
@@ -644,11 +706,44 @@ async function quickLayoutEvidence() {
     renderer = quick;
     await renderer.send('Runtime.enable');
     await until('Boolean(document.querySelector(".quick-chat .composer textarea"))');
+    await until('window.mingshen.getQuickChatState().then(state=>state.session?.chatNetworkEnabled===false)');
+    await viewport(540, 720);
+    await chatNetworkGeometry('Quick Chat blocked at 540x720', false);
+    await click('[data-testid="chat-network-allow"]');
+    await until('window.mingshen.getQuickChatState().then(state=>state.session?.chatNetworkEnabled===true)');
+    await chatNetworkGeometry('Quick Chat enabled at 540x720', true);
+    await click('[data-testid="chat-network-deny"]');
+    await until('window.mingshen.getQuickChatState().then(state=>state.session?.chatNetworkEnabled===false)');
     for (const [width, height] of [[540, 720], [400, 560]]) {
       await viewport(width, height);
+      await chatNetworkGeometry(`Quick Chat ${width}x${height}`, false);
       await composerGeometry(`QuickChat ${width}x${height}`);
       await shot(`quick-chat-day-${width}x${height}`);
     }
+
+    const quickSessionId = await quick.evaluate(
+      'window.mingshen.getQuickChatState().then(state=>state.session?.id)',
+    );
+    assert.ok(quickSessionId, 'Quick Chat must expose its active conversation');
+    renderer = primary;
+    await click('[data-testid="agent-mode-chat"]');
+    await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"');
+    await click(`.chat-session-row[data-session-id="${quickSessionId}"] .chat-session-row__main`);
+    await until(`document.querySelector(".chat-session-row--selected")?.dataset.sessionId===${JSON.stringify(quickSessionId)}`);
+    await click('[data-testid="chat-network-allow"]');
+    await untilOn(
+      quick,
+      'document.querySelector("[data-testid=chat-network-allow]")?.getAttribute("aria-pressed")==="true"',
+    );
+    await quick.evaluate('document.querySelector("[data-testid=chat-network-deny]")?.click()');
+    await until(
+      'document.querySelector("[data-testid=chat-network-deny]")?.getAttribute("aria-pressed")==="true"',
+    );
+    await untilOn(
+      quick,
+      'document.querySelector("[data-testid=chat-network-deny]")?.getAttribute("aria-pressed")==="true"',
+    );
+    record('Main Chat and Quick Chat immediately synchronize internet-control state when both display the same conversation');
     record('The actual QuickChat window retains an editable, bounded composer at 540x720 and 400x560');
   } finally {
     renderer = primary;
@@ -1266,6 +1361,20 @@ try {
   })()`);
   await renderer.send('Page.reload');
   await until('document.documentElement.dataset.interfaceStyle==="orbit"&&Boolean(document.querySelector(".orbit-tool-rail"))&&Boolean(document.querySelector(".composer textarea"))');
+  if (process.env.MSH_ORBIT_NETWORK_ONLY === '1') {
+    await viewport(1440, 900);
+    await agentLayoutEvidence();
+    assert.deepEqual(exceptions, []);
+    assert.deepEqual(serverErrors, []);
+    const resultPath = await writeResult(true);
+    console.log(JSON.stringify({
+      version, passed, localRequests: requests.length,
+      workerRequests: requests.filter(request => request.worker).length,
+      rendererExceptions: exceptions, captures,
+      boundaries, resultPath,
+    }, null, 2));
+    throw new NetworkOnlySmokeComplete();
+  }
   await viewport(1440, 900);
   await closeWorkbenchDrawers();
   await geometry();
@@ -1581,15 +1690,17 @@ try {
     boundaries, resultPath,
   }, null, 2));
 } catch (cause) {
-  if (renderer) await shot('failure').catch(() => {});
-  const resultPath = await writeResult(false, cause).catch(() => null);
-  console.error(JSON.stringify({
-    passed, exceptions, serverErrors,
-    requests: requests.map(({ worker, body }) => ({ worker, calls: (body.input || []).filter(item => item.type === 'function_call').map(item => item.name) })),
-    body: await renderer?.evaluate('document.body.innerText').catch(() => null),
-    resultPath,
-  }, null, 2));
-  throw cause;
+  if (!(cause instanceof NetworkOnlySmokeComplete)) {
+    if (renderer) await shot('failure').catch(() => {});
+    const resultPath = await writeResult(false, cause).catch(() => null);
+    console.error(JSON.stringify({
+      passed, exceptions, serverErrors,
+      requests: requests.map(({ worker, body }) => ({ worker, calls: (body.input || []).filter(item => item.type === 'function_call').map(item => item.name) })),
+      body: await renderer?.evaluate('document.body.innerText').catch(() => null),
+      resultPath,
+    }, null, 2));
+    throw cause;
+  }
 } finally {
   releaseParent = true;
   if (child) {

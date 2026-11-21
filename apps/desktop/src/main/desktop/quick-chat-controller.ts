@@ -8,6 +8,7 @@ import type {
   SessionView,
 } from "../../shared/domain";
 import { IPC_CHANNELS } from "../../shared/ipc";
+import { isTextModel } from "../../shared/model-capabilities";
 import { QUICK_CHAT_TTL_MS, type QuickChatState } from "../../shared/quick-chat";
 import type { SessionService } from "../sessions/session-service";
 import type { Repository } from "../storage/repository";
@@ -22,6 +23,7 @@ const SESSION_UPDATE_KEYS = new Set([
   "modelId",
   "reasoningLevel",
   "compactionModel",
+  "chatNetworkEnabled",
 ]);
 const SAFE_GLOBAL_CHANNELS = new Set<string>([
   IPC_CHANNELS.appInfo,
@@ -45,6 +47,7 @@ const SESSION_ID_FIRST_CHANNELS = new Set<string>([
   IPC_CHANNELS.composerDraftClear,
   IPC_CHANNELS.chatStop,
   IPC_CHANNELS.chatCompact,
+  IPC_CHANNELS.runSteeringGet,
 ]);
 
 interface StoredLease {
@@ -191,6 +194,9 @@ export class QuickChatController {
     if (channel === IPC_CHANNELS.chatSend || channel === IPC_CHANNELS.chatRewrite) {
       return this.acceptsSession(this.inputSessionId(args[0]));
     }
+    if (channel === IPC_CHANNELS.runSteeringSend) {
+      return args.length === 1 && this.acceptsSession(this.inputSessionId(args[0]));
+    }
     if (channel === IPC_CHANNELS.composerDraftSave) {
       return this.acceptsSession(this.inputSessionId(args[0]));
     }
@@ -247,6 +253,7 @@ export class QuickChatController {
       approvalMode: "manual",
       executionMode: "host",
       patchOnly: false,
+      ...(source?.chatNetworkEnabled === false ? { chatNetworkEnabled: false } : {}),
       ...(inheritedCompaction ? { compactionModel: inheritedCompaction } : {}),
     };
 
@@ -307,18 +314,14 @@ export class QuickChatController {
     if (!providerId || !modelId) return false;
     const provider = this.repository.getProvider(providerId);
     return Boolean(
-      provider?.models.some(
-        (model) => model.id === modelId && model.enabled && model.inputModalities.includes("text"),
-      ),
+      provider?.models.some((model) => model.id === modelId && model.enabled && isTextModel(model)),
     );
   }
 
   private hasUsableTextModel(): boolean {
     return this.repository
       .listProviders()
-      .some((provider) =>
-        provider.models.some((model) => model.enabled && model.inputModalities.includes("text")),
-      );
+      .some((provider) => provider.models.some((model) => model.enabled && isTextModel(model)));
   }
 
   private selectModel(): {
@@ -346,7 +349,7 @@ export class QuickChatController {
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
     for (const provider of providers) {
       const model = provider.models.find(
-        (candidate) => candidate.enabled && candidate.inputModalities.includes("text"),
+        (candidate) => candidate.enabled && isTextModel(candidate),
       );
       if (model) return { provider, model, source: null };
     }
@@ -360,8 +363,7 @@ export class QuickChatController {
     if (!providerId || !modelId) return null;
     const provider = this.repository.getProvider(providerId);
     const model = provider?.models.find(
-      (candidate) =>
-        candidate.id === modelId && candidate.enabled && candidate.inputModalities.includes("text"),
+      (candidate) => candidate.id === modelId && candidate.enabled && isTextModel(candidate),
     );
     return provider && model ? { provider, model } : null;
   }

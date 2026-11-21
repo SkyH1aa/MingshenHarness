@@ -12,8 +12,17 @@ export function isChatSession(session: Pick<SessionView, "agentMode">): boolean 
   return session.agentMode === "chat";
 }
 
-export function chatToolRejection(session: Pick<SessionView, "agentMode">, tool: string) {
-  return isChatSession(session) && !CHAT_TOOLS.has(tool)
+export function chatToolRejection(
+  session: Pick<SessionView, "agentMode"> & Partial<Pick<SessionView, "chatNetworkEnabled">>,
+  tool: string,
+) {
+  if (!isChatSession(session)) return null;
+  if (CHAT_TOOLS.has(tool) && session.chatNetworkEnabled === false)
+    return {
+      output: `CHAT_NETWORK_DISABLED: ChatAgent internet access is disabled. ${tool} was not executed.`,
+      isError: true,
+    };
+  return !CHAT_TOOLS.has(tool)
     ? {
         output: `CHAT_TOOL_DENIED: ChatAgent only permits web_search and web_fetch. ${tool} was not executed. Uploaded attachments are parsed from their bytes; local paths, commands, plugins, Skills and subagents are unavailable.`,
         isError: true,

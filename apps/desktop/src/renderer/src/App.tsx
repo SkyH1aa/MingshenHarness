@@ -1,8 +1,10 @@
 import {
   Code2,
+  Command,
   FileDiff,
   Files,
   Folder,
+  Image,
   LoaderCircle,
   MessagesSquare,
   Moon,
@@ -10,6 +12,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRight,
+  PanelsTopLeft,
   Settings,
   ShieldCheck,
   Sun,
@@ -36,6 +39,7 @@ import type {
   ChatAttachmentInput,
   ChatGroupView,
   ChatStreamEvent,
+  ChatTurnOptions,
   ContextUsageView,
   ExtensionImportResult,
   ExtensionView,
@@ -59,9 +63,11 @@ import { AgentModeSwitcher } from "./components/AgentModeSwitcher";
 import { BrandMark } from "./components/BrandMark";
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatView } from "./components/ChatView";
+import { CommandPalette } from "./components/CommandPalette";
+import { CreativeWorkstation } from "./components/CreativeWorkstation";
 import { useDialog } from "./components/DialogProvider";
+import { ImageStudio } from "./components/ImageStudio";
 import { LayoutPicker } from "./components/LayoutPicker";
-import { NewChatDialog } from "./components/NewChatDialog";
 import { NewSessionDialog } from "./components/NewSessionDialog";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import { ProviderSetup } from "./components/ProviderSetup";
@@ -84,9 +90,16 @@ import {
   questionsFromSnapshot,
 } from "./lib/approval-state";
 import type { LiveRun, SessionUsage } from "./lib/chat-types";
+import { ComposerDraftHandoff } from "./lib/composer-draft-handoff";
+import {
+  loadSessionCatalogRefresh,
+  replaceActiveChatSessions,
+  replaceWorkspaceCatalogPreservingChat,
+} from "./lib/session-catalog-sync";
 import { composerDrafts } from "./lib/use-composer-draft";
 
 type Theme = "day" | "night";
+type AppSurface = "conversation" | "workstation" | "image-studio";
 interface BrowserRequest {
   sessionId: string;
   provider: "chrome" | "edge";
@@ -184,6 +197,21 @@ export function App() {
     new Map(),
   );
   const [agentMode, setAgentMode] = useState<AgentMode>(readAgentMode);
+  const [surface, setSurface] = useState<AppSurface>("conversation");
+  const [surfaceError, setSurfaceError] = useState("");
+  const draftHandoff = useRef(new ComposerDraftHandoff(composerDrafts));
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const togglePalette = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "KeyP") {
+        if (event.isComposing || event.repeat) return;
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", togglePalette);
+    return () => window.removeEventListener("keydown", togglePalette);
+  }, []);
   const [workbenchSessionId, setWorkbenchSessionId] = useState<string | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [chatDesktopSidebarOpen, setChatDesktopSidebarOpen] = useState(
@@ -200,6 +228,8 @@ export function App() {
     setChatDesktopSidebarOpen(value);
   };
   const selectedSessionId = agentMode === "chat" ? chatSessionId : workbenchSessionId;
+  const creativeContextRef = useRef({ selectedSessionId, workbenchSessionId });
+  creativeContextRef.current = { selectedSessionId, workbenchSessionId };
   const [chatGroups, setChatGroups] = useState<ChatGroupView[]>([]);
   const [completionNotifications, setCompletionNotifications] =
     useState<CompletionNotificationState | null>(null);
@@ -284,8 +314,9 @@ export function App() {
   const [inspectorView, setInspectorView] = useState<"tasks" | "workspace">("tasks");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionWorkspace, setNewSessionWorkspace] = useState<string | null>(null);
-  const [newChatOpen, setNewChatOpen] = useState(false);
-  const [newChatGroupId, setNewChatGroupId] = useState<string | null>(null);
+  const [creatingChatSession, setCreatingChatSession] = useState(false);
+  const [chatSessionError, setChatSessionError] = useState("");
+  const creatingChatSessionRef = useRef(false);
   const [creatingWorkspaceSession, setCreatingWorkspaceSession] = useState(false);
   const [workspaceSessionError, setWorkspaceSessionError] = useState("");
   const creatingWorkspaceSessionRef = useRef(false);
@@ -315,6 +346,7 @@ export function App() {
   const applySessionSelection = useCallback(
     (session: SessionView) => {
       if (!allowPlanNavigation(session.id)) return false;
+      setSurface("conversation");
       if (session.agentMode === "chat") {
         setChatSessionId(session.id);
         setAgentMode("chat");
@@ -459,9 +491,13 @@ export function App() {
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
-    void window.mingshen.setActiveNotificationSession(selectedSessionId).catch(() => undefined);
-    void window.mingshen.markSessionOpened(selectedSessionId).catch(() => undefined);
   }, [selectedSessionId]);
+  useEffect(() => {
+    const visibleSessionId = surface === "conversation" ? selectedSessionId : null;
+    void window.mingshen.setActiveNotificationSession(visibleSessionId).catch(() => undefined);
+    if (visibleSessionId)
+      void window.mingshen.markSessionOpened(visibleSessionId).catch(() => undefined);
+  }, [selectedSessionId, surface]);
   useEffect(() => {
     let cancelled = false;
     const receive = (state: CompletionNotificationState) => {
@@ -509,41 +545,52 @@ export function App() {
     setChatGroups(groups);
   }, []);
 
-  const loadAllChatSessions = useCallback(async () => {
-    const rows: SessionView[] = [];
-    let cursor: string | null = null;
-    do {
-      const page: SessionPage = await window.mingshen.listSessionPage({
-        agentMode: "chat",
-        archived: false,
-        limit: 100,
-        ...(cursor ? { cursor } : {}),
-      });
-      rows.push(...page.sessions);
-      cursor = page.nextCursor;
-    } while (cursor);
-    mergeSessions(rows);
-  }, [mergeSessions]);
+  const loadAllChatSessions = useCallback(
+    async (replaceActive = false) => {
+      const rows: SessionView[] = [];
+      let cursor: string | null = null;
+      do {
+        const page: SessionPage = await window.mingshen.listSessionPage({
+          agentMode: "chat",
+          archived: false,
+          limit: 100,
+          ...(cursor ? { cursor } : {}),
+        });
+        rows.push(...page.sessions);
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (replaceActive) setSessions((current) => replaceActiveChatSessions(current, rows));
+      else mergeSessions(rows);
+    },
+    [mergeSessions],
+  );
 
   const refreshAll = useCallback(async (): Promise<BootstrapData> => {
     const priorRevision = sessionRevision.current;
     const loadedIds = sessionsRef.current.map((item) => item.id);
-    const data = await window.mingshen.bootstrap({
-      paged: true,
-      selectedId: selectedSessionRef.current,
+    const { data, delta, appliedRevision } = await loadSessionCatalogRefresh({
+      priorRevision,
+      loadedIds,
+      bootstrap: () =>
+        window.mingshen.bootstrap({
+          paged: true,
+          selectedId: selectedSessionRef.current,
+        }),
+      getDelta: (after, ids) => window.mingshen.getSessionDelta(after, [...ids]),
     });
     setProviders(data.providers);
     mergeSessions(data.sessions);
     if (data.sessionCatalog) {
-      if (loadedIds.length && priorRevision >= 0) {
-        const delta = await window.mingshen.getSessionDelta(priorRevision, loadedIds);
-        if (delta.reset) setSessions(data.sessions);
-        else {
+      if (delta) {
+        if (delta.reset) {
+          setSessions((current) => replaceWorkspaceCatalogPreservingChat(current, data.sessions));
+          await loadAllChatSessions(true);
+        } else {
           mergeSessions(delta.sessions);
           setSessions((items) => items.filter((item) => !delta.removed.includes(item.id)));
         }
-        sessionRevision.current = delta.revision;
-      } else sessionRevision.current = data.sessionCatalog.revision;
+      }
+      if (appliedRevision !== null) sessionRevision.current = appliedRevision;
       setSessionGroups(data.sessionCatalog.groups);
     }
     if (data.chatGroups) setChatGroups(data.chatGroups);
@@ -580,7 +627,7 @@ export function App() {
       return next;
     });
     return data;
-  }, [receiveApprovals, receiveQuestions, mergeSessions]);
+  }, [receiveApprovals, receiveQuestions, loadAllChatSessions, mergeSessions]);
 
   useEffect(() => {
     const sync = async () => {
@@ -590,7 +637,6 @@ export function App() {
           sessionsRef.current.map((item) => item.id),
         );
         if (delta.reset) {
-          setSessions((items) => items.filter((item) => item.agentMode === "chat"));
           await refreshAll();
           return;
         }
@@ -992,7 +1038,7 @@ export function App() {
         if (event.type === "assistant_message") {
           setLiveBySession((current) => {
             const previous = current[event.sessionId];
-            return previous
+            return previous?.runId === event.runId
               ? { ...current, [event.sessionId]: { ...previous, text: "", reasoning: "" } }
               : current;
           });
@@ -1128,7 +1174,155 @@ export function App() {
     if (applySessionSelection(session)) setMessages([]);
     setNewSessionOpen(false);
     setNewSessionWorkspace(null);
-    setNewChatOpen(false);
+  };
+
+  const appendComposerDraft = async (text: string, sessionId = selectedSessionId) => {
+    if (!sessionId) throw new Error(tr("请先选择会话。"));
+    await draftHandoff.current.append(sessionId, text);
+    if (selectedSessionRef.current !== sessionId) return;
+    setSurface("conversation");
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus(),
+    );
+  };
+
+  const applyCreativeTemplate = async (prompt: string) => {
+    const workstation = document.querySelector<HTMLElement>(".creative-workstation");
+    const initialContext = creativeContextRef.current;
+    let target = workspaceSession;
+    const isCurrent = () => {
+      const current = creativeContextRef.current;
+      return (
+        workstation?.isConnected &&
+        (current.selectedSessionId === initialContext.selectedSessionId ||
+          (initialContext.selectedSessionId === null &&
+            current.selectedSessionId === target?.id)) &&
+        (current.workbenchSessionId === initialContext.workbenchSessionId ||
+          (initialContext.workbenchSessionId === null && current.workbenchSessionId === target?.id))
+      );
+    };
+    const navigationError = () =>
+      new Error(
+        locale === "en"
+          ? "Save or cancel the edited plan before opening this conversation."
+          : "请先保存或取消正在编辑的计划，再打开此会话。",
+      );
+    const changedContextError = () =>
+      new Error(
+        locale === "en"
+          ? "The workspace or view changed before the work request could be saved."
+          : "工作区或页面已变化，工作请求尚未保存。",
+      );
+    try {
+      if (!allowPlanNavigation(target?.id ?? null)) throw navigationError();
+      if (target && sessionAgentMode(target) !== "work") {
+        if (sessionTaskRunning(target))
+          throw new Error(
+            locale === "en"
+              ? "Wait for this task to finish before switching to WorkAgent."
+              : "请等待当前任务结束，再切换到 WorkAgent 使用模板。",
+          );
+        const profile = agentProfiles.find(
+          (profile) =>
+            profile.enabled &&
+            profile.id === target?.agentProfileId &&
+            profileSupportsAgentMode(profile, "work"),
+        );
+        if (!profile)
+          throw new Error(
+            locale === "en"
+              ? "The current Agent profile does not support WorkAgent. Choose an appropriate profile in the conversation before handing off the template."
+              : "当前 Agent 配置不适用于 WorkAgent。请先在对话中选择适用配置，再交接模板。",
+          );
+        target = await window.mingshen.updateSession({
+          sessionId: target.id,
+          agentMode: "work",
+          agentProfileId: profile.id,
+        });
+        mergeSessions([target]);
+        if (!isCurrent()) throw changedContextError();
+      }
+      if (!target) {
+        const path = await window.mingshen.chooseWorkspace();
+        if (!isCurrent()) throw changedContextError();
+        if (!path)
+          throw new Error(
+            locale === "en" ? "Workspace selection was cancelled." : "已取消选择工作目录。",
+          );
+        target = await window.mingshen.createSessionInWorkspace(path, "work");
+        mergeSessions([target]);
+        if (!isCurrent()) throw changedContextError();
+      }
+      if (!allowPlanNavigation(target.id)) throw navigationError();
+      await draftHandoff.current.append(target.id, prompt);
+      let verifiedTarget: SessionView | null;
+      try {
+        verifiedTarget = await window.mingshen.getSession(target.id);
+      } catch (cause) {
+        draftHandoff.current.rememberUnconfirmed(target.id, prompt);
+        throw new Error(
+          locale === "en"
+            ? `Could not verify the target session. The request may already be saved; check its composer before retrying. ${errorMessage(cause)}`
+            : `无法确认目标会话。工作请求可能已保存，请先检查输入框再重试。${errorMessage(cause)}`,
+        );
+      }
+      if (!verifiedTarget)
+        throw new Error(
+          locale === "en"
+            ? "The target session was removed before the handoff could be confirmed."
+            : "目标会话已被删除，无法确认交接。",
+        );
+      if (
+        !isCurrent() ||
+        verifiedTarget.archived ||
+        sessionAgentMode(verifiedTarget) !== "work" ||
+        verifiedTarget.workspacePath !== target.workspacePath ||
+        !applySessionSelection(verifiedTarget)
+      ) {
+        setSurfaceError(
+          locale === "en"
+            ? "The work request was saved in the target session's composer; the current view was not changed."
+            : "工作请求已保存到目标会话的输入框，当前页面未切换。",
+        );
+        return;
+      }
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus(),
+      );
+    } catch (cause) {
+      if (!workstation?.isConnected)
+        setSurfaceError(
+          locale === "en"
+            ? `Could not hand off the work request: ${errorMessage(cause)}`
+            : `无法交给 WorkAgent：${errorMessage(cause)}`,
+        );
+      throw cause;
+    }
+  };
+
+  const openSurface = (next: AppSurface) => {
+    if (next !== "conversation" && !allowPlanNavigation(null)) return;
+    setSurfaceError("");
+    setSurface(next);
+  };
+
+  const paletteCommand = (commandId: string) => {
+    setPaletteOpen(false);
+    if (commandId === "workstation") return openSurface("workstation");
+    if (commandId === "image-studio") return openSurface("image-studio");
+    if (commandId === "settings") return setSettingsOpen(true);
+    if (commandId === "new-session") {
+      if (agentMode === "chat") void createChatSession(selectedSession?.chatGroupId ?? null);
+      else openNewSession(currentWorkspace);
+      return;
+    }
+    if (commandId === "terminal" || commandId === "files" || commandId === "review") {
+      setSurface("conversation");
+      openWorkspaceTab(commandId);
+      return;
+    }
+    const text = commandId.startsWith("custom:") ? `/${commandId.slice(7)} ` : `/${commandId} `;
+    void appendComposerDraft(text).catch((cause) => setSurfaceError(errorMessage(cause)));
   };
 
   const openNewSession = (workspacePath: string | null) => {
@@ -1154,8 +1348,6 @@ export function App() {
       }
       return;
     }
-    setNewChatOpen(false);
-    setNewChatGroupId(null);
     setAgentMode(next);
     if (!workspaceSession || sessionAgentMode(workspaceSession) === next) return;
     const currentProfile = agentProfiles.find(
@@ -1244,6 +1436,7 @@ export function App() {
       }
     }
     composerDrafts.forget([...removed]);
+    draftHandoff.current.forget([...removed]);
     setSessions((current) => current.filter((item) => !removed.has(item.id)));
     if (workbenchSessionId && removed.has(workbenchSessionId)) setWorkbenchSessionId(null);
     if (chatSessionId && removed.has(chatSessionId)) setChatSessionId(null);
@@ -1270,15 +1463,29 @@ export function App() {
     );
   };
 
-  const openNewChat = (groupId: string | null = null) => {
-    setNewChatGroupId(groupId);
-    setNewChatOpen(true);
+  const createChatSession = async (groupId: string | null = null) => {
+    if (!allowPlanNavigation(null) || creatingChatSessionRef.current) return;
+    creatingChatSessionRef.current = true;
+    setCreatingChatSession(true);
+    setChatSessionError("");
+    try {
+      const session = await window.mingshen.createChatSessionInGroup(groupId);
+      createSessionFromDialog(session);
+      if (chatSidebarDrawer) setChatSidebarOpen(false);
+    } catch (error) {
+      setChatSessionError(errorMessage(error));
+      setChatSidebarOpen(true);
+    } finally {
+      creatingChatSessionRef.current = false;
+      setCreatingChatSession(false);
+    }
   };
 
   const sendMessage = async (
     text: string,
     attachments: ChatAttachmentInput[],
     draftRevision: string,
+    turnOptions?: ChatTurnOptions,
   ) => {
     if (!selectedSessionId) {
       throw new Error(tr("\u8BF7\u5148\u9009\u62E9\u4F1A\u8BDD\u3002"));
@@ -1290,6 +1497,9 @@ export function App() {
         text,
         attachments,
         draftRevision,
+        ...(turnOptions?.temporaryInstruction
+          ? { temporaryInstruction: turnOptions.temporaryInstruction }
+          : {}),
       });
     } catch (error) {
       updateModeStartLock(selectedSessionId, false);
@@ -1424,9 +1634,17 @@ export function App() {
   const addQueuedPromptForCurrentSession = async (
     text: string,
     attachments: ChatAttachmentInput[],
+    turnOptions?: ChatTurnOptions,
   ): Promise<QueuedPromptView> => {
     const sessionId = requireSelectedWorkspaceSession();
-    const item = await window.mingshen.addQueuedPrompt({ sessionId, text, attachments });
+    const item = await window.mingshen.addQueuedPrompt({
+      sessionId,
+      text,
+      attachments,
+      ...(turnOptions?.temporaryInstruction
+        ? { temporaryInstruction: turnOptions.temporaryInstruction }
+        : {}),
+    });
     await loadQueuedPrompts(sessionId);
     return item;
   };
@@ -1574,8 +1792,9 @@ export function App() {
             className={`app-topbar${optical ? " app-topbar--orbit" : ""}${agentMode === "chat" ? " app-topbar--chat" : ""}`}
             data-agent-mode={agentMode}
             data-run-state={visualRunState}
+            data-app-surface={surface}
           >
-            {!optical || agentMode === "chat" ? (
+            {surface === "conversation" && (!optical || agentMode === "chat") ? (
               <button
                 className="icon-button sidebar-toggle"
                 type="button"
@@ -1613,8 +1832,48 @@ export function App() {
             <AgentModeSwitcher
               value={agentMode}
               running={activeTaskRunning}
-              onChange={(next) => void changeAgentMode(next)}
+              onChange={(next) => {
+                openSurface("conversation");
+                void changeAgentMode(next);
+              }}
             />
+            <nav
+              className="surface-navigation"
+              aria-label={locale === "en" ? "Workspaces" : "工作面"}
+            >
+              <button
+                type="button"
+                aria-pressed={surface === "conversation"}
+                title={locale === "en" ? "Conversations" : "对话工作台"}
+                aria-label={locale === "en" ? "Conversations" : "对话工作台"}
+                onClick={() => openSurface("conversation")}
+              >
+                <MessagesSquare size={16} aria-hidden="true" />
+                <span>{locale === "en" ? "Conversations" : "对话"}</span>
+              </button>
+              <button
+                type="button"
+                data-surface-action="workstation"
+                aria-pressed={surface === "workstation"}
+                title={locale === "en" ? "Mingshen workstation" : "Mingshen 工作站"}
+                aria-label={locale === "en" ? "Mingshen workstation" : "Mingshen 工作站"}
+                onClick={() => openSurface("workstation")}
+              >
+                <PanelsTopLeft size={16} aria-hidden="true" />
+                <span>{locale === "en" ? "Workstation" : "工作站"}</span>
+              </button>
+              <button
+                type="button"
+                data-surface-action="image-studio"
+                aria-pressed={surface === "image-studio"}
+                title={locale === "en" ? "Image studio" : "生图工作台"}
+                aria-label={locale === "en" ? "Image studio" : "生图工作台"}
+                onClick={() => openSurface("image-studio")}
+              >
+                <Image size={16} aria-hidden="true" />
+                <span>{locale === "en" ? "Image studio" : "生图"}</span>
+              </button>
+            </nav>
             {!optical ? (
               <div className="topbar-session">
                 <strong>{selectedSession?.title ?? tr("\u672A\u9009\u62E9\u4F1A\u8BDD")}</strong>
@@ -1627,13 +1886,24 @@ export function App() {
               </div>
             ) : null}
             <div className="topbar-actions">
+              <button
+                className="icon-button"
+                type="button"
+                title={
+                  locale === "en" ? "Command palette (Ctrl+Shift+P)" : "命令面板（Ctrl+Shift+P）"
+                }
+                aria-label={locale === "en" ? "Command palette" : "命令面板"}
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Command size={16} aria-hidden="true" />
+              </button>
               {optical && agentMode !== "chat" ? (
                 <span className="orbit-topbar-state" title={visualRunLabel}>
                   <i aria-hidden="true" />
                   <span>{visualRunLabel}</span>
                 </span>
               ) : null}
-              {!optical && agentMode !== "chat" ? (
+              {!optical && agentMode !== "chat" && surface === "conversation" ? (
                 <LayoutPicker value={layout.mode} onChange={changeLayout} />
               ) : null}
               {agentMode !== "chat" ? (
@@ -1649,7 +1919,7 @@ export function App() {
                   {tr("{0} 个连接", [connectionCount])}
                 </span>
               ) : null}
-              {!optical && agentMode !== "chat" ? (
+              {!optical && agentMode !== "chat" && surface === "conversation" ? (
                 <button
                   className="icon-button"
                   type="button"
@@ -1684,7 +1954,7 @@ export function App() {
                   <Sun aria-hidden="true" size={17} />
                 )}
               </button>
-              {!optical || agentMode === "chat" ? (
+              {!optical || agentMode === "chat" || surface !== "conversation" ? (
                 <button
                   className="icon-button"
                   type="button"
@@ -1709,7 +1979,37 @@ export function App() {
           </div>
         ) : null}
 
+        {surfaceError ? (
+          <div className="surface-error" role="alert">
+            <span>{surfaceError}</span>
+            <button type="button" className="link-button" onClick={() => setSurfaceError("")}>
+              {tr("关闭")}
+            </button>
+          </div>
+        ) : null}
+
+        {surface === "workstation" ? (
+          <div className="app-studio-host" data-app-surface="workstation">
+            <CreativeWorkstation
+              workspacePath={workspaceSession?.workspacePath ?? null}
+              onUseTemplate={applyCreativeTemplate}
+            />
+          </div>
+        ) : null}
+        {surface === "image-studio" ? (
+          <div className="app-studio-host" data-app-surface="image-studio">
+            <ImageStudio
+              providers={providers}
+              onOpenProviderSettings={() => {
+                setSettingsSection("providers");
+                setSettingsOpen(true);
+              }}
+            />
+          </div>
+        ) : null}
+
         <div
+          hidden={surface !== "conversation"}
           className={[
             "app-body",
             optical ? "app-body--orbit" : "",
@@ -1918,7 +2218,9 @@ export function App() {
                   if (chatSidebarDrawer) setChatSidebarOpen(false);
                   void selectSession(sessionId);
                 }}
-                onNewChat={openNewChat}
+                onNewChat={(groupId) => void createChatSession(groupId)}
+                creatingChatSession={creatingChatSession}
+                chatSessionError={chatSessionError}
                 onLoadSessions={mergeSessions}
                 onPatch={patchSession}
                 onRemove={removeSessionCascade}
@@ -1990,8 +2292,9 @@ export function App() {
             allActivities={activitiesBySession}
             approval={selectedSessionId ? (approvalsBySession[selectedSessionId] ?? null) : null}
             question={selectedSessionId ? (questionsBySession[selectedSessionId] ?? null) : null}
+            creatingSession={agentMode === "chat" && creatingChatSession}
             onNewSession={() => {
-              if (agentMode === "chat") openNewChat(null);
+              if (agentMode === "chat") void createChatSession(null);
               else openNewSession(selectedSession?.workspacePath ?? null);
             }}
             onSelectSession={(sessionId) => void selectSession(sessionId)}
@@ -2066,6 +2369,7 @@ export function App() {
                 browserRequest={browserRequest}
                 fileRequest={fileRequest}
                 tabRequest={workspaceTabRequest}
+                onReviewComment={(text) => appendComposerDraft(text)}
                 onTabChange={setActiveWorkspaceTab}
                 onChooseRoot={async () => {
                   const path = await window.mingshen.chooseWorkspace();
@@ -2125,6 +2429,7 @@ export function App() {
                   if (optical && taskPanelCollapsed) setLayout({ taskPanelCollapsed: false });
                 }}
                 session={selectedSession}
+                onDraft={(text) => appendComposerDraft(text)}
                 sessions={sessions.filter((session) => session.agentMode !== "chat")}
                 activities={activitiesBySession}
                 liveBySession={liveBySession}
@@ -2147,6 +2452,18 @@ export function App() {
           </div>
         </div>
       </div>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        sessionId={selectedSessionId}
+        onOpenFile={(path) => {
+          setSurface("conversation");
+          openFileFromConversation(path);
+        }}
+        onSelectSession={(id) => void selectSession(id)}
+        onCommand={paletteCommand}
+      />
 
       {settingsOpen ? (
         <SettingsDrawer
@@ -2177,19 +2494,6 @@ export function App() {
           onClose={() => {
             setNewSessionOpen(false);
             setNewSessionWorkspace(null);
-          }}
-          onCreated={createSessionFromDialog}
-        />
-      ) : null}
-
-      {newChatOpen && agentMode === "chat" ? (
-        <NewChatDialog
-          providers={providers}
-          groups={chatGroups}
-          initialGroupId={newChatGroupId}
-          onClose={() => {
-            setNewChatOpen(false);
-            setNewChatGroupId(null);
           }}
           onCreated={createSessionFromDialog}
         />

@@ -267,9 +267,9 @@ try {
   await click('[data-testid="agent-mode-chat"]');
   await until('Boolean(document.querySelector("[data-testid=chat-sidebar]"))');
   await click('[data-testid="new-chat"]');
+  await until('Boolean(document.querySelector(".chat-session-row--selected"))');
   assert.equal(await renderer.evaluate('Boolean(document.querySelector("input[name=workspacePath]"))'), false);
-  await renderer.evaluate('document.querySelector("[data-testid=new-chat-dialog] form").dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));true');
-  await until('!document.querySelector("[data-testid=new-chat-dialog]")');
+  assert.equal(await renderer.evaluate('Boolean(document.querySelector("[data-testid=new-chat-dialog]"))'), false);
   const chats = await api("listSessionPage", { agentMode: "chat", limit: 100 });
   assert.equal(chats.sessions.length, 1);
   const chat = chats.sessions[0];

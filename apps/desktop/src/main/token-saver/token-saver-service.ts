@@ -105,6 +105,7 @@ export class TokenSaverService {
     systemPrompt: string;
     tools: StreamToolDefinition[];
     messages: SessionMessage[];
+    protectedMessages?: SessionMessage[];
   }): { messages: SessionMessage[]; report: TokenSaverReport } {
     const settings = this.settings();
     const compressed = this.prepareMessages(
@@ -115,8 +116,10 @@ export class TokenSaverService {
     );
     const estimate = (messages: SessionMessage[]) =>
       estimateModelInputTokens({ ...input, messages });
-    const beforeTokens = estimate(input.messages);
-    const afterTokens = estimate(compressed.messages);
+    const protectedMessages = input.protectedMessages ?? [];
+    const beforeTokens = estimate([...input.messages, ...protectedMessages]);
+    const messages = [...compressed.messages, ...protectedMessages];
+    const afterTokens = estimate(messages);
     const report: TokenSaverReport = {
       sessionId: input.sessionId,
       runId: input.runId,
@@ -135,7 +138,7 @@ export class TokenSaverService {
       updatedAt: new Date().toISOString(),
     };
     this.repository.setSetting(`tokenSaver.report.${input.sessionId}`, report);
-    return { messages: compressed.messages, report };
+    return { messages, report };
   }
 
   prepareMessages(

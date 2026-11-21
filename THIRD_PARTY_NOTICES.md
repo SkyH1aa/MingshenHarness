@@ -1,6 +1,6 @@
 # Third-party software and runtime distributions
 
-Mingshen Harness 1.3.3 retains third-party rights. A source license selected for this
+Mingshen Harness 1.3.4 retains third-party rights. A source license selected for this
 project does not relicense third-party components, names or logos. This document is
 a distribution inventory, not a replacement for the licenses shipped by dependencies.
 
@@ -25,12 +25,17 @@ a distribution inventory, not a replacement for the licenses shipped by dependen
 | unpdf | MIT and PDF.js component notices; https://github.com/unjs/unpdf |
 | word-extractor 1.0.4 | MIT; https://github.com/morungos/node-word-extractor |
 | @napi-rs/canvas 1.1.0 | MIT and Skia component notices; https://github.com/Brooooooklyn/canvas |
+| sharp 0.35.5 / Windows libvips 8.18.7 | Apache-2.0 and LGPL-3.0-or-later; https://github.com/lovell/sharp (bounded image validation; packaging is configured to retain the native package's component license summary separately, with redistribution obligations still requiring review) |
 | Tesseract.js / Tesseract.js-core 7 | Apache-2.0 and bundled engine notices; https://github.com/naptha/tesseract.js |
 | @tesseract.js-data/eng and chi_sim 1.0.0 | MIT package / upstream Tesseract traineddata Apache-2.0; https://github.com/naptha/tessdata |
 | SheetJS CE 0.20.3 | Apache-2.0; official distribution https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz |
 | YAML | ISC; https://github.com/eemeli/yaml |
 | Zod | MIT; https://github.com/colinhacks/zod |
 | cross-spawn | MIT; https://github.com/moxystudio/node-cross-spawn |
+| diff 9.0.0 | BSD-3-Clause; https://github.com/kpdecker/jsdiff (bounded, in-memory line comparison for local review) |
+| node-pty 1.1.0 | MIT; https://github.com/microsoft/node-pty (user-created interactive Shell / Windows ConPTY; verified upstream Windows x64 Node-API prebuilds, notices and native runtime files are retained) |
+| @xterm/xterm 6.0.0 / @xterm/addon-fit 0.11.0 | MIT; https://github.com/xtermjs/xterm.js (terminal rendering and viewport fitting) |
+| gifenc 1.0.3 | MIT; https://github.com/mattdesl/gifenc (GIF encoding for user-selected image frames) |
 | TypeScript | Apache-2.0; https://github.com/microsoft/TypeScript |
 | TypeScript Language Server | MIT; https://github.com/typescript-language-server/typescript-language-server |
 | TanStack Virtual / React Virtual 3.13.12 | MIT; https://github.com/TanStack/virtual |
@@ -42,6 +47,54 @@ a distribution inventory, not a replacement for the licenses shipped by dependen
 Retain dependency LICENSE/NOTICE files, Chromium notices and Electron license files
 when preparing a redistributable. The present task does not create an installer or
 certify that a future package has preserved every required notice.
+
+## jsdiff license
+
+BSD 3-Clause License
+
+Copyright (c) 2009-2015, Kevin Decker <kpdecker@gmail.com>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## Creative templates and image services
+
+The 780 built-in creative workflow templates are authored in this repository as
+65 task structures, each with 12 family-specific scenarios. Each scenario offers
+brief and detailed prompts, counted once in the catalog. They contain domain
+methods, outlines, audience guidance, acceptance criteria, delivery steps and
+recommendations for existing Skills. Public design references are recorded in
+`docs/WORKSTATION_TEMPLATE_RESEARCH_1.3.4.md`; no private prompts or third-party
+Office binary template collection is redistributed. The user-provided WorkAgent
+Skill resources below retain their separate provenance and licensing.
+
+Image generation uses the user's configured OpenAI Images-compatible provider.
+Prompt refinement and reverse prompting use the selected text or vision model.
+No third-party studio account, private token, authenticated webpage, image library
+or model weights are bundled. Generated assets remain subject to the provider's
+terms and any source-material rights. GIF output combines selected local image
+frames with the listed encoder; it does not include a video-generation service.
 
 ## TencentDB local memory algorithm preset
 
@@ -128,8 +181,12 @@ historical aliases or reuse an adapted body by source SHA rather than becoming
 
 `apps/desktop/resources/prompts/skills/work-sources/catalog.json` records every
 physical source path, its source SHA value and its loadable host-relative entry.
-WorkAgent exposes the entries as discoverable, on-demand resources; they are not
-injected wholesale into the default prompt. A source SHA identifies source
+WorkAgent exposes 98 current source entries as discoverable, on-demand resources.
+For a matching source and full path with only the version directory removed,
+semantic-version selection hides 26 historical entries in nine groups from both
+discovery and manual selection. Different sources or workflow variants remain
+separate, and all 124 physical records and source files remain for provenance.
+The resources are not injected wholesale into the default prompt. A source SHA identifies source
 material and is not a promise that an adapted host-authored body is byte-identical
 to the source. Only the 82 design resources described above are copied unchanged.
 PDF-related material totals ten physical sources and five unique source-body SHA

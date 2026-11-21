@@ -1,10 +1,15 @@
 import type { SessionView } from "../../../shared/domain";
+import type { SessionProjectContexts } from "../../../shared/project-navigation";
 import { sessionRecency } from "./recent-sessions";
 
 export interface NavigationGroup {
   key: string;
+  workspaceKey: string;
   path: string | null;
   label: string;
+  branch: string | null;
+  branchRecorded: boolean;
+  worktree: boolean;
   roots: SessionView[];
   children: Map<string, SessionView[]>;
   sessions: SessionView[];
@@ -138,12 +143,16 @@ export class SessionNavigationIndex {
       const key = workspaceKey(root.workspacePath);
       const group: NavigationGroup = groups.get(key) ?? {
         key,
+        workspaceKey: key,
         path: root.workspacePath,
         label:
           root.workspacePath
             ?.replace(/[\\/]+$/, "")
             .split(/[\\/]/)
             .at(-1) || "",
+        branch: null,
+        branchRecorded: false,
+        worktree: false,
         roots: [],
         children: new Map(),
         sessions: [],
@@ -173,6 +182,63 @@ export class SessionNavigationIndex {
     if (this.cached.size > 12) this.cached.delete(this.cached.keys().next().value as string);
     return result;
   }
+}
+
+export function branchNavigationGroups(
+  workspaceGroups: NavigationGroup[],
+  contexts: SessionProjectContexts["contexts"],
+): NavigationGroup[] {
+  const result: NavigationGroup[] = [];
+  for (const workspaceGroup of workspaceGroups) {
+    type BranchBucket = NavigationGroup & { familySeen: Set<string> };
+    const buckets = new Map<string, BranchBucket>();
+    for (const root of workspaceGroup.roots) {
+      const context = contexts[root.id] ?? null;
+      const branchKey = `${context?.worktree ? "worktree" : "host"}:${context?.branch ?? ""}`;
+      const key = `${workspaceGroup.key}::branch:${branchKey}`;
+      const bucket: BranchBucket = buckets.get(key) ?? {
+        key,
+        workspaceKey: workspaceGroup.workspaceKey,
+        path: workspaceGroup.path,
+        label: workspaceGroup.label,
+        branch: context?.branch ?? null,
+        branchRecorded: Boolean(context),
+        worktree: Boolean(context?.worktree),
+        roots: [],
+        children: new Map(),
+        sessions: [],
+        updatedAt: workspaceGroup.updatedAt,
+        familySeen: new Set<string>(),
+      };
+      if (bucket.familySeen.has(root.id)) continue;
+      const visit = (session: SessionView) => {
+        if (bucket.familySeen.has(session.id)) return;
+        bucket.familySeen.add(session.id);
+        bucket.sessions.push(session);
+        bucket.updatedAt = Math.max(bucket.updatedAt, sessionRecency(session));
+        const children = workspaceGroup.children.get(session.id) ?? [];
+        if (children.length) bucket.children.set(session.id, children);
+        for (const child of children) visit(child);
+      };
+      bucket.roots.push(root);
+      visit(root);
+      buckets.set(key, bucket);
+    }
+    for (const bucket of buckets.values()) {
+      const { familySeen: _familySeen, ...group } = bucket;
+      result.push(group);
+    }
+    if (!workspaceGroup.roots.length) {
+      result.push({
+        ...workspaceGroup,
+        key: `${workspaceGroup.key}::branch:empty`,
+        branch: null,
+        branchRecorded: false,
+        worktree: false,
+      });
+    }
+  }
+  return result.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 export function visibleSessionRows(

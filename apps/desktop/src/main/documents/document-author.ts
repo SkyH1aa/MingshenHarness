@@ -2123,30 +2123,60 @@ function identifyImage(
   path: string,
 ): { kind: "png" | "jpg"; width: number; height: number } {
   if (buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
-    if (buffer.length < 24) throw new Error(`PNG 图片损坏：${path}`);
-    const width = buffer.readUInt32BE(16);
-    const height = buffer.readUInt32BE(20);
-    if (!width || !height) throw new Error(`PNG 图片尺寸无效：${path}`);
-    return { kind: "png", width, height };
+    const dimensions = pngDimensions(buffer);
+    if (!dimensions) throw new Error(`PNG 图片损坏或未完整结束：${path}`);
+    return { kind: "png", ...dimensions };
   }
-  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     const dimensions = jpegDimensions(buffer);
-    if (!dimensions) throw new Error(`JPEG 图片尺寸无效：${path}`);
+    if (!dimensions) throw new Error(`JPEG 图片损坏、缺少结束标记或尺寸无效：${path}`);
     return { kind: "jpg", ...dimensions };
   }
   throw new Error(`只支持 PNG 或 JPEG 图片：${path}`);
 }
 
+function pngDimensions(buffer: Buffer): { width: number; height: number } | null {
+  let offset = PNG_SIGNATURE.length;
+  let width = 0;
+  let height = 0;
+  let hasData = false;
+  let sawEnd = false;
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    if (length > buffer.length - offset - 12) return null;
+    const type = buffer.subarray(offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    const crc = buffer.readUInt32BE(dataEnd);
+    if (crc32(buffer.subarray(offset + 4, dataEnd)) !== crc) return null;
+    if (offset === PNG_SIGNATURE.length) {
+      if (type.toString("ascii") !== "IHDR" || length !== 13) return null;
+      width = buffer.readUInt32BE(dataStart);
+      height = buffer.readUInt32BE(dataStart + 4);
+    } else if (type.toString("ascii") === "IDAT") {
+      hasData = true;
+    } else if (type.toString("ascii") === "IEND") {
+      if (length !== 0) return null;
+      sawEnd = true;
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+  return sawEnd && hasData && width > 0 && height > 0 ? { width, height } : null;
+}
+
 function jpegDimensions(buffer: Buffer): { width: number; height: number } | null {
   let offset = 2;
-  while (offset + 9 < buffer.length) {
-    if (buffer[offset] !== 0xff) {
-      offset++;
-      continue;
-    }
-    const marker = buffer[offset + 1] ?? 0;
-    offset += 2;
-    if (marker === 0xd8 || marker === 0xd9) continue;
+  let width = 0;
+  let height = 0;
+  while (offset < buffer.length) {
+    if (buffer[offset] !== 0xff) return null;
+    while (buffer[offset] === 0xff) offset++;
+    if (offset >= buffer.length) return null;
+    const marker = buffer[offset] ?? -1;
+    offset++;
+    if (marker === 0xd9) return width > 0 && height > 0 ? { width, height } : null;
+    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) continue;
     if (offset + 2 > buffer.length) return null;
     const length = buffer.readUInt16BE(offset);
     if (length < 2 || offset + length > buffer.length) return null;
@@ -2156,13 +2186,37 @@ function jpegDimensions(buffer: Buffer): { width: number; height: number } | nul
       (marker >= 0xc9 && marker <= 0xcb) ||
       (marker >= 0xcd && marker <= 0xcf);
     if (isFrame && offset + 7 <= buffer.length) {
-      const height = buffer.readUInt16BE(offset + 3);
-      const width = buffer.readUInt16BE(offset + 5);
-      return width && height ? { width, height } : null;
+      height = buffer.readUInt16BE(offset + 3);
+      width = buffer.readUInt16BE(offset + 5);
+      if (!width || !height) return null;
     }
     offset += length;
+    if (marker !== 0xda) continue;
+    // Entropy-coded scan data may contain stuffed 0xff00 and restart markers.
+    // Resume marker parsing only for a real next segment or the required EOI.
+    while (offset + 1 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset++;
+        continue;
+      }
+      const next = buffer[offset + 1] ?? 0;
+      if (next === 0x00 || (next >= 0xd0 && next <= 0xd7)) {
+        offset += 2;
+        continue;
+      }
+      break;
+    }
   }
   return null;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function renderHtmlBlock(

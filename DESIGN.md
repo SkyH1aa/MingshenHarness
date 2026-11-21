@@ -576,6 +576,19 @@ Inputs use the panel ground, a 1px line and a stable height appropriate to the f
 
 A session row is 44px tall with a status dot, title, and relative time. Running sessions show a small activity mark; waiting sessions show an approval marker. Selected rows use a neutral raised ground with no colored outline. The list supports pinning, rename, archive, delete, and search.
 
+ChatAgent group and Ungrouped headings offer direct creation with a plus icon;
+the top plus and empty-state action create an ungrouped chat without a setup
+dialog. The main process inherits settings from the group's most recently updated
+non-archived Chat root, independent of search, pagination and pinned display order.
+Empty groups fall back to the latest non-archived Chat, then to an enabled text
+model if no source exists. New chats keep history, drafts and attachments separate.
+
+Chat group titles truncate with their full text in a title. Plus, rename and delete
+remain separate 32px controls. Creation disables its entry points, exposes loading
+state and prevents duplicate activation. Success selects the new chat and expands
+its group while clearing search. Failure preserves the source configuration and
+shows a sidebar error; narrow layouts reopen the drawer to keep that error visible.
+
 **Light Trails:** rows have a 52px minimum height, 13px/500 titles, 12px metadata,
 4px corners and a quiet border. The selected row uses a flat Orbit selected tone
 with a 1px brand line on its left edge and no shadow. A separate rail provides real
@@ -776,7 +789,21 @@ Built-in rows show family/version metadata and, when available, the source path 
 
 ### Next-turn Queue
 
-While a main-interface CodeAgent, WorkAgent or ChatAgent conversation is busy, a compact Clock3 tray near the composer accepts up to ten later turns without inserting Steer into the active run. Items remain in insertion order and have no reorder controls. After a successful run and its background cleanup, the main process dispatches the first pending item automatically; approval waits do not advance the queue. Editing first holds the whole queue so a completed run cannot send stale text below the editor. Saving or cancelling releases only the edit hold: if the active run was stopped or failed meanwhile, the queue remains paused. A failed attachment replacement keeps the previous attachment snapshot and also pauses the queue so that unconfirmed content is not sent automatically. Stop, failure, send failure and application restart preserve the queue in a paused state with its error. The first item resumes after an explicit queue-level Resume action or after a later normal run in the same conversation succeeds; it never skips an unresolved head item. Changed configuration snapshots and unconfirmed dispatches remain blocking. Each item still supports text editing with save/cancel, whole-attachment replacement and deletion. Quick Chat and SubAgents expose no Queue UI.
+While a main-interface CodeAgent, WorkAgent or ChatAgent conversation is busy, a compact Clock3 tray near the composer accepts up to ten later turns without adding them to the active run. Items remain in insertion order and have no reorder controls. After a successful run and its background cleanup, the main process dispatches the first pending item automatically; approval waits do not advance the queue. Editing first holds the whole queue so a completed run cannot send stale text below the editor. Saving or cancelling releases only the edit hold: if the active run was stopped or failed meanwhile, the queue remains paused. A failed attachment replacement keeps the previous attachment snapshot and also pauses the queue so that unconfirmed content is not sent automatically. Stop, failure, send failure and application restart preserve the queue in a paused state with its error. The first item resumes after an explicit queue-level Resume action or after a later normal run in the same conversation succeeds; it never skips an unresolved head item. Changed configuration snapshots and unconfirmed dispatches remain blocking. Each item still supports text editing with save/cancel, whole-attachment replacement and deletion. Quick Chat and SubAgents expose no Queue UI.
+
+### In-run Guidance (1.3.4)
+
+An icon action beside Stop sends plain-text guidance to the current primary
+Code/Work/Chat run, including Quick Chat. Its label and tooltip distinguish it
+from Queue next turn. A bounded, readable status list distinguishes waiting,
+included and not-applied updates without resetting live output or the run timer.
+Current requests and tools finish normally; updates enter the next model request
+in insertion order. The UI never implies that an in-flight request can be rewritten.
+Run and draft revisions are checked before acceptance, failed sends retain their
+source, and newer typing survives older receipts. Attachments and temporary
+instructions require a separate turn. Manual compaction, standalone planning and
+actual child conversations do not expose this action. Both themes keep the action,
+status and Stop reachable at narrow widths.
 
 ### Interface Style Picker
 
@@ -816,6 +843,97 @@ The persistent running signal belongs to the real execution/status indicator. Th
 composer focus beam is a one-shot transition and must not be asserted as a looping
 animation. Interface-style checks should verify the status light with an actual
 running state rather than infer activity from the composer.
+
+### Creative and Image Workspaces (1.3.4)
+
+The titlebar exposes Conversations, Mingshen Workstation and Image Studio as three
+work surfaces. They use the same compact titlebar, theme, language and settings.
+Below 1280px the surface controls keep their Lucide icons and accessible labels
+while removing visible text. Background conversation completions remain unread
+while a creative surface is visible. A successful handoff to the current target
+returns to Conversations and preserves the existing draft and attachments. A
+conflict stays on the originating surface; an asynchronously changed target does
+not pull the user away from their current view. Creative surfaces omit the
+conversation-only sidebar and layout controls. Narrow titlebars use icon-sized
+mode and update controls while keeping settings and window actions reachable.
+
+The creative workstation uses a searchable template library, an editable brief and
+a supporting outline/acceptance preview. These are continuous columns separated by
+hairlines, with drawers on narrower screens. Display type remains at tool scale.
+Template count and category counts come from the actual catalog. The brief supports
+section ordering, add/remove, grouped undo/redo and explicit draft import/export.
+The WorkAgent action appends a request to the conversation; it never auto-sends or
+claims a finished Office file. Persistence errors remain visible and cannot be
+described as a successful save.
+
+The library contains 780 distinct scenarios, not a count inflated by prompt modes.
+Category, output format and all query terms combine in the index; results remain
+paginated rather than rendering the whole catalog. Each selected draft has an
+accessible brief/detailed segmented control. Detailed mode exposes the full
+prompt and real recommended Skill IDs with reasons. The same lazily generated
+prompt feeds preview, copy and handoff; changing output format updates the skill
+recommendations. Switching modes is an undoable draft change that never resets
+user fields, notes or sections. New drafts start detailed, legacy mode-less drafts
+remain brief, and the mode survives autosave and JSON import/export. Do not
+generate every long prompt on each search or render.
+
+Image Studio uses a model toolbar, a collapsible asset library and an unframed
+pan/zoom canvas with editing controls. Persistent canvas-toolbar controls toggle
+both side panels. Narrow windows initially reserve the width for the canvas;
+expanded panels occupy grid columns, and small-screen drawers begin below the
+toolbar so zoom, fit and export remain reachable. Image and language-model pickers remain
+distinct. Refinement opens a proposed prompt that the user accepts before image
+generation; reverse prompting identifies the selected asset. Layers expose numeric
+geometry, opacity and order, and export reflects the actual canvas. Selection and
+focus use the current theme's restrained accent. Assets, network state, errors and
+saved state reflect real responses. GIF generation is shown as frame assembly,
+separate from image-model requests.
+
+### Project Navigation and Editing (1.3.4)
+
+The project icon column is a navigation control, with project names available in
+tooltips and accessible labels. Its unread state comes from completion events.
+The sidebar can group root conversations by recorded Git branch or worktree;
+unrecorded history uses an explicit unknown label. It never invents historical
+branch information from the current checkout.
+
+The Code/Work session sidebar uses a vertical flow: header, project navigation,
+grouping control and search take their content height, while only the session
+list grows and scrolls. Avoid positional grid-row sizing: new controls previously
+placed a grouping button in a flexible row and left a large empty gap. Empty
+projects reserve no artificial control-area height. Keep this scoped to the
+project sidebar so independent Chat grouping retains its own layout.
+
+Ctrl+Shift+P opens a focused command dialog with one query across commands,
+conversations and workspace files. Arrow keys select results, Enter activates and
+Escape closes with focus restoration. Async responses are versioned so stale
+queries cannot replace the current results. ChatAgent sees only applicable UI and
+conversation actions, without workspace files or execution controls.
+
+The terminal tab combines actual user-created xterm/ConPTY tabs with separately
+labeled Agent execution evidence. Starting a Shell is explicit; a placeholder is
+never styled as a running terminal. The review tab exposes Git, Branch, Session
+and Previous Turn scopes, numbered old/new diff lines, a selected line range and
+comment drafts. Sending comments to the composer checks the current diff version
+and preserves an explicit stale state when the source has changed. A short review
+pane scrolls as a whole so the editor and pending-comment actions remain
+reachable; long code and comment lists also keep their own bounded scrolling.
+
+### Planning and Draft Assistance (1.3.4)
+
+AutoDrive lives beside the task plan. A user-triggered read-only request shows real
+busy/cancel/error states and at least three distinct options; choosing one appends
+an editable next-turn draft. The coordination view distinguishes work packages,
+running workers, command verification and independent QA. Pending, blocked, failed
+and passed states have text labels and evidence; elapsed time alone never advances
+the quality state.
+
+The composer adds compact icon controls for temporary turn instructions, project
+tone and draft refinement. Project tone is a native option set; custom text opens
+an editor. Refinement preserves the source draft until the user accepts a preview,
+and a revision mismatch blocks replacement. Temporary guidance stays attached to
+its accepted turn or queued item and is not a persistent profile instruction.
+Quick Chat keeps its compact Chat-only composition surface.
 
 ## Do's and Don'ts
 

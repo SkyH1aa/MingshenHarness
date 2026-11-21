@@ -2,7 +2,6 @@ import {
   ChevronDown,
   ChevronRight,
   File,
-  FileCode2,
   Files,
   Folder,
   FolderOpen,
@@ -32,10 +31,11 @@ import { tr } from "../i18n/index";
 import { activityDetailsText, collectToolDetails } from "../lib/activity-details";
 import { formatCount } from "../lib/format";
 import { BrowserDock } from "./BrowserDock";
-import { DiffPreview } from "./ChatView";
 import { CopyButton } from "./CopyButton";
 import { useDialog } from "./DialogProvider";
 import { ExpandableText } from "./ExpandableText";
+import { InteractiveTerminal } from "./InteractiveTerminal";
+import { LocalReview } from "./LocalReview";
 import { useUiPreferences } from "./UiPreferences";
 
 type WorkspaceTab = "files" | "git" | "terminal" | "browser" | "review";
@@ -62,6 +62,7 @@ interface WorkspacePanelProps {
   fileRequest: WorkspaceFileRequest | null;
   tabRequest?: WorkspaceTabRequest | null;
   onTabChange?: (tab: WorkspaceTab) => void;
+  onReviewComment: (text: string) => Promise<void> | void;
   onChooseRoot: () => Promise<void>;
   onClose: () => void;
 }
@@ -98,6 +99,7 @@ export function WorkspacePanel({
   fileRequest,
   tabRequest,
   onTabChange,
+  onReviewComment,
   onChooseRoot,
   onClose,
 }: WorkspacePanelProps) {
@@ -121,7 +123,6 @@ export function WorkspacePanel({
   const rootRequest = useRef(0);
   const fileRequestVersion = useRef(0);
   const [commandDock, setCommandDock] = useState(false);
-  const [reviewPath, setReviewPath] = useState<string | null>(null);
   const [restoredActivities, setRestoredActivities] = useState<ActivityEvent[]>([]);
   const [commandLimit, setCommandLimit] = useState(100);
   const toolDetails = useMemo(() => collectToolDetails(messages), [messages]);
@@ -145,7 +146,6 @@ export function WorkspacePanel({
   // biome-ignore lint/correctness/useExhaustiveDependencies: A new session/turn resets only its local disclosure limits.
   useEffect(() => {
     setCommandLimit(100);
-    setReviewPath(null);
   }, [sessionId, reviewRunId]);
   useEffect(() => {
     if (tab !== "review" || !sessionId || !reviewRunId) return;
@@ -183,17 +183,6 @@ export function WorkspacePanel({
       deletions: (previous?.deletions ?? 0) + change.deletions,
     });
   }
-  const reviewFiles = [...changes.values()];
-  const selectedReviewChange =
-    reviewFiles.find((change) => change.path === reviewPath) ?? reviewFiles[0] ?? null;
-  const selectedReviewPath = selectedReviewChange
-    ? ((root ? workspaceRelativePath(root, selectedReviewChange.path) : null) ??
-      selectedReviewChange.path)
-    : "";
-  const selectedReviewSegments = selectedReviewPath.replaceAll("\\", "/").split("/");
-  const selectedReviewName = selectedReviewSegments.pop() || selectedReviewPath;
-  const selectedReviewDirectory = selectedReviewSegments.join("/");
-
   useEffect(() => {
     if (!preferencesReady || initializedStyle.current) return;
     initializedStyle.current = true;
@@ -465,149 +454,17 @@ export function WorkspacePanel({
               {treeError}
             </p>
           ) : null}
-          <header>
-            <strong>{en ? "Current turn" : "本轮变更"}</strong>
-            <span>
-              {changes.size} {en ? "files" : "个文件"}
-            </span>
-            <button type="button" className="link-button" onClick={() => setTab("git")}>
-              {en ? "Git workspace" : "Git 工作区"}
-            </button>
-          </header>
-          {changes.size === 0 ? (
-            <p className="quiet-copy">
-              {en ? "No file changes in this turn." : "本轮尚无文件变更。"}
-            </p>
-          ) : orbit ? (
-            <>
-              <div className="orbit-review-files">
-                {reviewFiles.map((change) => {
-                  const displayPath =
-                    (root ? workspaceRelativePath(root, change.path) : null) ?? change.path;
-                  const segments = displayPath.replaceAll("\\", "/").split("/");
-                  const name = segments.pop() || displayPath;
-                  const directory = segments.join("/");
-                  return (
-                    <button
-                      className={`orbit-review-file${selectedReviewChange?.path === change.path ? " orbit-review-file--selected" : ""}`}
-                      type="button"
-                      key={change.path}
-                      data-review-file={change.path}
-                      aria-pressed={selectedReviewChange?.path === change.path}
-                      title={change.path}
-                      aria-label={
-                        en
-                          ? `${displayPath}, ${change.additions} additions, ${change.deletions} deletions`
-                          : `${displayPath}，新增 ${change.additions} 行，删除 ${change.deletions} 行`
-                      }
-                      onClick={() => setReviewPath(change.path)}
-                    >
-                      <FileCode2 aria-hidden="true" size={15} />
-                      <span className="orbit-review-file__copy">
-                        <span className="orbit-review-file__name">{name}</span>
-                        {directory ? (
-                          <span className="orbit-review-file__path" dir="rtl">
-                            <bdi dir="ltr">{directory}</bdi>
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="run-summary__added">+{change.additions}</span>
-                      <span className="run-summary__deleted">-{change.deletions}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              {selectedReviewChange ? (
-                <section className="orbit-review-preview">
-                  <header>
-                    <button
-                      type="button"
-                      title={selectedReviewChange.path}
-                      aria-label={selectedReviewPath}
-                      onClick={() => {
-                        const relative = root
-                          ? workspaceRelativePath(root, selectedReviewChange.path)
-                          : null;
-                        if (relative) void openRelativeFile(relative);
-                        else void openAbsoluteFile(selectedReviewChange.path);
-                      }}
-                    >
-                      <code className="orbit-review-file__name">{selectedReviewName}</code>
-                      {selectedReviewDirectory ? (
-                        <span className="orbit-review-file__path" dir="rtl">
-                          <bdi dir="ltr">{selectedReviewDirectory}</bdi>
-                        </span>
-                      ) : null}
-                    </button>
-                    {selectedReviewChange.diff ? (
-                      <CopyButton
-                        text={selectedReviewChange.diff.lines
-                          .map(
-                            (line) =>
-                              `${line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}${line.text}`,
-                          )
-                          .join("\n")}
-                        label={en ? "Copy file diff" : "复制文件变更"}
-                        className="icon-button"
-                      />
-                    ) : null}
-                  </header>
-                  {selectedReviewChange.diff ? (
-                    <DiffPreview
-                      path={selectedReviewChange.path}
-                      additions={selectedReviewChange.additions}
-                      deletions={selectedReviewChange.deletions}
-                      diff={selectedReviewChange.diff}
-                      onOpenFile={(path) => {
-                        const relative = root ? workspaceRelativePath(root, path) : null;
-                        if (relative) void openRelativeFile(relative);
-                        else void openAbsoluteFile(path);
-                      }}
-                    />
-                  ) : (
-                    <p className="quiet-copy">
-                      {en ? "No saved diff is available." : "此文件没有已保存的 diff。"}
-                    </p>
-                  )}
-                </section>
-              ) : null}
-            </>
-          ) : (
-            [...changes.values()].map((change) => (
-              <div className="review-file" key={change.path}>
-                <button
-                  className="review-file__toggle"
-                  type="button"
-                  aria-expanded={reviewPath === change.path}
-                  onClick={() => setReviewPath(reviewPath === change.path ? null : change.path)}
-                >
-                  <ChevronRight size={14} />
-                  <code>{change.path}</code>
-                  <span className="run-summary__added">+{change.additions}</span>
-                  <span className="run-summary__deleted">-{change.deletions}</span>
-                </button>
-                {reviewPath === change.path ? (
-                  change.diff ? (
-                    <DiffPreview
-                      path={change.path}
-                      additions={change.additions}
-                      deletions={change.deletions}
-                      diff={change.diff}
-                      onOpenFile={(path) => {
-                        const relative = root ? workspaceRelativePath(root, path) : null;
-                        if (relative) void openRelativeFile(relative);
-                        else void openAbsoluteFile(path);
-                      }}
-                    />
-                  ) : (
-                    <p className="quiet-copy">
-                      {en ? "No saved diff is available." : "此文件没有已保存的 diff。"}
-                    </p>
-                  )
-                ) : null}
-              </div>
-            ))
-          )}
+          <LocalReview
+            key={`${sessionId ?? "none"}:${root ?? "none"}`}
+            sessionId={sessionId}
+            root={root}
+            onOpenFile={(path) => {
+              const relative = root ? workspaceRelativePath(root, path) : null;
+              if (relative) void openRelativeFile(relative);
+              else void openAbsoluteFile(path);
+            }}
+            onComment={onReviewComment}
+          />
           <div className="review-checks">
             <strong>{en ? "Execution & verification" : "执行与验证"}</strong>
             {commandActivities.slice(0, commandLimit).map((item) => (
@@ -782,11 +639,17 @@ export function WorkspacePanel({
       ) : null}
 
       {root && tab === "git" ? <GitPanel root={root} /> : null}
-      {root ? (
-        <div
-          className={commandDock && tab !== "terminal" ? "command-dock" : "command-tab"}
-          hidden={tab !== "terminal" && !commandDock}
-        >
+      {root && sessionId ? (
+        <div className="interactive-terminal-host" hidden={tab !== "terminal"}>
+          <InteractiveTerminal
+            active={tab === "terminal"}
+            key={`${sessionId}:${root}`}
+            sessionId={sessionId}
+          />
+        </div>
+      ) : null}
+      {root && commandDock && tab !== "terminal" ? (
+        <div className="command-dock">
           <TerminalPanel root={root} />
         </div>
       ) : null}

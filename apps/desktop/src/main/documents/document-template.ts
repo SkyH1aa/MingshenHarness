@@ -1,11 +1,16 @@
 import { DOMParser } from "@xmldom/xmldom";
 import { strFromU8, type Unzipped, unzipSync } from "fflate";
 import { validateDocumentArchive } from "./document-extractor";
+import { assertSafeOfficePackageParts } from "./office-package-security";
 
 const WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types";
 const RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
-const unsupportedPackageType = /macroenabled|vba|digital-signature/i;
+const unsupportedPackageType = /macroenabled|vba|digital-signature|oleobject|activex|altchunk/i;
+const unsafeRelationshipType =
+  /attachedtemplate|subdocument|oleobject|\/package$|\/control$|activex|externallink|afchunk/i;
+const activeFieldInstruction =
+  /\b(?:INCLUDETEXT|INCLUDEPICTURE|DDE(?:AUTO)?|LINK|DATABASE|EMBED|MACROBUTTON)\b/i;
 const unsafeElements = new Set([
   "drawing",
   "pict",
@@ -38,8 +43,16 @@ export async function openEditableDocx(
   const archive = unzipSync(bytes);
   if (!archive["word/document.xml"]) throw new Error("Template must be a DOCX document.");
   for (const [path, content] of Object.entries(archive)) {
-    if (/vbaProject|digital-signature|_xmlsignatures/i.test(path))
+    if (
+      /vbaProject|digital-signature|_xmlsignatures|activeX\/|oleObject[^/]*\.(?:bin|exe|dll)$/i.test(
+        path,
+      )
+    )
       throw new Error("Signed or macro-enabled templates are not supported.");
+    if (/(?:^|\/)embeddings\//i.test(path) && !path.toLowerCase().endsWith(".xlsx"))
+      throw new Error(
+        "DOCX_ACTIVE_CONTENT_UNSUPPORTED: OLE and embedded package parts are not supported.",
+      );
     if (path === "[Content_Types].xml" || path.endsWith(".rels")) {
       const doc = parseTemplateXml(strFromU8(content));
       const declarations =
@@ -53,8 +66,31 @@ export async function openEditableDocx(
         )
       )
         throw new Error("Signed or macro-enabled templates are not supported.");
+      if (path.endsWith(".rels")) {
+        for (const relationship of Array.from(declarations)) {
+          const type = relationship.getAttribute("Type") ?? "";
+          const target = relationship.getAttribute("Target") ?? "";
+          const external =
+            relationship.getAttribute("TargetMode")?.trim().toLowerCase() === "external";
+          const targetLooksExternal =
+            external || /^(?:[a-z][a-z0-9+.-]*:|\\\\|\/\/)/i.test(target.trim());
+          const unsafe =
+            unsafeRelationshipType.test(type) &&
+            !(/\/package$/i.test(type) && /\.xlsx(?:$|[?#])/i.test(target));
+          if (unsafe)
+            throw new Error(
+              "DOCX_ACTIVE_CONTENT_UNSUPPORTED: external templates, OLE, ActiveX and subdocuments are not supported.",
+            );
+          if (targetLooksExternal && !/\/hyperlink$/i.test(type))
+            throw new Error(
+              "DOCX_EXTERNAL_RELATIONSHIP_UNSUPPORTED: only ordinary hyperlinks may target external resources.",
+            );
+        }
+      }
     }
   }
+  await assertSafeOfficePackageParts(archive, ".docx");
+  assertSafeDocxFields(archive);
   const document = parseTemplateXml(strFromU8(archive["word/document.xml"]));
   if (
     document.documentElement.namespaceURI !== WORD_NS ||
@@ -63,6 +99,44 @@ export async function openEditableDocx(
   )
     throw new Error("Invalid DOCX document body or namespace.");
   return { archive, document };
+}
+
+function assertSafeDocxFields(archive: Unzipped): void {
+  for (const [path, content] of Object.entries(archive)) {
+    if (!path.startsWith("word/") || !path.endsWith(".xml")) continue;
+    const xml = strFromU8(content);
+    if (!/(?:altChunk|\bobject\b|fldSimple|instrText)/i.test(xml)) continue;
+    const document = parseTemplateXml(xml);
+    if (
+      document.getElementsByTagNameNS(WORD_NS, "altChunk").length > 0 ||
+      document.getElementsByTagNameNS(WORD_NS, "object").length > 0
+    )
+      throw new Error(
+        "DOCX_ACTIVE_CONTENT_UNSUPPORTED: altChunk and embedded OLE objects are not supported.",
+      );
+    const instructions: string[] = [];
+    const activeFields: string[] = [];
+    for (const element of Array.from(document.getElementsByTagName("*"))) {
+      if (element.namespaceURI !== WORD_NS) continue;
+      if (element.localName === "fldSimple") {
+        instructions.push(element.getAttributeNS(WORD_NS, "instr") ?? "");
+      } else if (element.localName === "fldChar") {
+        const type = element.getAttributeNS(WORD_NS, "fldCharType");
+        if (type === "begin") activeFields.push("");
+        else if (type === "end") {
+          const instruction = activeFields.pop();
+          if (instruction) instructions.push(instruction);
+        }
+      } else if (element.localName === "instrText" && activeFields.length) {
+        activeFields[activeFields.length - 1] += element.textContent ?? "";
+      }
+    }
+    instructions.push(...activeFields);
+    if (instructions.some((instruction) => activeFieldInstruction.test(instruction)))
+      throw new Error(
+        "DOCX_ACTIVE_FIELD_UNSUPPORTED: fields that can include external content or start embedded objects are not supported.",
+      );
+  }
 }
 
 export async function validateTemplatePlaceholders(

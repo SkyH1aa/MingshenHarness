@@ -24,6 +24,7 @@ import { tr } from "../i18n/index";
 import { runtimeText } from "../i18n/runtime";
 import type { LiveRun } from "../lib/chat-types";
 import { planStepState } from "../lib/plan-status";
+import { AgentWorkflowPanel } from "./AgentWorkflowPanel";
 import { ExpandableText } from "./ExpandableText";
 import { SubagentOutput } from "./SubagentOutput";
 import { useUiPreferences } from "./UiPreferences";
@@ -64,6 +65,7 @@ export function TaskWorkbench({
   onToggleCollapsed,
   onReveal,
   onEditingChange,
+  onDraft,
 }: {
   session: SessionView;
   sessions: SessionView[];
@@ -77,6 +79,7 @@ export function TaskWorkbench({
   onToggleCollapsed?: () => void;
   onReveal?: () => void;
   onEditingChange?: (editing: boolean) => void;
+  onDraft?: (text: string) => Promise<void> | void;
 }) {
   const orbit = useUiPreferences().activeStyle === "orbit";
   const en = useLocale() === "en";
@@ -263,7 +266,8 @@ export function TaskWorkbench({
     children.length === 0 &&
     childrenTotal === 0 &&
     !resumable &&
-    !error
+    !error &&
+    !(onDraft && session.workspacePath && !session.parentSessionId)
   )
     return null;
   return (
@@ -436,6 +440,19 @@ export function TaskWorkbench({
             ) : null}
           </div>
           <div className="task-workbench__body" ref={workbenchBody} role="tabpanel">
+            {onDraft && session.workspacePath && !session.parentSessionId ? (
+              <AgentWorkflowPanel
+                key={session.id}
+                session={session}
+                disabled={
+                  busy ||
+                  editing !== null ||
+                  session.status === "running" ||
+                  session.status === "waiting_approval"
+                }
+                onDraft={onDraft}
+              />
+            ) : null}
             {tab === "plan" ? (
               editing ? (
                 <form

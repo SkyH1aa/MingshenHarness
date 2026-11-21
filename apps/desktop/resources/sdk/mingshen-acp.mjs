@@ -7,10 +7,74 @@ const serverUrl = (process.env.MINGSHEN_SERVER_URL || "http://127.0.0.1:4096").r
   "",
 );
 const token = process.env.MINGSHEN_SERVER_TOKEN || "";
-const version = process.env.MINGSHEN_VERSION || "1.3.3";
+const version = process.env.MINGSHEN_VERSION || "1.3.4";
+const defaultAbortTimeoutMs = 10_000;
+const configuredAbortTimeoutMs = Number(process.env.MINGSHEN_ABORT_TIMEOUT_MS);
+const abortTimeoutMs =
+  Number.isFinite(configuredAbortTimeoutMs) && configuredAbortTimeoutMs >= 50
+    ? Math.min(Math.floor(configuredAbortTimeoutMs), 60_000)
+    : defaultAbortTimeoutMs;
 const sessions = new Map();
 const pendingPrompts = new Map();
 let providerCache = null;
+
+function matchesPending(pending, event) {
+  return Boolean(
+    pending &&
+      (!pending.runId || !event.runId || pending.runId === event.runId),
+  );
+}
+
+function settlePending(sessionId, event, settle) {
+  const pending = pendingPrompts.get(sessionId);
+  if (!matchesPending(pending, event)) {
+    return;
+  }
+  pendingPrompts.delete(sessionId);
+  settle(pending);
+}
+
+function handleTerminalEvent(event) {
+  const pending = pendingPrompts.get(event.sessionId);
+  if (pending && !pending.runId) {
+    pending.earlyEvents.push(event);
+    return;
+  }
+  if (event.type === "run_completed") {
+    settlePending(event.sessionId, event, (prompt) =>
+      prompt.resolve({ stopReason: "end_turn" }),
+    );
+  } else if (event.type === "run_failed") {
+    settlePending(event.sessionId, event, (prompt) =>
+      prompt.reject(new Error(eventErrorMessage(event.error))),
+    );
+  } else if (event.type === "run_interrupted") {
+    settlePending(event.sessionId, event, (prompt) =>
+      prompt.resolve({ stopReason: "cancelled" }),
+    );
+  } else if (event.type === "status" && event.status === "error") {
+    settlePending(event.sessionId, event, (prompt) =>
+      prompt.reject(new Error(eventErrorMessage(event.message))),
+    );
+  }
+}
+
+function eventErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  if (error !== undefined) {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      // Fall through to the stable error label.
+    }
+  }
+  return "Mingshen run failed.";
+}
 
 if (!token) {
   process.stderr.write(
@@ -41,6 +105,28 @@ async function api(path, init = {}) {
     throw new Error(`HTTP ${response.status}: ${text.slice(0, 3000)}`);
   }
   return text ? JSON.parse(text) : null;
+}
+
+async function abortSession(sessionId) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), abortTimeoutMs);
+  timeout.unref?.();
+  try {
+    await api(`/session/${encodeURIComponent(sessionId)}/abort`, {
+      method: "POST",
+      body: "{}",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `Mingshen cancellation request timed out after ${abortTimeoutMs} ms; remote stop is not confirmed.`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function firstModel() {
@@ -142,18 +228,11 @@ function connectEvents() {
               emitAgentText(event.sessionId, "\n[Connection interrupted. The incomplete response above was discarded; retrying the current request.]\n");
             } else if (event.type === "activity") {
               emitToolUpdate(event.sessionId, event.activity);
-            } else if (event.type === "run_completed") {
-              const pending = pendingPrompts.get(event.sessionId);
-              if (pending && pending.runId === event.runId) {
-                pendingPrompts.delete(event.sessionId);
-                pending.resolve({ stopReason: "end_turn" });
-              }
-            } else if (event.type === "status" && event.status === "error") {
-              const pending = pendingPrompts.get(event.sessionId);
-              if (pending) {
-                pendingPrompts.delete(event.sessionId);
-                pending.reject(new Error(event.message || "Mingshen run failed."));
-              }
+            } else if (
+              ["run_completed", "run_failed", "run_interrupted"].includes(event.type) ||
+              (event.type === "status" && event.status === "error")
+            ) {
+              handleTerminalEvent(event);
             }
           }
         }
@@ -262,31 +341,63 @@ async function prompt(params) {
   if (!text.trim()) {
     throw new Error("ACP prompt contains no supported text content.");
   }
-  const started = await api(`/session/${encodeURIComponent(sessionId)}/message`, {
-    method: "POST",
-    body: JSON.stringify({ text }),
-  });
-  return await new Promise((resolve, reject) => {
-    pendingPrompts.set(sessionId, {
-      runId: started.runId,
-      resolve,
-      reject,
+  if (pendingPrompts.has(sessionId)) {
+    throw new Error("This ACP session already has an active prompt.");
+  }
+  let resolvePrompt;
+  let rejectPrompt;
+  const pending = {
+    runId: null,
+    earlyEvents: [],
+    promise: new Promise((resolve, reject) => {
+      resolvePrompt = resolve;
+      rejectPrompt = reject;
+    }),
+    resolve: (value) => resolvePrompt(value),
+    reject: (error) => rejectPrompt(error),
+  };
+  pending.promise.catch(() => undefined);
+  pendingPrompts.set(sessionId, pending);
+  try {
+    const started = await api(`/session/${encodeURIComponent(sessionId)}/message`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
     });
-  });
+    if (typeof started?.runId !== "string" || !started.runId) {
+      throw new Error("Mingshen did not return a runId for the ACP prompt.");
+    }
+    pending.runId = started.runId;
+    for (const event of pending.earlyEvents.splice(0)) {
+      handleTerminalEvent(event);
+    }
+    return await pending.promise;
+  } catch (error) {
+    if (pendingPrompts.get(sessionId) === pending) {
+      pendingPrompts.delete(sessionId);
+    }
+    throw error;
+  }
 }
 
 async function cancel(params) {
   const sessionId = String(params?.sessionId || "");
-  if (sessionId) {
-    await api(`/session/${encodeURIComponent(sessionId)}/abort`, {
-      method: "POST",
-      body: "{}",
-    });
-    const pending = pendingPrompts.get(sessionId);
-    if (pending) {
+  if (!sessionId) {
+    return null;
+  }
+  const pending = pendingPrompts.get(sessionId);
+  try {
+    await abortSession(sessionId);
+  } catch (error) {
+    const message = `Mingshen cancellation failed; remote stop is not confirmed: ${eventErrorMessage(error)}`;
+    if (pending && pendingPrompts.get(sessionId) === pending) {
       pendingPrompts.delete(sessionId);
-      pending.resolve({ stopReason: "cancelled" });
+      pending.reject(new Error(message));
     }
+    throw new Error(message);
+  }
+  if (pending && pendingPrompts.get(sessionId) === pending) {
+    pendingPrompts.delete(sessionId);
+    pending.resolve({ stopReason: "cancelled" });
   }
   return null;
 }

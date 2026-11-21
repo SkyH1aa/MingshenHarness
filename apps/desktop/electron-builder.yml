@@ -6,6 +6,11 @@ asarUnpack:
   - "node_modules/browserdo-mcp/**/*"
   - "node_modules/@ast-grep/**/*"
   - "node_modules/@napi-rs/**/*"
+  - "node_modules/sharp/**/*"
+  - "node_modules/@img/**/*"
+  - "node_modules/detect-libc/**/*"
+  - "node_modules/semver/**/*"
+  - "node_modules/node-pty/**/*"
   - "node_modules/tesseract.js/**/*"
   - "node_modules/tesseract.js-core/**/*"
   - "node_modules/@tesseract.js-data/**/*"
@@ -21,6 +26,10 @@ files:
   - out/**
   - package.json
 extraResources:
+  - from: node_modules/@img/sharp-win32-x64/README.md
+    to: third-party-notices/sharp-win32-x64/app-local-README.md
+  - from: ../../node_modules/@img/sharp-win32-x64/README.md
+    to: third-party-notices/sharp-win32-x64/workspace-README.md
   - from: resources/tencentdb-memory
     to: tencentdb-memory
     filter:

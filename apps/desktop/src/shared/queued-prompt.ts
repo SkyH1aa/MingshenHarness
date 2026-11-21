@@ -1,15 +1,17 @@
+import { MAX_CHAT_ATTACHMENT_TOTAL_BYTES } from "./attachments";
 import type {
   AgentMode,
   ApprovalMode,
   AttachmentKind,
   ChatAttachmentInput,
+  ChatTurnOptions,
   PermissionMode,
   SessionExecutionMode,
 } from "./domain";
 
 export const QUEUED_PROMPT_STORAGE_VERSION = 2;
 export const MAX_QUEUED_PROMPTS = 10;
-export const MAX_QUEUED_PROMPT_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+export const MAX_QUEUED_PROMPT_ATTACHMENT_BYTES = MAX_CHAT_ATTACHMENT_TOTAL_BYTES;
 
 export const QUEUED_PROMPT_REQUIRES_ACTIVE_RUN = "QUEUED_PROMPT_REQUIRES_ACTIVE_RUN";
 export const QUEUED_PROMPT_UNSUPPORTED_SUBAGENT = "QUEUED_PROMPT_UNSUPPORTED_SUBAGENT";
@@ -69,6 +71,7 @@ export interface QueuedPromptView {
   id: string;
   sessionId: string;
   text: string;
+  temporaryInstruction?: string;
   attachments: QueuedPromptAttachmentView[];
   snapshot: QueuedPromptConfigurationSnapshot;
   changedConfigurationFields: QueuedPromptConfigurationField[];
@@ -81,7 +84,7 @@ export interface QueuedPromptView {
   updatedAt: string;
 }
 
-export interface QueuedPromptAddInput {
+export interface QueuedPromptAddInput extends ChatTurnOptions {
   sessionId: string;
   text: string;
   attachments?: ChatAttachmentInput[];
@@ -93,6 +96,8 @@ export interface QueuedPromptUpdateInput {
   text: string;
   /** Omit to preserve the saved attachment snapshot; provide a list to replace it. */
   attachments?: ChatAttachmentInput[];
+  /** Omit to preserve the current instruction; an empty value removes it. */
+  temporaryInstruction?: string | null;
 }
 
 export interface QueuedPromptReorderInput {

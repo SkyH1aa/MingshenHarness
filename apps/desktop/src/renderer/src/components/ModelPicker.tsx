@@ -10,6 +10,7 @@ import {
 import { type MouseEvent, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ModelConfig, ProviderView } from "../../../shared/domain";
+import { imageOutputProviders, textOutputProviders } from "../../../shared/model-capabilities";
 import { tr, useLocale } from "../i18n/index";
 import { revealPanelItem } from "../lib/floating-panel";
 import {
@@ -36,6 +37,7 @@ interface ModelPickerProps {
   ariaLabel?: string;
   placeholder?: string;
   onClear?: () => void;
+  purpose?: "text" | "image";
 }
 
 export function ModelPicker({
@@ -48,6 +50,7 @@ export function ModelPicker({
   ariaLabel,
   placeholder,
   onClear,
+  purpose = "text",
 }: ModelPickerProps) {
   const locale = useLocale();
   const catalog = useModelCatalog();
@@ -57,13 +60,9 @@ export function ModelPicker({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
-  const ordered = orderCatalogProviders(
-    providers.map((provider) => ({
-      ...provider,
-      models: provider.models.filter((model) => model.enabled),
-    })),
-    catalog.preferences.providerOrder,
-  );
+  const purposeProviders =
+    purpose === "image" ? imageOutputProviders(providers) : textOutputProviders(providers);
+  const ordered = orderCatalogProviders(purposeProviders, catalog.preferences.providerOrder);
   const favorites = starredCatalogModels(ordered, catalog.preferences.starredModelIds);
   const drag = useProviderOrderDrag<HTMLDivElement>({
     providerIds: ordered.map((provider) => provider.id),
@@ -216,7 +215,11 @@ export function ModelPicker({
             <code>{favorite ? model.displayName : model.modelId}</code>
           </span>
           <span className="model-picker__model-meta">
-            {(model.contextWindow / 1000).toLocaleString(locale === "en" ? "en-US" : "zh-CN")}K
+            {purpose === "image"
+              ? locale === "en"
+                ? "Image"
+                : "图片"
+              : `${(model.contextWindow / 1000).toLocaleString(locale === "en" ? "en-US" : "zh-CN")}K`}
           </span>
           <span className="model-picker__selection-mark">
             {selected ? <Check aria-hidden="true" size={15} /> : null}

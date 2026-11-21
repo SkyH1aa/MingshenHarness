@@ -19,7 +19,9 @@ import {
   type OfficeSpreadsheetSpec,
   type OfficeSpreadsheetTheme,
   officeDocumentSchema,
+  officeFormulaIsUnsafe,
 } from "./office-document-schema";
+import { assertSafeOfficePackageParts } from "./office-package-security";
 import { type OfficePalette, resolveOfficeVisual } from "./office-visuals";
 
 const MAX_OFFICE_BYTES = 25 * 1024 * 1024;
@@ -28,6 +30,8 @@ const MAX_INSPECT_OBJECTS = 2_000;
 const MAX_COM_OUTPUT = 64 * 1024;
 const OFFICE_OWNER_FILE = "office-owner.json";
 const OFFICE_CLEANUP_TIMEOUT_MS = 10_000;
+const SPREADSHEET_WORKSHEET_PART = /^xl\/worksheets\/[^/]+\.xml$/i;
+const INSPECTION_LIMIT_REACHED = Symbol("inspection-limit-reached");
 const EXCEL_MUTABLE = [
   /^\[Content_Types\]\.xml$/i,
   /^_rels\/\.rels$/i,
@@ -46,7 +50,8 @@ const PPT_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const PPT_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const RELATIONSHIPS = "http://schemas.openxmlformats.org/package/2006/relationships";
 const WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-const WORD_AUTOMATIC_FIELD = /^\s*(INCLUDETEXT|INCLUDEPICTURE|LINK|DDE|DDEAUTO|DATABASE)\b/i;
+const WORD_AUTOMATIC_FIELD =
+  /^\s*(INCLUDETEXT|INCLUDEPICTURE|LINK|DDE|DDEAUTO|DATABASE|EMBED|MACROBUTTON)\b/i;
 const serializer = new XMLSerializer();
 type ExcelTableTheme =
   | "TableStyleLight1"
@@ -56,10 +61,17 @@ type ExcelTableTheme =
   | "TableStyleMedium9"
   | "TableStyleDark3";
 
+export interface OfficeVerification {
+  status: "verified" | "partial" | "unavailable" | "failed";
+  render: "verified" | "not_requested" | "unavailable" | "failed";
+  recalculation: "verified" | "not_requested" | "unavailable" | "failed" | "partial";
+}
+
 export interface OfficeDocumentResult {
   output: string;
   warnings: string[];
   bytes?: Buffer;
+  verification?: OfficeVerification;
   rendition?: {
     extension: ".pdf";
     bytes: Buffer;
@@ -73,6 +85,29 @@ export interface OfficeComVerification {
   message: string;
   renderedPdf?: Buffer;
   recalculatedBytes?: Buffer;
+}
+
+export function deriveOfficeVerification(input: {
+  officeStatus: OfficeComVerification["status"];
+  render: OfficeVerification["render"];
+  recalculation: OfficeVerification["recalculation"];
+  structuralPartial: boolean;
+}): OfficeVerification {
+  const status =
+    input.officeStatus === "failed"
+      ? "failed"
+      : input.officeStatus !== "verified"
+        ? "unavailable"
+        : input.render === "failed" || input.recalculation === "failed"
+          ? "failed"
+          : input.recalculation === "partial" || input.structuralPartial
+            ? "partial"
+            : "verified";
+  return {
+    status,
+    render: input.render,
+    recalculation: input.recalculation,
+  };
 }
 
 export interface OfficeProcessOwner {
@@ -168,51 +203,6 @@ function ensureOfficePackage(bytes: Buffer, extension: string): void {
     throw new Error("Office 文件不是有效的 ZIP/Open XML 包。");
   if (![".docx", ".xlsx", ".pptx"].includes(extension.toLowerCase()))
     throw new Error("Office 编辑只支持 OOXML 格式。");
-}
-
-function rejectDangerousPackageParts(archive: Unzipped): void {
-  const unsafe = Object.keys(archive).find((name) =>
-    /(?:vbaProject|_xmlsignatures|activeX|externalLinks\/|pivotCache\/|slicer|webextensions)/i.test(
-      name,
-    ),
-  );
-  if (unsafe)
-    throw new Error(
-      `OFFICE_UNSUPPORTED_PART: 检测到宏、签名、OLE、外部连接、数据透视或扩展部件 ${unsafe}；为避免破坏，已拒绝编辑。`,
-    );
-  for (const [name, bytes] of Object.entries(archive)) {
-    if (!/embeddings\//i.test(name)) continue;
-    if (name.endsWith("/")) continue;
-    if (!/\.xlsx$/i.test(name))
-      throw new Error(
-        `OFFICE_UNSUPPORTED_PART: 嵌入部件 ${name} 不是受控的 XLSX 数据工作簿，已拒绝编辑。`,
-      );
-    let embedded: Unzipped;
-    try {
-      embedded = unzipSync(bytes);
-    } catch {
-      throw new Error(`OFFICE_UNSUPPORTED_PART: 嵌入工作簿 ${name} 无法校验。`);
-    }
-    if (
-      Object.keys(embedded).some((entry) =>
-        /(?:vbaProject|externalLinks\/|_xmlsignatures|activeX)/i.test(entry),
-      )
-    )
-      throw new Error(`OFFICE_UNSUPPORTED_PART: 嵌入工作簿 ${name} 含不受支持部件。`);
-  }
-  for (const [name, bytes] of Object.entries(archive)) {
-    if (!/\.(?:xml|rels)$/i.test(name)) continue;
-    const xml = strFromU8(bytes);
-    if (/<!DOCTYPE|<!ENTITY/i.test(xml))
-      throw new Error("Office XML declarations are not supported.");
-    if (
-      /externalLink|oleObject|pivotTable|activeXControl|digital-signature|macroEnabled/i.test(
-        xml,
-      ) &&
-      /\[Content_Types\]\.xml$|\.rels$/i.test(name)
-    )
-      throw new Error(`OFFICE_UNSUPPORTED_PART: ${name} 引用了不受支持的外部或可执行部件。`);
-  }
 }
 
 function normalizeArgb(value: string): string {
@@ -635,7 +625,7 @@ async function editSpreadsheet(
   ensureOfficePackage(source, ".xlsx");
   await validateDocumentArchive(source);
   const sourceArchive = unzipSync(source);
-  rejectDangerousPackageParts(sourceArchive);
+  await assertSafeOfficePackageParts(sourceArchive, ".xlsx");
   const actual = sha256(source);
   if (actual !== input.source.expected_sha256.toLowerCase())
     throw new Error("DOCUMENT_SOURCE_CHANGED: XLSX 源 SHA-256 与读取时不一致，请重新检查。");
@@ -700,6 +690,7 @@ async function inspectSpreadsheet(
   formulas: number;
   uncachedFormulas: number;
   errors: number;
+  truncated: boolean;
 }> {
   const calculatedByOffice = options.calculatedByMicrosoftExcel ?? false;
   const workbook = await loadWorkbook(bytes);
@@ -707,38 +698,50 @@ async function inspectSpreadsheet(
   let formulas = 0;
   let uncachedFormulas = 0;
   let errors = 0;
-  const lines = workbook.worksheets.map((sheet) => {
+  let truncated = false;
+  const lines: string[] = [];
+  for (const sheet of workbook.worksheets) {
     const records: unknown[] = [];
-    sheet.eachRow({ includeEmpty: false }, (row) => {
-      row.eachCell({ includeEmpty: false }, (cell) => {
-        if (inspected++ >= MAX_INSPECT_CELLS) return;
-        if (cell.formula !== undefined) {
-          formulas += 1;
-          if (cell.result === undefined) uncachedFormulas += 1;
-        }
-        const value = displayCellValue(cell, calculatedByOffice);
-        if (
-          (value && typeof value === "object" && "error" in value) ||
-          /^#(?:N\/A|VALUE!|REF!|DIV\/0!|NUM!|NAME\?|NULL!)$/.test(String(cell.result ?? ""))
-        )
-          errors += 1;
-        records.push({ cell: cell.address, value });
-      });
-    });
-    return JSON.stringify({
-      sheet: sheet.name,
-      rows: sheet.rowCount,
-      columns: sheet.columnCount,
-      selected_cells: records,
-      selected_cells_truncated: inspected >= MAX_INSPECT_CELLS,
-    });
-  });
+    if (!truncated) {
+      try {
+        sheet.eachRow({ includeEmpty: false }, (row) => {
+          row.eachCell({ includeEmpty: false }, (cell) => {
+            if (inspected >= MAX_INSPECT_CELLS) {
+              truncated = true;
+              throw INSPECTION_LIMIT_REACHED;
+            }
+            inspected += 1;
+            if (cell.formula !== undefined) {
+              formulas += 1;
+              if (cell.result === undefined) uncachedFormulas += 1;
+            }
+            const value = displayCellValue(cell, calculatedByOffice);
+            if (
+              (value && typeof value === "object" && "error" in value) ||
+              /^#(?:N\/A|VALUE!|REF!|DIV\/0!|NUM!|NAME\?|NULL!)$/.test(String(cell.result ?? ""))
+            )
+              errors += 1;
+            records.push({ cell: cell.address, value });
+          });
+        });
+      } catch (error) {
+        if (error !== INSPECTION_LIMIT_REACHED) throw error;
+      }
+    }
+    lines.push(
+      JSON.stringify({
+        sheet: sheet.name,
+        rows: sheet.rowCount,
+        columns: sheet.columnCount,
+        selected_cells: records,
+        selected_cells_truncated: truncated,
+      }),
+    );
+  }
   return {
     text: lines.join("\n"),
     warnings: [
-      ...(inspected >= MAX_INSPECT_CELLS
-        ? [`结构检查最多列出 ${MAX_INSPECT_CELLS} 个非空单元格。`]
-        : []),
+      ...(truncated ? [`结构检查最多列出 ${MAX_INSPECT_CELLS} 个非空单元格。`] : []),
       ...(uncachedFormulas
         ? [`${uncachedFormulas} 个公式没有缓存结果；这不等于公式错误，需用真实 Excel 重算。`]
         : []),
@@ -752,6 +755,7 @@ async function inspectSpreadsheet(
     formulas,
     uncachedFormulas,
     errors,
+    truncated,
   };
 }
 
@@ -834,6 +838,14 @@ export function inspectOfficeComPackageBoundary(
         )
       )
         issues.add("XLSX_COM_DATA_CONNECTION_PART");
+    }
+    for (const [name, content] of Object.entries(archive)) {
+      if (!SPREADSHEET_WORKSHEET_PART.test(name)) continue;
+      const worksheet = parseOfficeComXml(content, name);
+      for (const formula of Array.from(worksheet.getElementsByTagName("*"))) {
+        if (formula.localName === "f" && officeFormulaIsUnsafe(formula.textContent ?? ""))
+          issues.add("XLSX_ACTIVE_FORMULA");
+      }
     }
   }
   return { safe: issues.size === 0, reasons: [...issues].sort() };
@@ -1013,13 +1025,19 @@ function presentationStructure(input: { archive: Unzipped; bytes: Buffer }): Pre
   };
 }
 
-async function inspectPresentation(bytes: Buffer): Promise<{
+async function inspectPresentation(
+  bytes: Buffer,
+  validatedArchive?: Unzipped,
+): Promise<{
   text: string;
   warnings: string[];
 }> {
-  await validateDocumentArchive(bytes);
-  const archive = unzipSync(bytes);
-  rejectDangerousPackageParts(archive);
+  let archive = validatedArchive;
+  if (!archive) {
+    await validateDocumentArchive(bytes);
+    archive = unzipSync(bytes);
+    await assertSafeOfficePackageParts(archive, ".pptx");
+  }
   const structure = presentationStructure({ archive, bytes });
   return {
     text: structure.text,
@@ -1038,7 +1056,7 @@ async function editPresentation(
   ensureOfficePackage(source, ".pptx");
   await validateDocumentArchive(source);
   const archive = unzipSync(source);
-  rejectDangerousPackageParts(archive);
+  await assertSafeOfficePackageParts(archive, ".pptx");
   const structure = presentationStructure({ archive, bytes: source });
   if (structure.sha256 !== input.source.expected_sha256.toLowerCase())
     throw new Error("DOCUMENT_SOURCE_CHANGED: PPTX 源 SHA-256 与读取时不一致，请重新检查。");
@@ -1098,8 +1116,11 @@ async function editPresentation(
   };
 }
 
-async function inspectDocx(bytes: Buffer): Promise<{ text: string; warnings: string[] }> {
-  await validateDocumentArchive(bytes);
+async function inspectDocx(
+  bytes: Buffer,
+  archiveValidated = false,
+): Promise<{ text: string; warnings: string[] }> {
+  if (!archiveValidated) await validateDocumentArchive(bytes);
   const structure = await readDocxStructure(bytes);
   return {
     text: `Source SHA-256: ${structure.sha256}\n${structure.text}`,
@@ -1115,7 +1136,7 @@ async function inspectOffice(
   ensureOfficePackage(bytes, extension);
   if (extension === ".xlsx") {
     await validateDocumentArchive(bytes);
-    rejectDangerousPackageParts(unzipSync(bytes));
+    await assertSafeOfficePackageParts(unzipSync(bytes), ".xlsx");
     const inspection = await inspectSpreadsheet(bytes);
     return {
       output: [
@@ -1148,29 +1169,33 @@ async function inspectOffice(
 async function structuralVerification(
   bytes: Buffer,
   path: string,
-): Promise<{ text: string; warnings: string[] }> {
-  const extension = extname(path).toLowerCase();
+): Promise<{ text: string; warnings: string[]; partial: boolean }> {
+  const extension = extname(path).toLowerCase() as ".docx" | ".xlsx" | ".pptx";
   ensureOfficePackage(bytes, extension);
+  await validateDocumentArchive(bytes);
+  const archive = unzipSync(bytes);
+  await assertSafeOfficePackageParts(archive, extension);
   if (extension === ".xlsx") {
-    await validateDocumentArchive(bytes);
-    rejectDangerousPackageParts(unzipSync(bytes));
     const result = await inspectSpreadsheet(bytes);
     return {
-      text: `XLSX 结构通过：${result.formulas} 个公式，${result.uncachedFormulas} 个缺少缓存结果，${result.errors} 个错误值。SHA-256 ${sha256(bytes)}。`,
+      text: `XLSX 结构通过：${result.formulas} 个公式，${result.uncachedFormulas} 个缺少缓存结果，${result.errors} 个错误值；公式扫描${result.truncated ? "为 partial（超过 2000 格未检查）" : "完整"}。SHA-256 ${sha256(bytes)}。`,
       warnings: result.warnings,
+      partial: result.truncated,
     };
   }
   if (extension === ".pptx") {
-    const result = await inspectPresentation(bytes);
+    const result = await inspectPresentation(bytes, archive);
     return {
       text: `PPTX 结构通过：${result.text.split("\n").length} 个可索引对象。SHA-256 ${sha256(bytes)}。`,
       warnings: result.warnings,
+      partial: false,
     };
   }
-  const result = await inspectDocx(bytes);
+  const result = await inspectDocx(bytes, true);
   return {
     text: `DOCX 结构通过：${result.text.split("\n").length} 条结构记录。SHA-256 ${sha256(bytes)}。`,
     warnings: result.warnings,
+    partial: false,
   };
 }
 
@@ -1258,6 +1283,64 @@ function parseComResult(stdout: string): Record<string, unknown> | null {
     }
   }
   return null;
+}
+
+export function interpretOfficeComProcessResult(result: {
+  code: number;
+  stdout: string;
+  stderr: string;
+}): Pick<OfficeComVerification, "status" | "message"> {
+  const parsed = parseComResult(result.stdout);
+  const reportedStatus =
+    typeof parsed?.status === "string" ? parsed.status.trim().toLowerCase() : "";
+  const reportedMessage =
+    typeof parsed?.message === "string" ? parsed.message.trim() : result.stderr.trim();
+  if (!parsed)
+    return {
+      status: "failed",
+      message: [
+        result.code === 0
+          ? "Office COM 进程退出码为 0，但没有返回包含权威 status 的 JSON；验证未建立。"
+          : `Office COM 返回退出码 ${result.code}，且没有返回权威 JSON 状态。`,
+        result.stderr.trim(),
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  if (!reportedStatus)
+    return {
+      status: "failed",
+      message: reportedMessage || "Office COM 返回了 JSON，但缺少有效的权威 status；验证未建立。",
+    };
+  if (reportedStatus === "verified" && result.code !== 0)
+    return {
+      status: "failed",
+      message: [
+        `Office COM 自报 verified，但进程退出码为 ${result.code}；拒绝视为成功。`,
+        reportedMessage,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  if (reportedStatus === "verified")
+    return {
+      status: "verified",
+      message: reportedMessage || "Microsoft Office 重算或导出完成。",
+    };
+  if (reportedStatus === "unavailable" || reportedStatus === "skipped")
+    return {
+      status: reportedStatus,
+      message: reportedMessage || `Office COM 返回权威状态 ${reportedStatus}。`,
+    };
+  if (reportedStatus === "failed")
+    return {
+      status: "failed",
+      message: reportedMessage || "Office COM 返回权威失败状态。",
+    };
+  return {
+    status: "failed",
+    message: reportedMessage || `Office COM 返回无法识别的权威状态：${String(parsed.status)}。`,
+  };
 }
 
 export function formatOfficeComDiagnostic(
@@ -1426,18 +1509,15 @@ export async function verifyWithMicrosoftOffice(
       signal,
     );
     const stage = parseOfficeComStage(result.stdout);
-    const parsed = parseComResult(result.stdout);
-    const status = String(parsed?.status ?? (result.code === 0 ? "verified" : "failed"));
-    if (status !== "verified")
+    const interpreted = interpretOfficeComProcessResult(result);
+    if (interpreted.status !== "verified")
       return {
-        status:
-          status === "unavailable" ? "unavailable" : status === "skipped" ? "skipped" : "failed",
-        message: formatOfficeComDiagnostic(
-          String(parsed?.message ?? result.stderr.trim()) ||
-            `Office COM 返回退出码 ${result.code}。`,
-          stage,
-          [root, inputPath, outputPath],
-        ),
+        status: interpreted.status,
+        message: formatOfficeComDiagnostic(interpreted.message, stage, [
+          root,
+          inputPath,
+          outputPath,
+        ]),
       };
     const renderedPdf = render && existsSync(outputPath) ? await readFile(outputPath) : undefined;
     const recalculatedBytes =
@@ -1446,7 +1526,7 @@ export async function verifyWithMicrosoftOffice(
         : undefined;
     return {
       status: "verified",
-      message: String(parsed?.message ?? "Microsoft Office 重算或导出完成。"),
+      message: interpreted.message,
       ...(renderedPdf ? { renderedPdf } : {}),
       ...(recalculatedBytes ? { recalculatedBytes } : {}),
     };
@@ -1475,14 +1555,20 @@ async function verifyOffice(
 ): Promise<OfficeDocumentResult> {
   const structural = await structuralVerification(bytes, input.path);
   if ((!input.render && !input.recalculate) || !canUseOffice) {
+    const officeUnavailable = input.render || input.recalculate;
     return {
       output: structural.text,
       warnings: [
         ...structural.warnings,
-        (input.render || input.recalculate) && !canUseOffice
+        officeUnavailable && !canUseOffice
           ? "当前执行策略不允许启用宿主 Microsoft Office；仅完成结构检查，未重算、未渲染。"
           : "已按请求跳过 Microsoft Office 重算和渲染。",
       ],
+      verification: {
+        status: officeUnavailable ? "unavailable" : structural.partial ? "partial" : "verified",
+        render: input.render ? "unavailable" : "not_requested",
+        recalculation: input.recalculate ? "unavailable" : "not_requested",
+      },
     };
   }
   signal?.throwIfAborted();
@@ -1499,12 +1585,18 @@ async function verifyOffice(
         return `Word 自动字段 ${reason.slice("DOCX_AUTOMATIC_FIELD_".length)}`;
       if (reason === "OOXML_EXTERNAL_NON_HYPERLINK_RELATIONSHIP") return "hyperlink 之外的外部关系";
       if (reason === "XLSX_COM_DATA_CONNECTION_PART") return "Excel 外部数据连接部件";
+      if (reason === "XLSX_ACTIVE_FORMULA") return "Excel 主动外部公式";
       return "Office COM 包预检无法确认安全性";
     });
     const message = `Microsoft Office COM 验证已降级为 unavailable：${details.join("；")}；未启动 Office。普通 hyperlink 与纯内部字段不受此限制，旧稿 inspect/edit 路径也未因此改变。`;
     return {
       output: `${structural.text}\nMicrosoft Office 验证：unavailable。${message}`,
       warnings: [...structural.warnings, message],
+      verification: {
+        status: "unavailable",
+        render: input.render ? "unavailable" : "not_requested",
+        recalculation: input.recalculate ? "unavailable" : "not_requested",
+      },
     };
   }
   const rendered = await verifyWithMicrosoftOffice(
@@ -1518,6 +1610,8 @@ async function verifyOffice(
   const warnings = [...structural.warnings];
   if (rendered.status !== "verified") warnings.push(rendered.message);
   let recalculationText = "";
+  let recalculationStatus: "verified" | "not_requested" | "unavailable" | "failed" | "partial" =
+    input.recalculate ? "failed" : "not_requested";
   if (rendered.status === "verified" && input.recalculate && rendered.recalculatedBytes) {
     const recalculatedStructure = await structuralVerification(
       rendered.recalculatedBytes,
@@ -1530,8 +1624,16 @@ async function verifyOffice(
       recalculatedInspection.errors > 0
         ? `failed: 重算后发现 ${recalculatedInspection.errors} 个公式错误值`
         : recalculatedInspection.uncachedFormulas > 0
-          ? `incomplete: 重算后仍有 ${recalculatedInspection.uncachedFormulas} 个公式缺少缓存结果`
-          : "verified: 重算后所有已检查公式均有缓存结果且未发现错误值";
+          ? `partial: 重算后仍有 ${recalculatedInspection.uncachedFormulas} 个公式缺少缓存结果`
+          : recalculatedInspection.truncated
+            ? "partial: 重算成功，但公式扫描受 2000 格上限截断"
+            : "verified: 重算后全部公式均有缓存结果且未发现错误值";
+    recalculationStatus =
+      recalculatedInspection.errors > 0
+        ? "failed"
+        : recalculatedInspection.uncachedFormulas > 0 || recalculatedInspection.truncated
+          ? "partial"
+          : "verified";
     recalculationText = [
       `Excel 重算结果复核：${formulaStatus}。`,
       `重算工作簿结构：${recalculatedStructure.text}`,
@@ -1544,6 +1646,10 @@ async function verifyOffice(
     else if (recalculatedInspection.uncachedFormulas > 0)
       warnings.push(
         `FORMULA_CACHE_INCOMPLETE: Microsoft Excel 重算后仍有 ${recalculatedInspection.uncachedFormulas} 个公式缺少缓存结果。`,
+      );
+    else if (recalculatedInspection.truncated)
+      warnings.push(
+        `FORMULA_VERIFICATION_PARTIAL: 工作簿超过 ${MAX_INSPECT_CELLS} 个非空单元格，公式检查仅覆盖抽样范围，不能报告为全量 verified。`,
       );
   } else if (rendered.status === "verified" && input.recalculate && !rendered.recalculatedBytes) {
     warnings.push(
@@ -1561,10 +1667,27 @@ async function verifyOffice(
     rendered.recalculatedBytes
       ? rendered.recalculatedBytes
       : undefined;
+  const renderStatus: "verified" | "not_requested" | "unavailable" | "failed" = !input.render
+    ? "not_requested"
+    : rendered.status === "verified" && rendered.renderedPdf
+      ? "verified"
+      : rendered.status === "failed"
+        ? "failed"
+        : rendered.status === "verified"
+          ? "failed"
+          : "unavailable";
+  if (rendered.status !== "verified" && input.recalculate)
+    recalculationStatus = rendered.status === "failed" ? "failed" : "unavailable";
   if (rendered.status === "verified" && input.render && !rendered.renderedPdf)
     warnings.push(
       "PDF_RENDER_UNVERIFIED: Microsoft Office 未返回可用的 PDF 文件；不得把命令成功等同于渲染检查通过。",
     );
+  const verification = deriveOfficeVerification({
+    officeStatus: rendered.status,
+    render: renderStatus,
+    recalculation: recalculationStatus,
+    structuralPartial: structural.partial,
+  });
   return {
     output: [
       structural.text,
@@ -1572,8 +1695,8 @@ async function verifyOffice(
       recalculationText,
       rendered.status === "verified" && input.render && rendered.renderedPdf
         ? input.render_path
-          ? `已导出 PDF，返回给写入网关保存到 ${input.render_path}；仍需由视觉能力逐页检查布局。`
-          : "已导出 PDF 完成渲染验证；未提供 render_path，因此不返回 PDF 输出。"
+          ? `PDF 已导出并返回给写入网关保存到 ${input.render_path}；这只证明导出成功，未进行页面视觉验收。`
+          : "PDF 已成功导出；未提供 render_path，因此不返回 PDF 输出。这只证明导出成功，未进行页面视觉验收。"
         : "",
       recalculatedOutput
         ? `已生成带公式缓存的重算工作簿，返回给写入网关保存到 ${input.output_path}；源文件未被修改。`
@@ -1594,6 +1717,7 @@ async function verifyOffice(
         }
       : {}),
     ...(recalculatedOutput ? { recalculatedBytes: recalculatedOutput } : {}),
+    verification,
   };
 }
 

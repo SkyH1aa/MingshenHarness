@@ -20,9 +20,17 @@ Explicit confirmation authorizes downloading and launching a newer version. Meta
 
 Local database migrations are permanent and transaction-based, with every historical step included. Future schemas fail closed, without downgrade or history wipe. Back up complete data before important upgrades. Migration tests are not formal NSIS installation/rollback certification.
 
-Mingshen Harness 1.3.3 is a local desktop agent, not a certified
+Mingshen Harness 1.3.4 is a local desktop agent, not a certified
 enterprise security product. An approval prompt is authorization, not proof that a
 command or extension is harmless.
+
+In-run guidance is ordinary user text bound to a specific active primary run.
+It cannot change the provider, model, Agent mode, tool catalog, internet policy,
+approval or isolation settings, and it does not execute slash-command or `@`
+preprocessing. The current request and tool batch are not aborted. Pending updates
+enter only a later model-request context, outside open tool call/result pairs;
+failed, stopped or restarted runs do not silently dispatch them as new tasks.
+Quick Chat accepts guidance IPC only for its own Chat session.
 
 ## Agent Modes (1.3.3)
 
@@ -58,7 +66,9 @@ command or extension is harmless.
   the omitted middle cannot be recovered. Conversation deletion removes its archive.
 - Work Office creation and controlled editing use the normal profile, asset-read,
   approval, isolation, writer-lock, source-hash and conflict checks. Supported
-  outputs are committed atomically per file, not as a multi-file transaction.
+  outputs use controlled per-file commit and failure recovery, not a multi-file
+  transaction; the Windows rename steps retain a short non-atomic gap and may leave
+  an explicit recovery backup if automatic recovery is unavailable.
   Unsupported macros, signatures, external connections and executable/complex
   Office parts are rejected where the controlled editor cannot preserve them.
   Package validation is not proof of lossless compatibility with arbitrary Office
@@ -78,6 +88,67 @@ command or extension is harmless.
   external MCP side effects and other execution modes do not receive a universal
   per-file rollback guarantee. Snapshots can contain project data and are local
   application storage, not a substitute for independent backups.
+
+## Workstations and Project Assistance (1.3.4)
+
+- Creative templates and editable outlines do not execute tools. Sending a template
+  to WorkAgent appends a draft; the user still sends the turn, and normal model,
+  workspace, profile, approval, isolation and document-validation rules apply.
+- Image Studio uses the user's selected image provider and a separately selected
+  language/vision provider. Refinement sends the entered prompt; reverse prompting
+  sends the explicitly selected image. Generated and imported image bytes are kept
+  in the application's fixed asset store. Canvas metadata cannot select arbitrary
+  filesystem write destinations. Imports, image dimensions, decoded pixels, layer
+  counts, response bytes and GIF frames have separate bounds. PNG, JPEG, WebP and
+  GIF assets must pass a bounded complete pixel decode; APNG is unsupported.
+  Animated GIF/WebP validation checks every frame within the frame/pixel budget.
+- Image requests use the configured OpenAI Images-compatible endpoint and accept
+  Base64 output. URL-only image responses are rejected; model credentials are not
+  forwarded to arbitrary image-download targets. Text-only application flows reject
+  image-output-only model configurations. This separation does not establish that
+  every third-party image gateway is compatible or trustworthy.
+- AutoDrive uses the current conversation's model with an empty tool catalog and
+  bounded, read-only project/history evidence. It proposes alternatives without
+  writing files or sending a new execution turn. Selecting a proposal appends a
+  draft. A worktree session must already have an established worktree; AutoDrive
+  does not create it or fall back to the host checkout. Profile read policies are
+  rechecked after evidence loading and before the model request. Repository text
+  is untrusted input; it cannot grant permissions.
+- Coordination creates ordinary bounded-concurrency child tasks with explicit
+  scopes and profiles. Workers inherit the normal approval/isolation restrictions,
+  cannot recursively delegate, and share the existing writer-lease rules. Worker
+  completion, command verification and independent QA are separate states. A model
+  QA verdict is an evidence-bearing review, not proof that all behavior is correct.
+- Draft refinement advertises no tools, sends only the submitted text and project
+  wording guidance, and requires preview acceptance before replacing the draft.
+  A revision check rejects stale replacements. Temporary instructions apply to one
+  accepted turn or queue item and cannot grant tools, file access or networking.
+  Project tone is local workspace-scoped presentation guidance, not a permission.
+- Command-palette file search is scoped to the selected Code/Work workspace.
+  ChatAgent has no workspace-file result or local-command capability. Branch labels
+  record session context and are not a mechanism for checking out branches. Local
+  review reads bounded Git/session evidence, checks the diff version again before
+  formatting comments and never sends a message automatically.
+
+## User Interactive Shell (1.3.4)
+
+Interactive terminal tabs are distinct from the Agent's `run_command` and retained
+execution records. The user explicitly creates a tab in the main application
+window. It requires a trusted project, a root CodeAgent/WorkAgent session, Full
+Access, and host execution or an already created worktree. ChatAgent, Quick Chat,
+SubAgents, Docker and patch-only sessions cannot create this host Shell. IPC binds
+each terminal to its owning main-window WebContents and session.
+
+The Shell runs as the current Windows user using ConPTY. Input is a direct user
+action, not a model tool request, and does not show an Agent approval for each
+keystroke. Full Access does not turn the Shell into a filesystem sandbox; entered
+commands can affect locations accessible to that Windows user. Terminal tabs have
+bounded retained output, dimensions and input chunks. Closing tabs, removing
+sessions and application shutdown attempt bounded process cleanup; unconfirmed
+cleanup retains a retryable record and must be reported rather than represented
+as a successful process exit. Directory identity checks cannot eliminate every
+check/spawn race. A Shell that exits independently may leave detached descendants;
+this host terminal is not a process or filesystem isolation boundary.
 
 ## Local Plugin Interface (1.3.3)
 
@@ -283,6 +354,123 @@ command or extension is harmless.
 - There is no hosted tenant/account service. External account takeover and tenant
   authorization belong to the external service's own threat model.
 
+## 1.3.4 Reliability Hardening
+
+- DeepSeek `execute_tool_chain` keeps its expanded steps for local history and UI
+  inspection, but folds them into the original chain-root result for DeepSeek Chat
+  continuation. Provider-returned native state remains authoritative; synthetic
+  call/result pairs are not sent as independent model history.
+- Native Memory summaries use a bounded recovery budget and a shared cancellation
+  deadline. If Memory is disabled, its backend changes, the request is cancelled,
+  or the queued write times out, the summary is discarded. The final atomic replace
+  checks the active backend and cancellation state again before committing.
+- Native Sandbox termination has bounded task-tree and close waits. An unconfirmed
+  cleanup writes a typed tombstone and retains the workspace barrier and leases;
+  read-only recovery inspection cannot execute commands, write files or clear the
+  tombstone. Explicit user confirmation is required after current evidence is
+  checked. Tombstones have no TTL within the current process; the separate
+  workspace barrier and recovery settings persist across restarts.
+- Guarded workspace I/O fixes ancestor handles, rejects junctions, reparse points
+  and NTFS hard links, and writes through a same-directory temporary file with
+  flush and SHA-256 checks before a guarded commit. The commit keeps a same-directory
+  backup for failure recovery; its Windows rename steps are not presented as a
+  gap-free atomic swap. Git and snapshot restore use the guarded path instead of a
+  later raw path write. Multi-file restore remains recoverable but is not a database
+  transaction.
+- Shutdown uses settled cleanup for every service. A failure in one stop step does
+  not skip Guarded I/O, plugin cleanup or database close; all failures are recorded
+  and surfaced together. Interrupted recovery rechecks evidence, barriers, active
+  writers and leases before releasing any command or file ownership.
+- Chat Completions accepts only a provider-issued non-empty `finish_reason` as a
+  successful terminal state. Receiving `[DONE]` alone is treated as a retryable
+  incomplete response, and tools from that stream are not executed.
+- A workspace OpenCode/Mingshen JSON configuration is synchronized only after that
+  project is trusted, and project-origin Markdown Agents are ignored before trust.
+  Its `{file:...}` prompt references use guarded workspace reads and cannot follow
+  links or resolve outside the workspace. A project `build` produces a separate
+  project Profile instead of replacing the built-in `primary`; removing trust also
+  removes the corresponding project-origin Profile. LSP requests resolve through
+  the same workspace boundary, so an absolute or relative path cannot select an
+  out-of-workspace source file.
+- Attachment batches are limited to at most 10 files, 25 MiB per file and 50 MiB
+  total. The renderer checks count and declared sizes before file reads and IPC, and
+  the main process checks both declarations and encoded bytes again before parsing.
+  DOCX/XLSX/XLS/PPTX/ODT/PDF extraction runs in a worker pool
+  with two concurrent workers, bounded resource use, a 180-second deadline and
+  cancellation. ZIPs reject traversal, absolute/ADS/NUL paths, duplicate entries,
+  Unix symlinks and unsafe XML declarations. PPTX requires a presentation part and
+  at least one slide; spreadsheet extraction has sheet/row/column/cell/text limits.
+- Office structured editing uses a request-wide 100,000-cell work budget, rejects
+  active/external formulas and preserves only explicitly supported package parts.
+  Host document replacement is a guarded commit rather than a gap-free atomic swap:
+  the old target handle is locked, its hash is checked, the old target is renamed to
+  a same-directory backup, the new temporary file is installed and the requested
+  path is reopened for identity/size/hash verification. Normal abort or timeout
+  attempts `recover-write`; during application shutdown the worker is deliberately
+  unavailable, so automatic recovery is not claimed and the error retains the backup
+  path. A short gap remains between the two renames, and abrupt power loss or
+  processes bypassing the protected handle are outside the guaranteed recovery
+  boundary. Embedded workbooks are
+  scanned before decompression and share a maximum of 64 archives, 4,000 entries,
+  100 MiB declared uncompressed data and four recursion levels.
+  DOCX controlled editing rejects external non-hyperlink relationships, attached
+  templates, subdocuments, OLE/ActiveX packages, `altChunk` and active field types;
+  generated PNG/JPEG assets are structurally validated before package creation.
+- Verification has separate authoritative states for the overall result, rendering
+  and recalculation. `verified`, `partial`, `unavailable` and `failed` are not
+  interchangeable; a tool result carrying a non-verified Office state is an error.
+  More than 2,000 inspected spreadsheet cells makes formula inspection `partial`.
+  Exporting or opening a document is not page-by-page visual approval, and no Office
+  application is installed or reused when unavailable.
+- Full-access host command cancellation now settles even when process-tree cleanup
+  rejects or the child never emits `close`. An unconfirmed cleanup retains the run
+  tombstone, writer barrier and lease rather than pretending the process stopped.
+  Startup failure performs bounded cleanup and exits before the single-instance lock
+  can leave a windowless process alive.
+- MCP credential edits preserve existing secrets only for keys still declared by
+  the server, delete values for removed declarations and reject undeclared secret
+  input. OAuth token POST requests refuse redirects so authorization codes, refresh
+  tokens and client secrets are not forwarded to another origin. Embedded browser
+  `file:` preview requires a per-session workspace-bound approval token; arbitrary
+  `file:` URLs are not globally allowed. Headless session creation uses the same
+  model/profile/workspace validation as the normal session service.
+- ACP prompt requests settle on `run_completed`, `run_failed` and `run_interrupted`,
+  reject a concurrent prompt for the same session and cannot overwrite a newer
+  pending run. `session/cancel` has a bounded abort request; an HTTP error, network
+  failure or timeout rejects the active prompt as “remote stop is not confirmed”
+  and clears the local waiter instead of reporting a false cancellation. The
+  experimental launcher verifies the pinned native sandbox on each run and builds
+  the current source before launch. Plugin SDK marketplace updates
+  use an in-process queue, a cross-process lock, a random same-directory temporary
+  file, rename and read-back verification. Normal writers wait at most 15 seconds.
+  A lock older than 60 seconds is never removed automatically by mtime; the SDK
+  reports the lock path and leaves the catalog unchanged. Recovery requires
+  confirming no writer is active and manually deleting only the lock file. This
+  prevents concurrent read-modify-write loss and release races with automatic stale
+  cleanup and reduces partial-write exposure, but is not an `fsync` durability
+  guarantee.
+
+## ChatAgent Internet Control
+
+- Each ChatAgent conversation has a persisted `Allow internet` / `Block internet`
+  setting. Existing conversations default to allowed for compatibility. The setting
+  is locked while a send is being prepared, a task is running, or an approval is
+  pending; the main process rechecks this state before accepting a change.
+- When allowed, ChatAgent may use only `web_search` and `web_fetch`. These tools do
+  not request per-call approval, but webpage fetch still enforces HTTP(S), public
+  destination and response limits. When blocked, both tools are omitted from the
+  model request and are rejected again by the main process if a forged or stale
+  call reaches execution.
+- A fork, grouped conversation created from an existing Chat, or renewed Quick Chat
+  preserves a source conversation's blocked setting. A Chat without a source
+  conversation defaults to allowed.
+- This is a control on ChatAgent's web-search and webpage-fetch tools, not a network
+  sandbox or application-wide offline mode. It does not block the configured model
+  provider connection, application update checks, or network use needed to submit
+  user-uploaded attachments to that provider. Users who require offline processing
+  must use an appropriately configured local model and control other application
+  network paths separately.
+
 ## Workbench Boundaries
 
 - Controlled tool chains contain 2–8 static, already-decided local actions. Every
@@ -301,9 +489,11 @@ command or extension is harmless.
   input is checked under current policy. Run cleanup stops still-managed processes
   and awaits close/container cleanup before releasing coordination leases.
   Unconfirmed cleanup retains both the workspace write barrier and the lease.
-  Failed cleanup is not automatically retried for a closed handle, so recovery
-  may require restarting the application; clearing a barrier does not establish
-  that a process or container has stopped.
+  A later termination request or run cleanup can clear a previous command cleanup
+  error when termination is confirmed; an ordinary output poll does not retry it.
+  Native Sandbox tombstones require current evidence and explicit user
+  confirmation. Clearing a barrier by itself does not establish that a process
+  or container has stopped.
   A full-access host command can deliberately detach descendants and exit its
   original parent; Node handles/task-tree termination do not guarantee tracking
   every detached daemon. TTY-only programs and OS-wide process containment are
@@ -329,7 +519,10 @@ command or extension is harmless.
   is ordinary workspace text, not a credential store or trusted system instruction.
   Only bounded preferences are preloaded and historical entries are retrieved in
   bounded slices. Native Memory may request a successful-task summary from the
-  current model, with a 30-second deadline. TencentDB semantic analysis sends
+  current model, with a 30-second deadline. If Memory is disabled, the backend is
+  changed, the request is cancelled or the write waits past its deadline, the
+  summary is discarded. The final atomic replace checks the active backend and
+  cancellation signal again. TencentDB semantic analysis sends
   necessary conversation text and candidate memories to its configured analysis
   provider. The per-workspace primary defaults to the current primary conversation
   model; an optional fallback can introduce another data recipient and API usage.
@@ -408,7 +601,8 @@ command or extension is harmless.
   and dependency validation rejects cycles. Resume does not replay unfinished
   tools automatically; confirmed fingerprints are blocked on recovery and uncertain
   effects block new mutations until successful read evidence and human confirmation.
-  These barriers persist through retries/restarts. No exactly-once
+  The workspace recovery barriers persist through retries/restarts. Native Sandbox
+  tombstones themselves are scoped to the current process. No exactly-once
   guarantee exists for arbitrary commands or remote services.
 
 ## Safe Operation
@@ -485,7 +679,8 @@ Runtime downloads use official endpoints and integrity checks. Embiody's EULA do
 not permit bundling without authorization. Docker Desktop has separate licensing
 and Windows prerequisite requirements.
 
-Packaging preflight checks 33 required resources. TencentDB source/runtime/license
+Packaging preflight checks the current source inventory (13,865 resources and
+production dependencies in the 1.3.4 preflight). TencentDB source/runtime/license
 hashes, complete MIT text and the emitted ESM dependency closure are checked before
 packaging and in afterPack. Missing or inconsistent files fail the check. These
 checks establish consistency with the pinned inventory, not publisher authenticity

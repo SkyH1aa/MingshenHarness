@@ -19,6 +19,7 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  node-pty: true
   tesseract.js: false
 minimumReleaseAgeExclude:
   - browserdo-mcp@0.9.3

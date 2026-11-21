@@ -155,6 +155,7 @@ function runtime(
   const permissions = new PermissionStore();
   const repository = {
     getAgentProfile: () => profile,
+    listAgentProfiles: () => [],
     getSetting: () => null,
   };
   const chat = new ChatService({

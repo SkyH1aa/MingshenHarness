@@ -67,6 +67,49 @@ function fixture() {
 }
 
 describe("automatic approval", () => {
+  it("rejects image-output reviewers at configuration and runtime, then uses a valid fallback", async () => {
+    const f = fixture();
+    const request = {
+      sessionId: "session",
+      toolName: "read_file",
+      detail: "notes.txt",
+      reviewInput: '{"path":"notes.txt"}',
+    } as ApprovalRequest;
+    try {
+      const primary = f.repository.getModel(f.modelId);
+      if (!primary) throw new Error("Missing primary fixture model");
+      f.service.configure({
+        providerId: f.providerId,
+        modelId: f.modelId,
+        fallback: { providerId: f.providerId, modelId: f.backupId },
+      });
+      f.repository.updateModel(f.modelId, { ...primary, outputModalities: ["image"] });
+      expect(() => f.service.configure({ providerId: f.providerId, modelId: f.modelId })).toThrow(
+        "APPROVAL_MODEL_REQUIRED",
+      );
+      stream.mockImplementation(async function* () {
+        yield { type: "text_delta", text: "ALLOW: read only" };
+      });
+      await expect(f.service.review(request, new AbortController().signal)).resolves.toMatchObject({
+        allowed: true,
+        reviewer: "Review / Backup",
+      });
+      expect(stream).toHaveBeenCalledTimes(1);
+      expect(stream.mock.calls[0]?.[0].model.id).toBe(f.backupId);
+
+      const backup = f.repository.getModel(f.backupId);
+      if (!backup) throw new Error("Missing backup fixture model");
+      f.repository.updateModel(f.backupId, { ...backup, outputModalities: ["image"] });
+      stream.mockClear();
+      expect(() => f.service.assertConfigured()).toThrow("APPROVAL_MODEL_REQUIRED");
+      await expect(f.service.review(request, new AbortController().signal)).rejects.toThrow(
+        "自动审批未完成",
+      );
+      expect(stream).not.toHaveBeenCalled();
+    } finally {
+      f.database.close();
+    }
+  });
   it.each(["ALLOW: safe scope", "通过：只读操作", "DENY: deletes data", "不通过：风险过高"])(
     "parses one strict verdict: %s",
     (text) => {

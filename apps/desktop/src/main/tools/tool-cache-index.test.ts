@@ -323,6 +323,76 @@ describe("approval-preserving tool cache and index", () => {
     expect(cache.get("key")).toBeNull();
     expect(contentCacheKey("scope", "a", "one")).not.toBe(contentCacheKey("scope", "a", "two"));
   });
+  it("uses deduplication only for in-flight reads without evicting verified content entries", async () => {
+    const cache = new ToolResultCache();
+    for (let index = 0; index < 128; index++)
+      cache.put(`content-${index}`, `value-${index}`, 60_000);
+
+    await expect(
+      cache.deduplicate("read-flight", async () => "fresh content", new AbortController().signal),
+    ).resolves.toBe("fresh content");
+
+    for (let index = 0; index < 128; index++)
+      expect(cache.get(`content-${index}`)).toBe(`value-${index}`);
+  });
+  it("isolates cleared in-flight reads and retries failed reads", async () => {
+    const cache = new ToolResultCache();
+    const signal = new AbortController().signal;
+    let resolveOld!: (value: string) => void;
+    let resolveNew!: (value: string) => void;
+    const execute = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveOld = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveNew = resolve;
+          }),
+      );
+
+    const oldRead = cache.deduplicate("same-read", execute, signal);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    cache.clear();
+    const newRead = cache.deduplicate("same-read", execute, signal);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+
+    resolveOld("old generation");
+    resolveNew("new generation");
+    await expect(oldRead).resolves.toBe("old generation");
+    await expect(newRead).resolves.toBe("new generation");
+    await expect(
+      cache.deduplicate("same-read", async () => "after completion", signal),
+    ).resolves.toBe("after completion");
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    let attempts = 0;
+    await expect(
+      cache.deduplicate(
+        "retry-read",
+        async () => {
+          attempts++;
+          throw new Error("temporary read failure");
+        },
+        signal,
+      ),
+    ).rejects.toThrow("temporary read failure");
+    await expect(
+      cache.deduplicate(
+        "retry-read",
+        async () => {
+          attempts++;
+          return "recovered";
+        },
+        signal,
+      ),
+    ).resolves.toBe("recovered");
+    expect(attempts).toBe(2);
+  });
   it("waits for the command process tree to stop before cancellation resolves", async () => {
     const f = await fixture();
     const controller = new AbortController();

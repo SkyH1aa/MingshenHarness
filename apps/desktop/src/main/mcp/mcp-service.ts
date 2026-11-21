@@ -568,6 +568,40 @@ export class McpService {
     const currentSecrets: SecretConfig = existing
       ? this.secretConfig(existing.id)
       : { headers: {}, env: {} };
+    const headerKeys =
+      input.headerKeys === undefined
+        ? uniqueKeys([...(existing?.headerKeys ?? []), ...Object.keys(providedSecrets.headers)])
+        : uniqueKeys(input.headerKeys);
+    const envKeys =
+      input.envKeys === undefined
+        ? uniqueKeys([...(existing?.envKeys ?? []), ...Object.keys(providedSecrets.env)])
+        : uniqueKeys(input.envKeys);
+    const undeclaredHeaders = Object.keys(providedSecrets.headers).filter(
+      (key) => !headerKeys.includes(key),
+    );
+    const undeclaredEnv = Object.keys(providedSecrets.env).filter((key) => !envKeys.includes(key));
+    if (undeclaredHeaders.length) {
+      throw new Error(`未声明的 MCP Header 密钥：${undeclaredHeaders.join(", ")}`);
+    }
+    if (undeclaredEnv.length) {
+      throw new Error(`未声明的 MCP 环境变量密钥：${undeclaredEnv.join(", ")}`);
+    }
+    const selectSecrets = (
+      keys: string[],
+      current: Record<string, string>,
+      provided: Record<string, string>,
+    ) =>
+      Object.fromEntries(
+        keys.flatMap((key) => {
+          const value = provided[key] ?? current[key];
+          return value ? [[key, value]] : [];
+        }),
+      );
+    const nextSecrets: SecretConfig = {
+      ...currentSecrets,
+      headers: selectSecrets(headerKeys, currentSecrets.headers, providedSecrets.headers),
+      env: selectSecrets(envKeys, currentSecrets.env, providedSecrets.env),
+    };
     const oauthTouched =
       input.oauthEnabled !== undefined ||
       input.oauthClientId !== undefined ||
@@ -587,30 +621,26 @@ export class McpService {
         }
       : currentSecrets.oauth;
     const currentSecretRef = existing ? this.repository.getMcpServerSecretRef(existing.id) : null;
+    const declarationsChanged =
+      existing !== null &&
+      (existing.headerKeys.join("\0") !== headerKeys.join("\0") ||
+        existing.envKeys.join("\0") !== envKeys.join("\0"));
     let secretRef = currentSecretRef;
     if (
       Object.keys(providedSecrets.headers).length > 0 ||
       Object.keys(providedSecrets.env).length > 0 ||
+      declarationsChanged ||
       oauthTouched
     ) {
       const stored = this.secretStore.store(
         JSON.stringify({
-          headers:
-            Object.keys(providedSecrets.headers).length > 0
-              ? providedSecrets.headers
-              : currentSecrets.headers,
-          env:
-            Object.keys(providedSecrets.env).length > 0 ? providedSecrets.env : currentSecrets.env,
+          headers: nextSecrets.headers,
+          env: nextSecrets.env,
           ...(nextOAuth ? { oauth: nextOAuth } : {}),
         }),
       );
       secretRef = stored.secretRef;
     }
-    const headerKeys = uniqueKeys([
-      ...(existing?.headerKeys ?? []),
-      ...Object.keys(providedSecrets.headers),
-    ]);
-    const envKeys = uniqueKeys([...(existing?.envKeys ?? []), ...Object.keys(providedSecrets.env)]);
     const record = {
       id: input.id,
       name,
@@ -1627,6 +1657,7 @@ async function fetchJson(
 ): Promise<Record<string, unknown>> {
   const response = await fetch(url, {
     ...init,
+    redirect: init.redirect ?? "error",
     signal: AbortSignal.timeout(20_000),
     headers: {
       Accept: "application/json",

@@ -8,9 +8,10 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MarketplaceSkill } from "../../../shared/domain";
 import { tr } from "../i18n/index";
+import { beginLatestRequest, invalidateLatestRequests } from "../lib/latest-request";
 
 interface SkillMarketplaceProps {
   onInstalled: () => Promise<void>;
@@ -30,8 +31,11 @@ export function SkillMarketplace({ onInstalled }: SkillMarketplaceProps) {
   const [installing, setInstalling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const loadRequest = useRef(0);
+  const activeSource = useRef<MarketSource>(source);
 
   const load = useCallback(async (nextSource: MarketSource, forceRefresh = false) => {
+    const ticket = beginLatestRequest(loadRequest);
     if (forceRefresh) {
       setRefreshing(true);
     } else {
@@ -39,21 +43,34 @@ export function SkillMarketplace({ onInstalled }: SkillMarketplaceProps) {
     }
     setError(null);
     try {
-      setSkills(await window.mingshen.listMarketplaceSkills(nextSource, forceRefresh));
+      const nextSkills = await window.mingshen.listMarketplaceSkills(nextSource, forceRefresh);
+      if (!ticket.isCurrent()) return;
+      setSkills(nextSkills);
     } catch (cause) {
+      if (!ticket.isCurrent()) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (ticket.isCurrent()) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
   useEffect(() => {
+    activeSource.current = source;
     setPage(1);
     setFilter("all");
     setQuery("");
     void load(source, false);
   }, [load, source]);
+
+  useEffect(
+    () => () => {
+      invalidateLatestRequests(loadRequest);
+    },
+    [],
+  );
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("zh-CN");
@@ -79,21 +96,26 @@ export function SkillMarketplace({ onInstalled }: SkillMarketplaceProps) {
   }, [page, pageCount]);
 
   const install = async (skill: MarketplaceSkill) => {
-    setInstalling(skill.path);
+    const installKey = `${skill.source}:${skill.path}`;
+    setInstalling(installKey);
     setError(null);
     try {
-      const result = await window.mingshen.installMarketplaceSkill(source, skill.path);
-      setSkills((current) =>
-        current.map((item) => (item.path === skill.path ? { ...item, installed: true } : item)),
-      );
+      const result = await window.mingshen.installMarketplaceSkill(skill.source, skill.path);
+      if (activeSource.current === skill.source) {
+        setSkills((current) =>
+          current.map((item) => (item.path === skill.path ? { ...item, installed: true } : item)),
+        );
+      }
       await onInstalled();
-      if (result.extension.name !== skill.name) {
+      if (activeSource.current === skill.source && result.extension.name !== skill.name) {
         setError(tr("\u6280\u80FD\u5DF2\u5BFC\u5165\u4E3A {0}\u3002", [result.extension.name]));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (activeSource.current === skill.source) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setInstalling(null);
+      setInstalling((current) => (current === installKey ? null : current));
     }
   };
 

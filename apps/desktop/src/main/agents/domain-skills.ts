@@ -86,6 +86,8 @@ const workSourceCatalogEntrySchema = z
   })
   .strict();
 
+export const MAX_WORK_SOURCE_CATALOG_ENTRIES = 2_000;
+
 const workSourceCatalogSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -93,11 +95,125 @@ const workSourceCatalogSchema = z
       .string()
       .regex(/^[A-Fa-f0-9]{64}$/)
       .optional(),
-    entries: z.array(workSourceCatalogEntrySchema).min(1).max(2_000),
+    entries: z.array(workSourceCatalogEntrySchema).min(1).max(MAX_WORK_SOURCE_CATALOG_ENTRIES),
   })
   .passthrough();
 
 type WorkSourceCatalogEntry = z.infer<typeof workSourceCatalogEntrySchema>;
+
+interface SemanticVersion {
+  core: readonly [string, string, string];
+  prerelease: string[] | null;
+}
+
+function semanticVersion(value: string): SemanticVersion | null {
+  const match = value.match(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+  );
+  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined)
+    return null;
+  const prerelease = match[4]?.split(".") ?? null;
+  if (prerelease?.some((part) => /^0\d+$/.test(part))) return null;
+  return { core: [match[1], match[2], match[3]], prerelease };
+}
+
+function compareNumericIdentifiers(left: string, right: string): number {
+  return left.length - right.length || stableTextCompare(left, right);
+}
+
+function compareSemanticVersions(left: SemanticVersion, right: SemanticVersion): number {
+  const coreComparison =
+    compareNumericIdentifiers(left.core[0], right.core[0]) ||
+    compareNumericIdentifiers(left.core[1], right.core[1]) ||
+    compareNumericIdentifiers(left.core[2], right.core[2]);
+  if (coreComparison) return coreComparison;
+  if (!left.prerelease || !right.prerelease)
+    return Number(!left.prerelease) - Number(!right.prerelease);
+  for (
+    let index = 0;
+    index < Math.max(left.prerelease.length, right.prerelease.length);
+    index += 1
+  ) {
+    const a = left.prerelease[index];
+    const b = right.prerelease[index];
+    if (a === undefined || b === undefined)
+      return Number(a !== undefined) - Number(b !== undefined);
+    const aNumeric = /^\d+$/.test(a);
+    const bNumeric = /^\d+$/.test(b);
+    const comparison =
+      aNumeric && bNumeric
+        ? compareNumericIdentifiers(a, b)
+        : aNumeric !== bNumeric
+          ? Number(bNumeric) - Number(aNumeric)
+          : stableTextCompare(a, b);
+    if (comparison) return comparison;
+  }
+  return 0;
+}
+
+function workSourceIdentity(entry: WorkSourceCatalogEntry): string | null {
+  if (!entry.version || !semanticVersion(entry.version)) return null;
+  const parts = entry.sourcePath.split("/");
+  const positions = parts.flatMap((part, index) => (part === entry.version ? [index] : []));
+  const position = positions[0];
+  if (
+    positions.length !== 1 ||
+    position === undefined ||
+    position === 0 ||
+    position === parts.length - 1
+  )
+    return null;
+  parts.splice(position, 1);
+  return parts.join("/");
+}
+
+function latestWorkSourceCatalog(entries: readonly WorkSourceCatalogEntry[]): {
+  active: WorkSourceCatalogEntry[];
+  canonicalIds: Map<string, string>;
+} {
+  const latest = new Map<string, WorkSourceCatalogEntry>();
+  for (const entry of entries) {
+    const identity = workSourceIdentity(entry);
+    if (!identity) continue;
+    const current = latest.get(identity);
+    const version = entry.version ? semanticVersion(entry.version) : null;
+    const currentVersion = current?.version ? semanticVersion(current.version) : null;
+    if (
+      !current ||
+      (version && currentVersion && compareSemanticVersions(version, currentVersion) > 0)
+    )
+      latest.set(identity, entry);
+  }
+  const canonicalIds = new Map<string, string>();
+  for (const entry of entries) {
+    const identity = workSourceIdentity(entry);
+    canonicalIds.set(entry.id, (identity && latest.get(identity)?.id) || entry.id);
+  }
+  return {
+    active: entries.filter((entry) => canonicalIds.get(entry.id) === entry.id),
+    canonicalIds,
+  };
+}
+
+export async function canonicalBuiltinCapabilityIds(
+  promptDirectory: string,
+  ids: readonly string[],
+): Promise<string[]> {
+  if (!ids.some((id) => id.startsWith("builtin:work-source-"))) return [...ids];
+  const { canonicalIds } = latestWorkSourceCatalog(await readWorkSourceCatalog(promptDirectory));
+  return ids.map((id) => canonicalIds.get(id) ?? id);
+}
+
+export async function legacyBuiltinCapabilityIds(
+  promptDirectory: string,
+  canonicalId: string,
+): Promise<string[]> {
+  if (!canonicalId.startsWith("builtin:work-source-")) return [];
+  const { canonicalIds } = latestWorkSourceCatalog(await readWorkSourceCatalog(promptDirectory));
+  return [...canonicalIds].flatMap(([id, activeId]) =>
+    id !== canonicalId && activeId === canonicalId ? [id] : [],
+  );
+}
 
 export const DOMAIN_SKILLS = [
   {
@@ -383,13 +499,17 @@ export async function builtinCapabilityDiscoveryRecords(
   }));
   if (mode !== "work") return records;
 
-  for (const entry of await readWorkSourceCatalog(promptDirectory)) {
+  const { active, canonicalIds } = latestWorkSourceCatalog(
+    await readWorkSourceCatalog(promptDirectory),
+  );
+  const selectedCanonicalIds = new Set([...selectedIds].map((id) => canonicalIds.get(id) ?? id));
+  for (const entry of active) {
     records.push({
       type: "skill",
       id: entry.id,
       name: entry.name,
       description: entry.description,
-      session_selected: selectedIds.has(entry.id),
+      session_selected: selectedCanonicalIds.has(entry.id),
       source: "builtin",
       builtin_kind: "work-source",
       family: entry.family,
@@ -678,7 +798,12 @@ export async function loadDomainSkill(
   } else {
     if (session.agentMode !== "work")
       throw new Error("SKILL_MODE_UNAVAILABLE: work sources are available only to WorkAgent.");
-    source = (await readWorkSourceCatalog(promptDirectory)).find((entry) => entry.id === args.name);
+    const catalog = await readWorkSourceCatalog(promptDirectory);
+    const { canonicalIds } = latestWorkSourceCatalog(catalog);
+    const canonicalId = canonicalIds.get(args.name);
+    if (canonicalId && canonicalId !== args.name)
+      throw new Error(`SKILL_VERSION_SUPERSEDED: use the current skill ${canonicalId}.`);
+    source = catalog.find((entry) => entry.id === args.name);
     if (!source) throw new Error("SKILL_NOT_FOUND: choose an exact id from discover_capabilities.");
     loaded = await readWorkSourceSkillResource(promptDirectory, source, args.resource);
   }

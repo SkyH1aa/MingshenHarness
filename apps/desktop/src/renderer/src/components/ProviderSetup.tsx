@@ -25,6 +25,7 @@ import type {
   ProviderProtocol,
   ProviderView,
 } from "../../../shared/domain";
+import { isImageOutputModel } from "../../../shared/model-capabilities";
 import {
   applyModelPresetOnce,
   isGpt6ModelId,
@@ -57,6 +58,7 @@ interface ModelDraft extends ModelPresetDraft {
   toolCalls: boolean;
   parallelToolCalls: boolean;
   anthropicNoneBehavior: AnthropicNoneBehavior;
+  imageOnly: boolean;
 }
 
 function defaultModelDraft(modelId = "", protocol?: ProviderProtocol): ModelDraft {
@@ -72,6 +74,7 @@ function defaultModelDraft(modelId = "", protocol?: ProviderProtocol): ModelDraf
     reasoningLevels:
       protocol === "gemini_generate_content" ? "auto" : "none,low,medium,high,xhigh,max",
     anthropicNoneBehavior: "disabled",
+    imageOnly: false,
     presetApplied: false,
     gptLongContextBilling: false,
   } satisfies ModelDraft);
@@ -89,6 +92,7 @@ function modelToDraft(model: ModelConfig): ModelDraft {
     parallelToolCalls: model.parallelToolCalls,
     reasoningLevels: model.reasoningLevels.join(","),
     anthropicNoneBehavior: model.anthropicNoneBehavior,
+    imageOnly: isImageOutputModel(model),
     presetApplied: true,
     gptLongContextBilling: false,
   };
@@ -966,11 +970,16 @@ function ProviderSection({
                       <code>{model.modelId}</code>
                     </div>
                     <span className="model-row__limits">
-                      {(model.contextWindow / 1000).toLocaleString("zh-CN")}K /{" "}
-                      {(model.maxOutputTokens / 1000).toLocaleString("zh-CN")}K
+                      {isImageOutputModel(model)
+                        ? tr("仅图片生成")
+                        : `${(model.contextWindow / 1000).toLocaleString("zh-CN")}K / ${(
+                            model.maxOutputTokens / 1000
+                          ).toLocaleString("zh-CN")}K`}
                     </span>
                     <span className="model-row__modalities">
-                      {model.inputModalities.join(" · ")}
+                      {isImageOutputModel(model)
+                        ? `${model.inputModalities.join(" · ")} → image`
+                        : `${model.inputModalities.join(" · ")} → ${model.outputModalities.join(" · ")}`}
                     </span>
                     <div className="model-row__actions">
                       <button
@@ -1316,10 +1325,10 @@ function ModelForm({
   const contextErrorId = useId();
   const outputHintId = useId();
   const outputErrorId = useId();
-  const contextWindow = parseModelTokenCount(draft.contextWindow);
-  const maxOutputTokens = parseModelTokenCount(draft.maxOutputTokens);
-  const invalidContext = validateTokenInputs && contextWindow === null;
-  const invalidOutput = validateTokenInputs && maxOutputTokens === null;
+  const contextWindow = draft.imageOnly ? 1 : parseModelTokenCount(draft.contextWindow);
+  const maxOutputTokens = draft.imageOnly ? 1 : parseModelTokenCount(draft.maxOutputTokens);
+  const invalidContext = !draft.imageOnly && validateTokenInputs && contextWindow === null;
+  const invalidOutput = !draft.imageOnly && validateTokenInputs && maxOutputTokens === null;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1328,15 +1337,39 @@ function ModelForm({
     }
     setError(null);
     setValidateTokenInputs(true);
-    if (contextWindow === null || maxOutputTokens === null) {
+    if (!draft.imageOnly && (contextWindow === null || maxOutputTokens === null)) {
       (contextWindow === null ? contextInput : outputInput).current?.focus();
       return;
     }
     setBusy(true);
-    const reasoningLevels = draft.reasoningLevels
-      .split(",")
-      .map((level) => level.trim())
-      .filter(Boolean);
+    const reasoningLevels = draft.imageOnly
+      ? []
+      : draft.reasoningLevels
+          .split(",")
+          .map((level) => level.trim())
+          .filter(Boolean);
+    const textModelValues = {
+      contextWindow: contextWindow ?? 1,
+      maxOutputTokens: maxOutputTokens ?? 1,
+      inputModalities: draft.inputModalities,
+      outputModalities: ["text"] as InputModality[],
+      toolCalls: draft.toolCalls,
+      parallelToolCalls: draft.parallelToolCalls,
+      reasoningLevels,
+      anthropicNoneBehavior: draft.anthropicNoneBehavior,
+    };
+    const modelValues = draft.imageOnly
+      ? {
+          contextWindow: 1,
+          maxOutputTokens: 1,
+          inputModalities: ["text"] as InputModality[],
+          outputModalities: ["image"] as InputModality[],
+          toolCalls: false,
+          parallelToolCalls: false,
+          reasoningLevels: [] as string[],
+          anthropicNoneBehavior: "disabled" as AnthropicNoneBehavior,
+        }
+      : textModelValues;
 
     try {
       if (draft.editingId) {
@@ -1344,28 +1377,14 @@ function ModelForm({
           id: draft.editingId,
           modelId: draft.modelId,
           displayName: draft.displayName,
-          contextWindow,
-          maxOutputTokens,
-          inputModalities: draft.inputModalities,
-          outputModalities: ["text"],
-          toolCalls: draft.toolCalls,
-          parallelToolCalls: draft.parallelToolCalls,
-          reasoningLevels,
-          anthropicNoneBehavior: draft.anthropicNoneBehavior,
+          ...modelValues,
         });
       } else {
         await window.mingshen.createModel({
           providerId: provider.id,
           modelId: draft.modelId,
           displayName: draft.displayName,
-          contextWindow,
-          maxOutputTokens,
-          inputModalities: draft.inputModalities,
-          outputModalities: ["text"],
-          toolCalls: draft.toolCalls,
-          parallelToolCalls: draft.parallelToolCalls,
-          reasoningLevels,
-          anthropicNoneBehavior: draft.anthropicNoneBehavior,
+          ...modelValues,
         });
       }
       await onSaved();
@@ -1407,6 +1426,26 @@ function ModelForm({
         </button>
       </div>
 
+      <label className="check-row model-form__image-only">
+        <input
+          type="checkbox"
+          checked={draft.imageOnly}
+          onChange={(event) =>
+            setDraft({
+              ...draft,
+              imageOnly: event.target.checked,
+              inputModalities: event.target.checked ? ["text"] : ["text", "image"],
+              toolCalls: event.target.checked ? false : draft.toolCalls,
+              parallelToolCalls: event.target.checked ? false : draft.parallelToolCalls,
+            })
+          }
+        />
+        <span>
+          {tr("仅图片生成模型")}
+          <small>{tr("勾选后只用于生图，不出现在聊天、审批、压缩或 Agent 模型选择中。")}</small>
+        </span>
+      </label>
+
       <div className="form-grid form-grid--two">
         <label className="field">
           <span>Model ID</span>
@@ -1437,7 +1476,7 @@ function ModelForm({
             placeholder={tr("\u6A21\u578B\u663E\u793A\u540D\u79F0")}
           />
         </label>
-        <label className="field">
+        <label className="field" hidden={draft.imageOnly}>
           <span>{tr("\u4E0A\u4E0B\u6587\u957F\u5EA6")}</span>
           <input
             ref={contextInput}
@@ -1461,7 +1500,7 @@ function ModelForm({
             </small>
           ) : null}
         </label>
-        <label className="field">
+        <label className="field" hidden={draft.imageOnly}>
           <span>{tr("\u6700\u5927\u8F93\u51FA token")}</span>
           <input
             ref={outputInput}
@@ -1485,7 +1524,7 @@ function ModelForm({
         </label>
       </div>
 
-      {!draft.editingId && isGpt6ModelId(draft.modelId) ? (
+      {!draft.imageOnly && !draft.editingId && isGpt6ModelId(draft.modelId) ? (
         <div className="field-group">
           <label className="check-row">
             <input
@@ -1501,7 +1540,7 @@ function ModelForm({
         </div>
       ) : null}
 
-      <fieldset className="field-group">
+      <fieldset className="field-group" hidden={draft.imageOnly}>
         <legend>{tr("\u8F93\u5165\u6A21\u6001")}</legend>
         <div className="check-grid">
           {(["text", "image", "audio", "video", "file"] as const).map((modality) => (
@@ -1519,7 +1558,7 @@ function ModelForm({
         </div>
       </fieldset>
 
-      <div className="form-grid form-grid--two">
+      <div className="form-grid form-grid--two" hidden={draft.imageOnly}>
         <label className="field">
           <span>{tr("\u601D\u8003\u7B49\u7EA7")}</span>
           <input
@@ -1584,7 +1623,7 @@ function ModelForm({
         )}
       </div>
 
-      {provider.protocol === "anthropic_messages" ? (
+      {!draft.imageOnly && provider.protocol === "anthropic_messages" ? (
         <div className="check-grid">
           <label className="check-row">
             <input

@@ -78,7 +78,7 @@ describe("persistent session paging and change feed", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it("pages thousands of rows without gaps, searches CJK/substring and returns only changed loaded records", () => {
+  it("pages thousands of rows without gaps, searches CJK/substring and reconciles changed records", () => {
     const db = openDatabase(":memory:"),
       repo = new Repository(db);
     try {
@@ -117,10 +117,11 @@ describe("persistent session paging and change feed", () => {
       expect(repo.sessionPage({ parentId: all[0]?.id ?? "" }).sessions[0]?.id).toBe(child.id);
       const revision = repo.sessionRevision();
       repo.updateSession(all[0]?.id ?? "", { title: "renamed" });
-      repo.removeSession(child.id);
       const delta = repo.sessionDelta(revision, [all[0]?.id ?? "", child.id]);
-      expect(delta.removed).toEqual([child.id]);
       expect(delta.sessions[0]?.title).toBe("renamed");
+      const beforeRemoval = repo.sessionRevision();
+      repo.removeSession(child.id);
+      expect(repo.sessionDelta(beforeRemoval, [child.id]).reset).toBe(true);
       expect(repo.sessionGroups()[0]).toMatchObject({ total: 1200, children: 0 });
       const oldPage = repo.sessionPage({ limit: 1 });
       create("new");
@@ -133,6 +134,72 @@ describe("persistent session paging and change feed", () => {
       expect(() => repo.sessionDelta(0, [42] as unknown as string[])).toThrow(
         "Invalid session synchronization",
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("recovers unknown visible changes without repeatedly resetting for hidden or related rows", () => {
+    const db = openDatabase(":memory:"),
+      repo = new Repository(db);
+    try {
+      const base = {
+        providerId: null,
+        modelId: null,
+        agentProfileId: "primary",
+        workspacePath: "C:\\Project",
+        systemPrompt: "",
+        reasoningLevel: null,
+        permissionMode: "request_approval" as const,
+        executionMode: "host" as const,
+        patchOnly: false,
+      };
+      const create = (
+        title: string,
+        options: { parentSessionId?: string; agentMode?: "code" | "work" | "chat" } = {},
+      ) =>
+        repo.insertSession({
+          ...base,
+          title,
+          parentSessionId: options.parentSessionId ?? null,
+          agentMode: options.agentMode ?? "code",
+          workspacePath: options.agentMode === "chat" ? null : base.workspacePath,
+        });
+
+      const parent = create("parent");
+      const beforeChild = repo.sessionRevision();
+      const child = create("child", { parentSessionId: parent.id });
+      const childDelta = repo.sessionDelta(beforeChild, [parent.id]);
+      expect(childDelta.reset).toBe(false);
+      expect(childDelta.sessions.map((item) => item.id)).toEqual([child.id]);
+
+      const beforeChat = repo.sessionRevision();
+      const chat = create("chat", { agentMode: "chat" });
+      const chatDelta = repo.sessionDelta(beforeChat, [parent.id]);
+      expect(chatDelta.reset).toBe(false);
+      expect(chatDelta.sessions.map((item) => item.id)).toEqual([chat.id]);
+
+      const beforeRoot = repo.sessionRevision();
+      const root = create("new visible root");
+      const rootDelta = repo.sessionDelta(beforeRoot, [parent.id]);
+      expect(rootDelta).toMatchObject({ reset: true, sessions: [], removed: [] });
+      expect(rootDelta.revision).toBeGreaterThan(beforeRoot);
+
+      const archived = create("archived root");
+      const beforeArchive = repo.sessionRevision();
+      repo.updateSession(archived.id, { archived: true });
+      const archiveDelta = repo.sessionDelta(beforeArchive, [parent.id]);
+      expect(archiveDelta).toMatchObject({ reset: false, sessions: [], removed: [] });
+
+      const beforeRemoval = repo.sessionRevision();
+      repo.removeSession(root.id);
+      const removalDelta = repo.sessionDelta(beforeRemoval, [parent.id]);
+      expect(removalDelta).toMatchObject({ reset: false, sessions: [], removed: [] });
+
+      const beforeKnownRemoval = repo.sessionRevision();
+      repo.removeSession(child.id);
+      const knownRemoval = repo.sessionDelta(beforeKnownRemoval, [child.id]);
+      expect(knownRemoval.reset).toBe(true);
     } finally {
       db.close();
     }

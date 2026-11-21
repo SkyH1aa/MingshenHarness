@@ -133,6 +133,28 @@ const errors: Record<string, string> = {
   "该会话正在运行，请先停止任务。": "Stop the running task first.",
   "会话尚未选择模型。": "Select a model for this conversation first.",
   "消息和附件不能同时为空。": "Enter a message or attach a file.",
+  "运行中引导记录损坏，原数据未覆盖。":
+    "Saved run guidance is damaged. The original data has not been overwritten.",
+  "该会话不支持运行中引导。": "This conversation does not support run guidance.",
+  "该会话已有运行中引导状态。": "This conversation already has an active guidance state.",
+  "运行标识已存在。": "This run identifier already exists.",
+  "运行中引导格式无效。": "Invalid run guidance input.",
+  "运行中引导仅支持文字，不支持附件或临时指令。":
+    "Run guidance supports text only, without attachments or a temporary instruction.",
+  "运行中引导文本格式无效。": "Invalid run guidance text.",
+  "引导文本须为 1 至 8000 个字符。": "Guidance must contain 1 to 8000 characters.",
+  "引导请求标识已用于不同内容。":
+    "This guidance request identifier has already been used for different content.",
+  "运行中引导状态不存在。": "The guidance state for this run is missing.",
+  "最多等待 10 条引导。": "At most 10 guidance messages can wait to be included.",
+  "本次运行的引导总长度不能超过 32000 个字符。":
+    "Guidance for this run cannot exceed 32000 characters in total.",
+  "运行中引导投递标识无效。": "Invalid guidance delivery identifiers.",
+  "运行中引导投递顺序已变化。": "The guidance delivery order has changed.",
+  "运行中引导不存在。": "Run guidance was not found.",
+  "当前运行已结束，不能接收引导。": "This run has ended and cannot accept guidance.",
+  "运行中引导无法完整加入模型上下文，原文已保留。":
+    "Guidance could not be included in full in the model context. The original text is preserved.",
   "会话的供应商或模型配置已失效。":
     "The conversation's provider or model configuration is no longer available.",
   "只能修改或重试用户消息。": "Only user messages can be edited or retried.",

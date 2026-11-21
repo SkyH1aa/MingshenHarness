@@ -5,7 +5,12 @@ import {
 } from "../../shared/session-builtin-capabilities";
 import type { Repository } from "../storage/repository";
 import { builtinPluginDiscoveryRecords, builtinPluginsForSession } from "./builtin-plugins";
-import { builtinCapabilityDiscoveryRecords } from "./domain-skills";
+import {
+  builtinCapabilityDiscoveryRecords,
+  canonicalBuiltinCapabilityIds,
+  legacyBuiltinCapabilityIds,
+  MAX_WORK_SOURCE_CATALOG_ENTRIES,
+} from "./domain-skills";
 
 type CapabilitySelectionRepository = Pick<
   Repository,
@@ -14,14 +19,14 @@ type CapabilitySelectionRepository = Pick<
 
 function storedCapabilityIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return [
-    ...new Set(
-      value.filter(
-        (item): item is string =>
-          typeof item === "string" && item.startsWith("builtin:") && item.length <= 1000,
-      ),
-    ),
-  ].slice(0, MAX_SESSION_BUILTIN_CAPABILITIES);
+  const ids = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || !item.startsWith("builtin:") || item.length > 1000) continue;
+    ids.add(item);
+    if (ids.size > MAX_SESSION_BUILTIN_CAPABILITIES + MAX_WORK_SOURCE_CATALOG_ENTRIES)
+      throw new Error("BUILTIN_CAPABILITY_STORAGE_INVALID: too many stored capability ids.");
+  }
+  return [...ids];
 }
 
 function isBusyStatus(session: SessionView): boolean {
@@ -66,7 +71,7 @@ export class SessionBuiltinCapabilityService {
       compatibility: typeof record.compatibility === "string" ? record.compatibility : null,
       sourcePath: typeof record.source_path === "string" ? record.source_path : null,
       sourceSha256: typeof record.source_sha256 === "string" ? record.source_sha256 : null,
-      selected: selectedIds.has(record.id),
+      selected: record.session_selected,
     }));
   }
 
@@ -97,17 +102,33 @@ export class SessionBuiltinCapabilityService {
     )
       throw new Error("BUILTIN_CAPABILITY_UNAVAILABLE: choose a capability from this mode.");
 
-    const current = this.storedIds(session.id);
-    const next = selected
-      ? current.includes(capabilityId)
-        ? current
-        : [...current, capabilityId]
-      : current.filter((id) => id !== capabilityId);
-    if (next.length > MAX_SESSION_BUILTIN_CAPABILITIES)
-      throw new Error(
-        `BUILTIN_CAPABILITY_LIMIT: select at most ${MAX_SESSION_BUILTIN_CAPABILITIES} built-in capabilities.`,
-      );
-
+    let next: string[] | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = this.storedIds(session.id);
+      const canonicalIds = await canonicalBuiltinCapabilityIds(this.promptDirectory, current);
+      const latestSession = this.requireSelectableSession(sessionId);
+      this.assertNotBusy(latestSession);
+      if ((latestSession.agentMode ?? "code") !== (session.agentMode ?? "code"))
+        throw new Error("BUILTIN_CAPABILITY_STATE_CHANGED: retry after the session is stable.");
+      if (JSON.stringify(this.storedIds(session.id)) !== JSON.stringify(current)) continue;
+      const alreadySelected = canonicalIds.includes(capabilityId);
+      next = selected
+        ? alreadySelected
+          ? current
+          : [...current, capabilityId]
+        : current.filter((_, index) => canonicalIds[index] !== capabilityId);
+      if (
+        selected &&
+        !alreadySelected &&
+        new Set([...canonicalIds, capabilityId]).size > MAX_SESSION_BUILTIN_CAPABILITIES
+      )
+        throw new Error(
+          `BUILTIN_CAPABILITY_LIMIT: select at most ${MAX_SESSION_BUILTIN_CAPABILITIES} built-in capabilities.`,
+        );
+      break;
+    }
+    if (!next)
+      throw new Error("BUILTIN_CAPABILITY_STATE_CHANGED: retry after the session is stable.");
     const key = sessionBuiltinCapabilitiesSettingKey(session.id);
     if (next.length) this.repository.setSetting(key, next);
     else this.repository.removeSetting(key);
@@ -131,7 +152,12 @@ export class SessionBuiltinCapabilityService {
         pluginTools === null,
       ),
     );
-    return records.filter((record) => selectedIds.has(record.id)).map((record) => record.id);
+    return records.filter((record) => record.session_selected).map((record) => record.id);
+  }
+
+  async legacyIdsForCapability(session: SessionView, canonicalId: string): Promise<string[]> {
+    if (session.agentMode !== "work") return [];
+    return legacyBuiltinCapabilityIds(this.promptDirectory, canonicalId);
   }
 
   copy(sourceSessionId: string, targetSessionId: string): void {
