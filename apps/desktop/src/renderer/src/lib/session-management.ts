@@ -41,6 +41,7 @@ async function loadChildrenSnapshot(
   api: SessionManagementApi,
   parentId: string | null,
   signal?: AbortSignal,
+  chat = false,
 ): Promise<SessionView[]> {
   const sessions = new Map<string, SessionView>();
   let revision: number | null = null;
@@ -51,7 +52,13 @@ async function loadChildrenSnapshot(
     const scopedIds = new Set<string>();
     do {
       checkAborted(signal);
-      const page = await api.listSessionPage({ parentId, archived, limit: 200, cursor });
+      const page = await api.listSessionPage({
+        parentId,
+        archived,
+        limit: 200,
+        cursor,
+        ...(chat ? { agentMode: "chat" as const } : {}),
+      });
       checkAborted(signal);
       if (total !== null && total !== page.total) throw new Error(catalogChangedMessage);
       total = page.total;
@@ -81,11 +88,12 @@ async function loadChildren(
   api: SessionManagementApi,
   parentId: string | null,
   signal?: AbortSignal,
+  chat = false,
 ): Promise<SessionView[]> {
   // Opening another conversation updates the global revision without changing this family.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await loadChildrenSnapshot(api, parentId, signal);
+      return await loadChildrenSnapshot(api, parentId, signal, chat);
     } catch (cause) {
       if (!(cause instanceof CatalogRevisionChanged) || attempt === 2) throw cause;
     }
@@ -116,7 +124,12 @@ async function loadFamily(api: SessionManagementApi, root: SessionView): Promise
   for (let index = 0; index < pending.length; index += 1) {
     const parent = pending[index];
     if (!parent) continue;
-    for (const child of await loadChildren(api, parent.id)) {
+    for (const child of await loadChildren(
+      api,
+      parent.id,
+      undefined,
+      parent.agentMode === "chat",
+    )) {
       if (family.has(child.id)) throw new Error(catalogChangedMessage);
       family.set(child.id, child);
       pending.push(child);

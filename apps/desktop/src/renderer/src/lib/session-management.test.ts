@@ -46,7 +46,10 @@ function fixture(initial: SessionView[]) {
   const api = {
     listSessionPage: vi.fn(async (input: SessionPageInput) => {
       const values = [...records.values()].filter(
-        (value) => value.parentSessionId === input.parentId && value.archived === input.archived,
+        (value) =>
+          value.parentSessionId === input.parentId &&
+          value.archived === input.archived &&
+          (input.agentMode === "chat" ? value.agentMode === "chat" : value.agentMode !== "chat"),
       );
       const offset = Number(input.cursor ?? 0);
       const limit = input.limit ?? 100;
@@ -506,5 +509,34 @@ describe("workspace session management", () => {
     expect(result.removedIds).toEqual(["removed", "second"]);
     expect(records.has("root")).toBe(true);
     expect(records.has("unknown")).toBe(true);
+  });
+
+  it("checks ChatAgent descendants and preserves a running conversation when archiving", async () => {
+    const first = session("chat", { agentMode: "chat", workspacePath: null });
+    const descendant = session("legacy-child", {
+      agentMode: "chat",
+      parentSessionId: first.id,
+      workspacePath: null,
+    });
+    const running = session("running-chat", {
+      agentMode: "chat",
+      workspacePath: null,
+      status: "running",
+    });
+    const { api, records } = fixture([first, descendant, running]);
+    const plan = await planSessionBatch(api, [first, running], "archive");
+    expect(plan.sessions.map((value) => value.id)).toEqual([
+      "chat",
+      "legacy-child",
+      "running-chat",
+    ]);
+    expect(api.listSessionPage.mock.calls.every(([input]) => input.agentMode === "chat")).toBe(
+      true,
+    );
+    const result = await runSessionBatch(api, plan);
+    expect(result.succeeded).toEqual(["chat"]);
+    expect(result.failures.map((failure) => failure.sessionId)).toEqual(["running-chat"]);
+    expect(records.get(descendant.id)?.archived).toBe(true);
+    expect(records.get(running.id)?.archived).toBe(false);
   });
 });

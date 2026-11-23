@@ -16,7 +16,8 @@ import {
 import type { Repository } from "../storage/repository";
 import { safeFilePath } from "../workspace/safe-file-path";
 import { loadLocalPluginCommandDeclarations } from "./local-plugin-commands";
-import { loadLocalPluginJsonDeclaration } from "./local-plugin-manifest";
+import { loadLocalPluginJsonDeclaration, pluginMcpServerId } from "./local-plugin-manifest";
+import { parseBeforeModelRequestPrompts } from "./plugin-prompt-declaration";
 
 const MAX_EXTENSION_FILES = 20_000;
 const MAX_EXTENSION_BYTES = 64 * 1024 * 1024;
@@ -64,6 +65,17 @@ export interface SessionSkillEntry {
   relativePath: string;
 }
 
+export interface PluginUseContext {
+  id: string;
+  name: string;
+  description: string;
+  activationPolicy: "on-demand" | "required";
+  sessionSelected: boolean;
+  skills: Array<{ id: string; name: string; description: string }>;
+  mcpServers: string[];
+  hookCount: number;
+}
+
 export interface CapabilityDiscoveryInput {
   query?: string | undefined;
   kind: "all" | "skill" | "plugin";
@@ -75,6 +87,13 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+export function pluginActivationPolicy(
+  manifest: Record<string, unknown> | null,
+): "on-demand" | "required" {
+  const activation = asString(manifest?.activation).toLocaleLowerCase("en-US");
+  return activation === "required" ? "required" : "on-demand";
 }
 
 function nonPromptHookActionTypes(value: unknown): string[] {
@@ -272,6 +291,7 @@ const SEMANTIC_VERSION =
 const UNRESOLVED_PLACEHOLDER = /\bTODO\b|\bFIXME\b|<your[-_ ][^>]+>|YOUR_API_KEY/iu;
 const SUPPORTED_HOOK_EVENTS = new Set([
   "UserPromptSubmit",
+  "BeforeModelRequest",
   "PreToolUse",
   "PostToolUse",
   "Stop",
@@ -383,6 +403,19 @@ async function discoverPlugin(
       validationIssue("manifest-version-invalid", "插件 version 必须是有效的语义化版本。"),
     );
   }
+  if (
+    manifest.activation !== undefined &&
+    manifest.activation !== "on-demand" &&
+    manifest.activation !== "required"
+  ) {
+    errors.push(
+      validationIssue(
+        "manifest-activation-invalid",
+        '插件 activation 只能是 "on-demand" 或 "required"。',
+        "activation",
+      ),
+    );
+  }
 
   let hooks: Record<string, unknown> = {};
   let mcpServers: Record<string, unknown> = {};
@@ -447,13 +480,16 @@ async function discoverPlugin(
       );
     }
   }
-  for (const event of ["UserPromptSubmit", "Interrupt"]) {
+  for (const error of parseBeforeModelRequestPrompts(hooks.BeforeModelRequest).errors) {
+    errors.push(validationIssue("before-model-request-prompt-invalid", error.message, error.path));
+  }
+  for (const event of ["UserPromptSubmit", "BeforeModelRequest", "Interrupt"]) {
     const actions = nonPromptHookActionTypes(hooks[event]);
     if (actions.length === 0) continue;
     warnings.push(
       validationIssue(
         "hook-action-will-be-skipped",
-        `${event} 是非阻塞声明式事件，仅执行 type:"prompt"；${actions
+        `${event} 是声明式提示事件，仅执行 type:"prompt"；${actions
           .map((type) => `type:"${type}"`)
           .join("、")} 动作会被 runtime 跳过，不请求批准、不启动进程、不调用 MCP。`,
         `hooks.${event}`,
@@ -990,7 +1026,7 @@ export class ExtensionService {
       ? [
           "## Automatic capability index",
           `${discoverableExtensions.length} additional installed enabled extensions are indexed but not expanded in the prompt.`,
-          "When a task may benefit from a domain skill or plugin, call discover_capabilities with a concise capability query, then use_skill with the exact returned Skill id for relevant matches. Session-selected extensions below are already prioritized.",
+          "When a task may benefit from a domain skill or plugin, call discover_capabilities with a concise capability query. Load a Skill with use_skill and its exact returned id. For a relevant on-demand plugin, call use_plugin with its exact plugin id to add its BeforeModelRequest prompt context and exact MCP tools to subsequent model rounds and make later action hooks eligible under normal trust, approval and execution checks. UserPromptSubmit is not retroactive. Plugins marked activation=required must already be explicitly selected in this session. Plugin commands are slash-command templates for the user, not model-executable commands. Session-selected extensions below are already prioritized.",
           discoverableExtensions
             .slice(0, 12)
             .map((extension) =>
@@ -1064,8 +1100,15 @@ export class ExtensionService {
   async listSessionSkills(sessionId: string): Promise<SessionSkillEntry[]> {
     const session = this.repository.getSession(sessionId);
     if (!session || session.agentMode === "chat") return [];
+    const selectedIds = new Set(this.repository.listSessionExtensionIds(sessionId));
     const result: SessionSkillEntry[] = [];
     for (const extension of this.repository.listExtensions().filter((entry) => entry.enabled)) {
+      if (
+        extension.type === "plugin" &&
+        pluginActivationPolicy(this.repository.getExtensionManifest(extension.id)) === "required" &&
+        !selectedIds.has(extension.id)
+      )
+        continue;
       for (const path of await findSkillFiles(extension.installedPath)) {
         const relativePath = relative(extension.installedPath, path).replaceAll("\\", "/");
         const metadata = await readSkillMetadata(await safeFilePath(extension.installedPath, path));
@@ -1080,6 +1123,123 @@ export class ExtensionService {
       }
     }
     return result;
+  }
+
+  async getPluginUseContext(sessionId: string, extensionId: string): Promise<PluginUseContext> {
+    const session = this.repository.getSession(sessionId);
+    if (!session) throw new Error("会话不存在。");
+    if (session.agentMode === "chat" || session.parentSessionId)
+      throw new Error(
+        "PLUGIN_USE_DENIED: local plugins are available only to primary Code/Work sessions.",
+      );
+    const extension = this.repository.getExtension(extensionId);
+    if (extension?.type !== "plugin" || !extension.enabled)
+      throw new Error(
+        "PLUGIN_NOT_AVAILABLE: choose an installed enabled plugin id from discover_capabilities.",
+      );
+    const sessionSelected = this.repository
+      .listSessionExtensionIds(sessionId)
+      .includes(extension.id);
+    const manifest = this.repository.getExtensionManifest(extension.id);
+    const activationPolicy = pluginActivationPolicy(manifest);
+    if (activationPolicy === "required" && !sessionSelected)
+      throw new Error(
+        "PLUGIN_REQUIRES_EXPLICIT_REFERENCE: add this required plugin to the current session first.",
+      );
+
+    const skills: PluginUseContext["skills"] = [];
+    for (const skillPath of await findSkillFiles(extension.installedPath)) {
+      if (skills.length >= 100) break;
+      const relativePath = relative(extension.installedPath, skillPath).replaceAll("\\", "/");
+      try {
+        const metadata = await readSkillMetadata(
+          await safeFilePath(extension.installedPath, skillPath),
+        );
+        skills.push({
+          id: `${extension.id}/${relativePath}`,
+          name: metadata.name,
+          description: metadata.description.slice(0, 2000),
+        });
+      } catch {
+        // A malformed or unsafe Skill is omitted from the plugin's read-only capability summary.
+      }
+    }
+
+    return {
+      id: extension.id,
+      name: extension.name,
+      description: extension.description.slice(0, 2000),
+      activationPolicy,
+      sessionSelected,
+      skills,
+      mcpServers: extension.mcpServerNames,
+      hookCount: extension.hookCount,
+    };
+  }
+
+  getAvailablePluginMcpServerIds(
+    sessionId: string,
+    runActiveExtensionIds: readonly string[] = [],
+  ): ReadonlySet<string> {
+    const session = this.repository.getSession(sessionId);
+    if (!session || session.agentMode === "chat" || session.parentSessionId) return new Set();
+    const selected = new Set(this.repository.listSessionExtensionIds(sessionId));
+    const runActive = new Set(runActiveExtensionIds);
+    const serverIds = new Set<string>();
+    for (const extension of this.repository.listExtensions()) {
+      if (
+        extension.type !== "plugin" ||
+        !extension.enabled ||
+        (!selected.has(extension.id) && !runActive.has(extension.id))
+      )
+        continue;
+      const manifest = this.repository.getExtensionManifest(extension.id);
+      if (pluginActivationPolicy(manifest) === "required" && !selected.has(extension.id)) continue;
+      for (const serverName of extension.mcpServerNames)
+        serverIds.add(pluginMcpServerId(extension.id, serverName));
+    }
+    return serverIds;
+  }
+
+  getPluginMcpServerOwnerExtensionId(serverId: string): string | null {
+    const owners = this.repository
+      .listExtensions()
+      .filter(
+        (extension) =>
+          extension.type === "plugin" &&
+          extension.mcpServerNames.some(
+            (serverName) => pluginMcpServerId(extension.id, serverName) === serverId,
+          ),
+      )
+      .map((extension) => extension.id);
+    return owners.length === 1 ? (owners[0] ?? null) : null;
+  }
+
+  async getEnabledPluginExtensionIdForSkill(
+    sessionId: string,
+    exactSkillId: string,
+  ): Promise<string | null> {
+    const session = this.repository.getSession(sessionId);
+    if (!session || session.agentMode === "chat" || session.parentSessionId) return null;
+    const separator = exactSkillId.indexOf("/");
+    if (separator <= 0 || separator === exactSkillId.length - 1) return null;
+    const extensionId = exactSkillId.slice(0, separator);
+    const extension = this.repository.getExtension(extensionId);
+    if (extension?.type !== "plugin" || !extension.enabled) return null;
+    const sessionSelected = this.repository
+      .listSessionExtensionIds(sessionId)
+      .includes(extensionId);
+    if (
+      pluginActivationPolicy(this.repository.getExtensionManifest(extensionId)) === "required" &&
+      !sessionSelected
+    )
+      return null;
+    const relativeSkillPath = exactSkillId.slice(separator + 1);
+    for (const skillPath of await findSkillFiles(extension.installedPath)) {
+      if (relative(extension.installedPath, skillPath).replaceAll("\\", "/") === relativeSkillPath)
+        return extensionId;
+    }
+    return null;
   }
 
   async discoverCapabilities(
@@ -1098,12 +1258,17 @@ export class ExtensionService {
 
     if (input.kind !== "skill") {
       for (const extension of enabled.filter((entry) => entry.type === "plugin")) {
+        const activationPolicy = pluginActivationPolicy(
+          this.repository.getExtensionManifest(extension.id),
+        );
         records.push({
           type: "plugin",
           id: extension.id,
           name: extension.name,
           description: extension.description.slice(0, 2000),
           session_selected: selectedIds.has(extension.id),
+          activation_policy: activationPolicy,
+          selectable_by_agent: activationPolicy !== "required" || selectedIds.has(extension.id),
           skill_count: extension.skillCount,
           mcp_servers: extension.mcpServerNames,
           hook_count: extension.hookCount,
@@ -1118,6 +1283,14 @@ export class ExtensionService {
 
     if (input.kind !== "plugin") {
       for (const extension of enabled) {
+        const selected = selectedIds.has(extension.id);
+        if (
+          extension.type === "plugin" &&
+          pluginActivationPolicy(this.repository.getExtensionManifest(extension.id)) ===
+            "required" &&
+          !selected
+        )
+          continue;
         let skillFiles: string[];
         try {
           skillFiles = await findSkillFiles(extension.installedPath);
@@ -1141,7 +1314,7 @@ export class ExtensionService {
                 type: extension.type,
               },
               source: "installed",
-              session_selected: selectedIds.has(extension.id),
+              session_selected: selected,
               searchable:
                 `${metadata.name} ${metadata.description} ${extension.name}`.toLocaleLowerCase(
                   "zh-CN",

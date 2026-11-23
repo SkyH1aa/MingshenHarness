@@ -66,6 +66,7 @@ import {
 } from "../agents/domain-skills";
 import { resolveDraftTurnContext } from "../agents/draft-assist-service";
 import type { LspDiagnosticsService } from "../agents/lsp-diagnostics-service";
+import { USE_PLUGIN_TOOL, usePluginSchema } from "../agents/plugin-capability";
 import type { ProjectConfigService } from "../agents/project-config-service";
 import type { ProjectInstructionService } from "../agents/project-instruction-service";
 import {
@@ -106,6 +107,7 @@ import {
   localPluginRequestSchema,
 } from "../extensions/local-plugin-tool";
 import {
+  formatBeforeModelRequestContext,
   formatPluginPromptContext,
   type PluginHookExecutionEvent,
   type PluginHookInvocationContext,
@@ -122,9 +124,12 @@ import type { RuntimeContext } from "../prompts/runtime-context";
 import { auxiliaryReasoning, sameModel } from "../providers/auxiliary-model";
 import { ModelOutputLimitError } from "../providers/model-request-error";
 import {
+  type BeforeModelRequestHook,
+  type ModelRequestContext,
   type ModelStreamEvent,
   type StreamToolDefinition,
   streamModelTurn,
+  withModelRequestContext,
 } from "../providers/model-stream";
 import type { ProviderService } from "../providers/provider-service";
 import { redactSecrets } from "../security/redact";
@@ -298,6 +303,7 @@ const READ_ONLY_TOOLS = new Set([
   "office_document",
   "read_tool_output",
   "use_skill",
+  "use_plugin",
   "discover_capabilities",
   "local_plugin",
   "recall_context",
@@ -979,6 +985,11 @@ export class ChatService {
   private readonly managedChildren = new Set<string>();
   private readonly approvedMcpProcesses = new Map<string, Set<string>>();
   private readonly activeRuns = new Map<string, AbortController>();
+  private readonly runActivatedPlugins = new Map<string, Set<string>>();
+  private readonly subagentPromptPlugins = new Map<
+    string,
+    { parentRunId: string; extensionIds: Set<string> }
+  >();
   private readonly activeExecutions = new Map<string, Promise<unknown>>();
   private readonly runPromises = new Map<string, Promise<unknown>>();
   private readonly preparingSends = new Map<string, Promise<{ runId: string }>>();
@@ -1013,6 +1024,82 @@ export class ChatService {
   readonly projectMemory = new ProjectMemoryService();
   readonly tencentMemory = new TencentMemoryService();
   private readonly memoryRoots = new Map<string, string>();
+
+  activatePluginForRun(sessionId: string, runId: string, extensionId: string): void {
+    const session = this.options.repository.getSession(sessionId);
+    const extension = this.options.repository.getExtension(extensionId);
+    if (
+      !session ||
+      session.agentMode === "chat" ||
+      session.parentSessionId ||
+      !extension?.enabled ||
+      extension.type !== "plugin"
+    )
+      throw new Error(
+        "PLUGIN_RUN_ACTIVATION_DENIED: only an enabled plugin can be activated in a primary Code/Work run.",
+      );
+    const active = this.runActivatedPlugins.get(runId) ?? new Set<string>();
+    active.add(extensionId);
+    this.runActivatedPlugins.set(runId, active);
+    for (const inherited of this.subagentPromptPlugins.values()) {
+      if (inherited.parentRunId === runId) inherited.extensionIds.add(extensionId);
+    }
+  }
+
+  private availablePluginMcpServerIds(sessionId: string, runId?: string): ReadonlySet<string> {
+    return (
+      this.options.extensionService?.getAvailablePluginMcpServerIds?.(
+        sessionId,
+        runId ? [...(this.runActivatedPlugins.get(runId) ?? [])] : [],
+      ) ?? new Set()
+    );
+  }
+
+  private pluginMcpServerIds(): ReadonlySet<string> {
+    return this.options.mcpService.pluginMcpServerIds?.() ?? new Set();
+  }
+
+  private beforeModelRequestHook(
+    session: SessionView,
+    runId: string,
+    signal: AbortSignal,
+    provider: ProviderView,
+    model: ModelConfig,
+  ): BeforeModelRequestHook {
+    return async (requestProvider = provider, requestModel = model) => {
+      signal.throwIfAborted();
+      const inherited = session.parentSessionId
+        ? this.subagentPromptPlugins.get(session.id)
+        : undefined;
+      if (
+        isChatSession(session) ||
+        (session.parentSessionId && !inherited) ||
+        !this.options.pluginHookService
+      )
+        return "";
+      const result = await this.options.pluginHookService.loadBeforeModelRequestContext(
+        session,
+        runId,
+        signal,
+        [...(inherited?.extensionIds ?? this.runActivatedPlugins.get(runId) ?? [])],
+        {
+          runId,
+          providerId: requestProvider.id,
+          modelId: requestModel.modelId,
+        },
+        inherited ? { allowSubagentPromptContext: true } : {},
+      );
+      signal.throwIfAborted();
+      if (result.errors.length) {
+        throw new Error(
+          `BEFORE_MODEL_REQUEST_FAILED: ${result.errors
+            .map((error) => `${error.extensionName}: ${error.message}`)
+            .join("; ")}`,
+        );
+      }
+      return formatBeforeModelRequestContext(result.contexts);
+    };
+  }
 
   assertProjectMemoryConfigurable(workspacePath: string): void {
     const root = canonicalProjectMemoryRoot(workspacePath);
@@ -1298,6 +1385,13 @@ export class ChatService {
                 reasoningLevel: auxiliaryReasoning(analysisModel),
                 maxOutputTokens: Math.min(8192, analysisModel.maxOutputTokens),
                 signal: analysisSignal,
+                beforeEachRequest: this.beforeModelRequestHook(
+                  session,
+                  runId,
+                  analysisSignal,
+                  analysisProvider,
+                  analysisModel,
+                ),
                 retry: {
                   ...this.getModelRetrySettings(),
                   onRetry: () => {
@@ -1443,6 +1537,13 @@ export class ChatService {
             reasoningLevel: null,
             maxOutputTokens: outputTokens,
             signal: summarySignal,
+            beforeEachRequest: this.beforeModelRequestHook(
+              session,
+              runId,
+              summarySignal,
+              provider,
+              model,
+            ),
             retry: {
               ...this.getModelRetrySettings(),
               onRetry: () => {
@@ -1895,6 +1996,13 @@ export class ChatService {
           model,
           runId,
           signal: controller.signal,
+          beforeEachRequest: this.beforeModelRequestHook(
+            running,
+            runId,
+            controller.signal,
+            provider,
+            model,
+          ),
           systemPrompt: [
             this.options.repository.getAgentProfile(session.agentProfileId)?.instructions,
             session.systemPrompt,
@@ -1930,6 +2038,7 @@ export class ChatService {
           });
       } finally {
         let cleanupFailed = false;
+        this.runActivatedPlugins.delete(runId);
         try {
           this.contextCompaction.finishRun(sessionId);
         } catch (cleanupError) {
@@ -2983,9 +3092,17 @@ export class ChatService {
       }
 
       const gitBefore = await snapshotWorkspaceChanges(session.workspacePath);
-      const tools = await this.availableTools(session, model, runId, signal);
+      let tools = await this.availableTools(session, model, runId, signal);
+      let pluginActivationSnapshot = [...(this.runActivatedPlugins.get(runId) ?? [])]
+        .sort()
+        .join("\0");
+      const pluginMcpServerIds = this.pluginMcpServerIds();
+      const availablePluginMcpServers = this.availablePluginMcpServerIds(session.id, runId);
       for (const server of (isChatSession(session) ? [] : this.options.mcpService.list()).filter(
-        (entry) => entry.enabled && (!entry.configured || entry.status === "error"),
+        (entry) =>
+          entry.enabled &&
+          (!pluginMcpServerIds.has(entry.id) || availablePluginMcpServers.has(entry.id)) &&
+          (!entry.configured || entry.status === "error"),
       )) {
         const timestamp = new Date().toISOString();
         this.emitActivity({
@@ -3075,6 +3192,13 @@ export class ChatService {
 
       for (let roundIndex = 0; roundIndex + chainExecuted <= maxToolRounds; roundIndex += 1) {
         signal.throwIfAborted();
+        const nextPluginActivationSnapshot = [...(this.runActivatedPlugins.get(runId) ?? [])]
+          .sort()
+          .join("\0");
+        if (nextPluginActivationSnapshot !== pluginActivationSnapshot) {
+          tools = await this.availableTools(session, model, runId, signal);
+          pluginActivationSnapshot = nextPluginActivationSnapshot;
+        }
         this.refreshPermissions(session);
         currentPlan = this.workbench.state(session.id).plan;
         if (
@@ -3093,6 +3217,37 @@ export class ChatService {
         systemPrompt = [baseSystemPrompt, tokenSaverPrompt(saverSettings, currentQuestion)]
           .filter(Boolean)
           .join("\n\n");
+        const baseRequestSystemPrompt = systemPrompt;
+        const beforeEachRequest = this.beforeModelRequestHook(
+          session,
+          runId,
+          signal,
+          provider,
+          model,
+        );
+        let firstRequestContext: ModelRequestContext | undefined;
+        try {
+          firstRequestContext = (await beforeEachRequest(provider, model)) ?? "";
+          signal.throwIfAborted();
+        } catch (cause) {
+          signal.throwIfAborted();
+          recordRuntimeError("plugin.beforeModelRequest", cause, {
+            sessionId: session.id,
+            runId,
+            providerId: provider.id,
+            modelId: model.id,
+            operation: "BeforeModelRequest",
+          });
+          throw new Error(
+            `BeforeModelRequest failed; the model request was not sent. ${cause instanceof Error ? cause.message : String(cause)}`,
+            { cause },
+          );
+        }
+        const requestContextInput = withModelRequestContext(
+          { systemPrompt: baseRequestSystemPrompt },
+          firstRequestContext,
+        );
+        systemPrompt = requestContextInput.systemPrompt;
         const memoryRoot = this.memoryRoots.get(runId);
         let requestTools =
           memoryRoot && this.options.repository.getSetting(this.memoryKey(memoryRoot)) !== false
@@ -3150,6 +3305,10 @@ export class ChatService {
           provider,
           model,
           systemPrompt,
+          ...(requestContextInput.requestContext
+            ? { requestContext: requestContextInput.requestContext }
+            : {}),
+          baseSystemPrompt: baseRequestSystemPrompt,
           tools: requestTools,
           runId,
           signal,
@@ -3162,6 +3321,7 @@ export class ChatService {
             ).messages,
             ...history.filter((message) => protectedIds.has(message.id)),
           ],
+          beforeEachRequest,
         };
         const messages = await this.contextCompaction.prepare(contextInput);
         const optimized = this.tokenSaver.prepare({
@@ -3170,6 +3330,9 @@ export class ChatService {
           provider,
           model,
           systemPrompt,
+          ...(requestContextInput.requestContext
+            ? { requestContext: requestContextInput.requestContext }
+            : {}),
           tools: requestTools,
           messages,
           protectedMessages,
@@ -3225,12 +3388,15 @@ export class ChatService {
             provider,
             model,
             apiKey,
-            systemPrompt,
+            systemPrompt: baseRequestSystemPrompt,
+            baseSystemPrompt: baseRequestSystemPrompt,
+            firstRequestContext,
             messages: modelMessages,
             maxOutputTokens: this.contextCompaction.outputLimit(session.id, model),
             reasoningLevel: session.reasoningLevel,
             tools: requestTools,
             signal,
+            beforeEachRequest,
             onRequestUsage: usageRecorder(this.options.repository, session.id, "agent"),
             onRequestPrepared: (request) =>
               this.contextCompaction.rememberRequest(session, request, [
@@ -3953,6 +4119,7 @@ export class ChatService {
       }
     } finally {
       let cleanupFailed = false;
+      this.runActivatedPlugins.delete(runId);
       try {
         const tasks = this.delegatedTasks.get(runId);
         if (tasks?.size) {
@@ -4692,6 +4859,7 @@ export class ChatService {
           session.permissionMode === "request_approval"
             ? (this.approvedMcpProcesses.get(runId) ?? new Set<string>())
             : undefined,
+          this.availablePluginMcpServerIds(session.id, runId),
         )
         .then((definition) => !definition?.readOnly);
     }
@@ -4852,24 +5020,28 @@ export class ChatService {
     const scopedReadPermission =
       input.toolCall.name === "use_skill"
         ? await this.builtinSkillPermission(input.session, profile, String(args.name ?? ""))
-        : input.toolCall.name === "discover_capabilities"
-          ? agentPermission(profile, input.toolCall.name, String(args.query ?? ""))
-          : input.toolCall.name === "local_plugin"
-            ? agentPermission(
-                profile,
-                input.toolCall.name,
-                typeof args.rootPath === "string" ? args.rootPath : "local-plugin-markets",
-              )
-            : input.toolCall.name === "read_tool_output"
-              ? agentPermission(profile, input.toolCall.name, String(args.call_id ?? ""))
-              : null;
+        : input.toolCall.name === "use_plugin"
+          ? agentPermission(profile, input.toolCall.name, String(args.plugin_id ?? ""))
+          : input.toolCall.name === "discover_capabilities"
+            ? agentPermission(profile, input.toolCall.name, String(args.query ?? ""))
+            : input.toolCall.name === "local_plugin"
+              ? agentPermission(
+                  profile,
+                  input.toolCall.name,
+                  typeof args.rootPath === "string" ? args.rootPath : "local-plugin-markets",
+                )
+              : input.toolCall.name === "read_tool_output"
+                ? agentPermission(profile, input.toolCall.name, String(args.call_id ?? ""))
+                : null;
     if (
       input.toolCall.name === "read_tool_output" &&
       (!allowedByProfile(profile, "read_tool_output") || scopedReadPermission === "deny")
     )
       return { output: "当前 Agent 配置禁止读取工具输出。", isError: true };
     if (
-      (input.toolCall.name === "use_skill" || input.toolCall.name === "discover_capabilities") &&
+      (input.toolCall.name === "use_skill" ||
+        input.toolCall.name === "use_plugin" ||
+        input.toolCall.name === "discover_capabilities") &&
       (!allowedByProfile(profile, input.toolCall.name) || scopedReadPermission === "deny")
     )
       return { output: "当前 Agent 配置禁止发现或读取 Skill/Plugin。", isError: true };
@@ -4889,11 +5061,13 @@ export class ChatService {
           summary:
             input.toolCall.name === "use_skill"
               ? "读取按需技能"
-              : input.toolCall.name === "discover_capabilities"
-                ? "发现按需技能与插件"
-                : input.toolCall.name === "local_plugin"
-                  ? "读取或校验本地插件"
-                  : "读取保留工具输出",
+              : input.toolCall.name === "use_plugin"
+                ? "按需激活插件"
+                : input.toolCall.name === "discover_capabilities"
+                  ? "发现按需技能与插件"
+                  : input.toolCall.name === "local_plugin"
+                    ? "读取或校验本地插件"
+                    : "读取保留工具输出",
           detail: JSON.stringify(args).slice(0, 4000),
           pathScope: null,
           commandPrefix: null,
@@ -4953,6 +5127,30 @@ export class ChatService {
         };
       }
     }
+    if (input.toolCall.name === "use_plugin") {
+      try {
+        const parsed = usePluginSchema.parse(args);
+        const context = await this.options.extensionService.getPluginUseContext(
+          input.session.id,
+          parsed.plugin_id,
+        );
+        this.activatePluginForRun(input.session.id, input.runId, context.id);
+        return {
+          output: JSON.stringify({
+            plugin_id: context.id,
+            name: context.name,
+            activation: "active_for_this_run",
+            skills: context.skills,
+            mcp_servers: context.mcpServers,
+            hook_count: context.hookCount,
+            note: "Declared BeforeModelRequest prompt context is considered before each later model request. Exact plugin MCP tools and later action hooks are eligible starting on the next model round, subject to normal trust, approval, execution and isolation checks; UserPromptSubmit is not retroactive. Plugin slash commands are user-invoked templates, not model-executable commands. No permissions or persistent session references were changed.",
+          }),
+          isError: false,
+        };
+      } catch (error) {
+        return { output: error instanceof Error ? error.message : String(error), isError: true };
+      }
+    }
     if (input.toolCall.name === "use_skill") {
       if (!this.options.promptDirectory)
         return {
@@ -4960,13 +5158,20 @@ export class ChatService {
           isError: true,
         };
       try {
+        const name = String(args.name ?? "");
+        const output = await loadDomainSkill(
+          input.session,
+          args,
+          this.options.promptDirectory,
+          this.options.extensionService,
+        );
+        const extensionId = await this.options.extensionService.getEnabledPluginExtensionIdForSkill(
+          input.session.id,
+          name,
+        );
+        if (extensionId) this.activatePluginForRun(input.session.id, input.runId, extensionId);
         return {
-          output: await loadDomainSkill(
-            input.session,
-            args,
-            this.options.promptDirectory,
-            this.options.extensionService,
-          ),
+          output,
           isError: false,
         };
       } catch (error) {
@@ -5702,6 +5907,7 @@ export class ChatService {
       return await this.options.githubService.execute(input.toolCall.name, args);
     }
     if (input.toolCall.name.startsWith("mcp__")) {
+      const pluginMcpServers = this.availablePluginMcpServerIds(input.session.id, input.runId);
       const definition = await this.options.mcpService.exposedTool(
         input.toolCall.name,
         input.session.executionMode === "docker" || Boolean(input.session.parentSessionId),
@@ -5709,9 +5915,15 @@ export class ChatService {
         input.session.permissionMode === "request_approval"
           ? (this.approvedMcpProcesses.get(input.runId) ?? new Set<string>())
           : undefined,
+        pluginMcpServers,
       );
       if (
         !definition ||
+        (this.pluginMcpServerIds().has(definition.serverId) &&
+          (!pluginMcpServers.has(definition.serverId) ||
+            !this.options.extensionService?.getPluginMcpServerOwnerExtensionId?.(
+              definition.serverId,
+            ))) ||
         ((profile?.readOnly || input.session.parentSessionId) && !definition.readOnly)
       ) {
         return { output: "该 MCP 工具不可用或不符合只读 Agent 策略。", isError: true };
@@ -7230,6 +7442,16 @@ export class ChatService {
         setApprovalMode(this.options.repository, child.id, "automatic");
       for (const extensionId of this.options.repository.listSessionExtensionIds(session.id))
         this.options.repository.setSessionExtension(child.id, extensionId, true);
+      if (parentRunId) {
+        // Prompt-only inheritance must not enable plugin MCP servers or executable hooks.
+        this.subagentPromptPlugins.set(child.id, {
+          parentRunId,
+          extensionIds: new Set([
+            ...this.options.repository.listSessionExtensionIds(session.id),
+            ...(this.runActivatedPlugins.get(parentRunId) ?? []),
+          ]),
+        });
+      }
       this.options.emit({
         type: "session_updated",
         session: this.options.repository.getSession(child.id) ?? child,
@@ -7305,11 +7527,15 @@ export class ChatService {
         childSessionId: childId,
       };
     } finally {
-      if (childId && (this.activeRuns.has(childId) || this.preparingSends.has(childId)))
-        await this.stopAndWait(childId);
-      if (childId) {
-        this.managedChildren.delete(childId);
-        this.verificationRequests.delete(childId);
+      try {
+        if (childId && (this.activeRuns.has(childId) || this.preparingSends.has(childId)))
+          await this.stopAndWait(childId);
+      } finally {
+        if (childId) {
+          this.subagentPromptPlugins.delete(childId);
+          this.managedChildren.delete(childId);
+          this.verificationRequests.delete(childId);
+        }
       }
     }
   }
@@ -7693,9 +7919,14 @@ export class ChatService {
     }
     try {
       const profile = this.options.repository.getAgentProfile(session.agentProfileId);
+      const runActivatedExtensionIds = [...(this.runActivatedPlugins.get(runId) ?? [])];
+      const referencedExtensionIds = new Set([
+        ...this.options.repository.listSessionExtensionIds(session.id),
+        ...runActivatedExtensionIds,
+      ]);
       if (
         profile?.readOnly ||
-        !this.options.repository.listSessionExtensionIds(session.id).some((id) => {
+        ![...referencedExtensionIds].some((id) => {
           const extension = this.options.repository.getExtension(id);
           return extension?.enabled && extension.type === "plugin";
         })
@@ -7704,7 +7935,13 @@ export class ChatService {
       const pluginHookService = this.options.pluginHookService;
       const results =
         event === "Interrupt"
-          ? await pluginHookService.runInterrupt(session, runId, signal, context)
+          ? await pluginHookService.runInterrupt(
+              session,
+              runId,
+              signal,
+              context,
+              runActivatedExtensionIds,
+            )
           : await this.withExternalWriter(session, runId, signal, () =>
               pluginHookService.run(
                 event,
@@ -7716,6 +7953,7 @@ export class ChatService {
                   return decision.decision !== "deny";
                 },
                 context,
+                runActivatedExtensionIds,
               ),
             );
       for (const [index, result] of results.entries()) {
@@ -7803,6 +8041,7 @@ export class ChatService {
         projectConfig.mcpServers,
       );
     }
+    const availablePluginMcpServers = this.availablePluginMcpServerIds(session.id, runId);
     const allowedProcesses = new Set<string>();
     if (
       session.permissionMode === "request_approval" &&
@@ -7813,7 +8052,13 @@ export class ChatService {
     ) {
       for (const server of this.options.mcpService
         .list()
-        .filter((entry) => entry.enabled && entry.configured && entry.transport === "stdio")) {
+        .filter(
+          (entry) =>
+            entry.enabled &&
+            entry.configured &&
+            entry.transport === "stdio" &&
+            (!this.pluginMcpServerIds().has(entry.id) || availablePluginMcpServers.has(entry.id)),
+        )) {
         const scope = `mcp-process:${server.id}`;
         if (this.options.permissions.hasPath(session.id, scope, "read")) {
           allowedProcesses.add(server.id);
@@ -7843,6 +8088,7 @@ export class ChatService {
       session.executionMode === "docker" || Boolean(session.parentSessionId),
       session.workspacePath,
       session.permissionMode === "request_approval" ? allowedProcesses : undefined,
+      availablePluginMcpServers,
     );
     const profile = this.options.repository.getAgentProfile(session.agentProfileId);
     const hasCustomTools =
@@ -7888,6 +8134,7 @@ export class ChatService {
     const localTools = [
       ...(this.options.promptDirectory ? [USE_SKILL_TOOL] : []),
       ...(this.options.promptDirectory ? [CAPABILITY_DISCOVERY_TOOL] : []),
+      ...(!session.parentSessionId ? [USE_PLUGIN_TOOL] : []),
       ...(this.options.localPluginMarketplaceService &&
       session.executionMode === "host" &&
       !session.parentSessionId &&
@@ -7971,9 +8218,11 @@ export class ChatService {
             .map((server) => server.id)
         : [],
     );
+    const pluginMcpServerIds = this.pluginMcpServerIds();
     const availableMcp = mcpTools.filter(
       (tool) =>
         !blockedMcp.has(tool.serverId) &&
+        (!pluginMcpServerIds.has(tool.serverId) || availablePluginMcpServers.has(tool.serverId)) &&
         (!(profile?.readOnly || session.parentSessionId) || tool.readOnly) &&
         allowedByProfile(profile, tool.name) &&
         agentPermission(profile, tool.name) !== "deny",
@@ -8154,12 +8403,9 @@ export class ChatService {
           })),
       },
       enabled_skills: [...extensionContext.skills].sort(),
-      enabled_mcp_servers: [
-        ...new Set([
-          ...extensionContext.mcpServers,
-          ...this.options.mcpService.enabledServerNames(),
-        ]),
-      ].sort(),
+      enabled_mcp_servers: this.options.mcpService
+        .enabledServerNames(this.availablePluginMcpServerIds(session.id, runId))
+        .sort(),
       agent_profile: profile
         ? {
             id: profile.id,

@@ -20,6 +20,7 @@ import { createWireCacheFingerprint, type WireCacheFingerprint } from "./cache-d
 import { geminiModelPath, geminiThinkingConfig } from "./gemini-format";
 import { decodeGemini } from "./gemini-stream";
 import {
+  ModelInputBudgetError,
   ModelOutputLimitError,
   ModelRequestError,
   retryAfterMs,
@@ -104,9 +105,16 @@ export interface StreamTurnInput {
   topP?: number;
   toolChoice?: "none";
   signal: AbortSignal;
+  /** A context already loaded for budget preparation; undefined means load it inside the stream. */
+  firstRequestContext?: ModelRequestContext;
+  /** Ephemeral ordinary-user context, applied only to this request's wire payload. */
+  requestContext?: RequestUserContext;
+  /** Stable prompt before per-request plugin context is appended. */
+  baseSystemPrompt?: string;
   onRequestUsage?: (usage: RequestUsage) => void;
   onRequestPrepared?: (request: PreparedModelRequest) => void;
   onBeforeRequest?: () => void;
+  beforeEachRequest?: BeforeModelRequestHook;
   retry?: {
     maxRetries: number;
     onRetry: (state: {
@@ -119,6 +127,18 @@ export interface StreamTurnInput {
   };
 }
 
+export interface RequestUserContext {
+  userPrefix?: string;
+  userSuffix?: string;
+}
+
+export type ModelRequestContext = string | (RequestUserContext & { systemContext?: string });
+
+export type BeforeModelRequestHook = (
+  provider: ProviderView,
+  model: ModelConfig,
+) => Promise<ModelRequestContext | null | undefined>;
+
 export type PreparedModelRequest = Pick<
   StreamTurnInput,
   | "provider"
@@ -129,7 +149,37 @@ export type PreparedModelRequest = Pick<
   | "reasoningLevel"
   | "temperature"
   | "topP"
->;
+  | "requestContext"
+> & { baseSystemPrompt?: string };
+
+export function withBeforeModelRequestContext(
+  systemPrompt: string,
+  context?: ModelRequestContext | null,
+): string {
+  const normalized = (typeof context === "string" ? context : context?.systemContext)?.trim();
+  return normalized ? `${systemPrompt}\n\n${normalized}` : systemPrompt;
+}
+
+export function withModelRequestContext<
+  T extends { systemPrompt: string; requestContext?: RequestUserContext },
+>(
+  input: T,
+  context?: ModelRequestContext | null,
+): Omit<T, "requestContext"> & { requestContext?: RequestUserContext } {
+  const userPrefix = typeof context === "object" ? context?.userPrefix?.trim() : undefined;
+  const userSuffix = typeof context === "object" ? context?.userSuffix?.trim() : undefined;
+  const result: Omit<T, "requestContext"> & { requestContext?: RequestUserContext } = {
+    ...input,
+    systemPrompt: withBeforeModelRequestContext(input.systemPrompt, context),
+  };
+  delete result.requestContext;
+  if (userPrefix || userSuffix)
+    result.requestContext = {
+      ...(userPrefix ? { userPrefix } : {}),
+      ...(userSuffix ? { userSuffix } : {}),
+    };
+  return result;
+}
 
 interface WireRequest {
   path: string;
@@ -288,11 +338,15 @@ function buildAnthropicMessages(
   messages: SessionMessage[],
   model: ModelConfig,
   provider: ProviderView,
+  userPrefix = "",
 ): AnthropicMessage[] {
   const result: AnthropicMessage[] = [];
+  const trailingUserStart = trailingUserMessageStart(messages);
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.role === "user") {
+      if (userPrefix && messageIndex === trailingUserStart)
+        appendAnthropicContent(result, "user", [{ type: "text", text: userPrefix }]);
       const text = messageText(message);
       const content: Array<Record<string, unknown>> = text ? [{ type: "text", text }] : [];
       for (const attachment of messageAttachments(message)) {
@@ -433,21 +487,35 @@ function buildOpenAiResponsesInput(
   messages: SessionMessage[],
   model: ModelConfig,
   provider: ProviderView,
+  userPrefix = "",
 ): Array<Record<string, unknown>> {
   const input: Array<Record<string, unknown>> = [];
   const endpointKey = responsesEndpointKey(provider.baseUrl);
+  const trailingUserStart = trailingUserMessageStart(messages);
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.role === "user") {
+      const includeUserPrefix = Boolean(userPrefix) && messageIndex === trailingUserStart;
       const text = messageText(message);
       const attachments = messageAttachments(message);
       if (attachments.length === 0) {
-        if (text) {
+        if (includeUserPrefix) {
+          input.push({
+            role: "user",
+            content: [
+              { type: "input_text", text: userPrefix },
+              ...(text ? [{ type: "input_text", text }] : []),
+            ],
+          });
+        } else if (text) {
           input.push({ role: "user", content: text });
         }
         continue;
       }
-      const content: Array<Record<string, unknown>> = text ? [{ type: "input_text", text }] : [];
+      const content: Array<Record<string, unknown>> = [
+        ...(includeUserPrefix ? [{ type: "input_text", text: userPrefix }] : []),
+        ...(text ? [{ type: "input_text", text }] : []),
+      ];
       for (const attachment of attachments) {
         if (attachment.kind === "image" && supports(model, "image")) {
           content.push({
@@ -539,12 +607,19 @@ function buildOpenAiResponsesInput(
   return input;
 }
 
+function trailingUserMessageStart(messages: SessionMessage[]): number {
+  let index = messages.length;
+  while (index > 0 && messages[index - 1]?.role === "user") index--;
+  return index < messages.length ? index : -1;
+}
+
 function buildChatMessages(
   messages: SessionMessage[],
   systemPrompt: string,
   model: ModelConfig,
   provider: ProviderView,
   includeDeepSeekReasoningFallback: boolean,
+  userPrefix = "",
 ) {
   const result: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }];
   const pendingImages: Array<Record<string, unknown>> = [];
@@ -566,18 +641,31 @@ function buildChatMessages(
     pendingImages.length = 0;
   };
 
-  for (const message of messages) {
+  const trailingUserStart = trailingUserMessageStart(messages);
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.role !== "tool") flushImages();
     if (message.role === "user") {
+      const includeUserPrefix = Boolean(userPrefix) && messageIndex === trailingUserStart;
       const text = messageText(message);
       const attachments = messageAttachments(message);
       if (attachments.length === 0) {
-        if (text) {
+        if (includeUserPrefix) {
+          result.push({
+            role: "user",
+            content: [
+              { type: "text", text: userPrefix },
+              ...(text ? [{ type: "text", text }] : []),
+            ],
+          });
+        } else if (text) {
           result.push({ role: "user", content: text });
         }
         continue;
       }
-      const content: Array<Record<string, unknown>> = text ? [{ type: "text", text }] : [];
+      const content: Array<Record<string, unknown>> = [
+        ...(includeUserPrefix ? [{ type: "text", text: userPrefix }] : []),
+        ...(text ? [{ type: "text", text }] : []),
+      ];
       for (const attachment of attachments) {
         if (attachment.kind === "image" && supports(model, "image")) {
           content.push({
@@ -721,6 +809,7 @@ function toolPayload(
 function buildGeminiContents(
   input: StreamTurnInput,
   allowPendingToolCalls = false,
+  userPrefix = "",
 ): Array<Record<string, unknown>> {
   const contents: Array<Record<string, unknown>> = [];
   let pending: Array<{ callId: string; name: string; wireId?: string }> = [];
@@ -750,7 +839,8 @@ function buildGeminiContents(
   const inline = (mimeType: string, dataUrl: string) => ({
     inlineData: { mimeType, data: attachmentBase64(dataUrl) },
   });
-  for (const message of input.messages) {
+  const trailingUserStart = trailingUserMessageStart(input.messages);
+  for (const [messageIndex, message] of input.messages.entries()) {
     if (message.role !== "tool") flushResults();
     if (message.role === "assistant") {
       const state = replayProviderState(message, input.provider, input.model);
@@ -799,6 +889,8 @@ function buildGeminiContents(
       }
       continue;
     }
+    if (userPrefix && message.role === "user" && messageIndex === trailingUserStart)
+      append("user", [{ text: userPrefix }]);
     const text = messageText(message);
     const parts: Array<Record<string, unknown>> = text ? [{ text }] : [];
     for (const attachment of messageAttachments(message)) {
@@ -859,19 +951,20 @@ function anthropicThinkingConfig(
   };
 }
 
-function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRequest {
+function buildBaseWireRequest(input: StreamTurnInput, forEstimation: boolean): WireRequest {
   const maxOutputTokens = input.maxOutputTokens ?? input.model.maxOutputTokens;
   const reasoningEnabled = Boolean(input.reasoningLevel) && input.reasoningLevel !== "none";
   const tools = toolPayload(input.provider.protocol, input.tools);
   const deepseek = resolveProviderModelFamily(input.provider) === "deepseek";
   const includeDeepSeekReasoningFallback = deepseek && input.reasoningLevel !== "none";
+  const userPrefix = input.requestContext?.userPrefix?.trim() ?? "";
 
   switch (input.provider.protocol) {
     case "gemini_generate_content": {
       const thinkingConfig = geminiThinkingConfig(input.model, input.reasoningLevel);
       const body: Record<string, unknown> = {
         systemInstruction: { parts: [{ text: input.systemPrompt }] },
-        contents: buildGeminiContents(input, forEstimation),
+        contents: buildGeminiContents(input, forEstimation, userPrefix),
         generationConfig: {
           maxOutputTokens,
           candidateCount: 1,
@@ -900,7 +993,7 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
       const body: Record<string, unknown> = {
         model: input.model.modelId,
         system: input.systemPrompt,
-        messages: buildAnthropicMessages(input.messages, input.model, input.provider),
+        messages: buildAnthropicMessages(input.messages, input.model, input.provider, userPrefix),
         max_tokens: maxOutputTokens,
         stream: true,
       };
@@ -930,7 +1023,12 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
     }
 
     case "openai_responses": {
-      const inputItems = buildOpenAiResponsesInput(input.messages, input.model, input.provider);
+      const inputItems = buildOpenAiResponsesInput(
+        input.messages,
+        input.model,
+        input.provider,
+        userPrefix,
+      );
       const body: Record<string, unknown> = {
         model: input.model.modelId,
         instructions: input.systemPrompt,
@@ -986,6 +1084,7 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
           input.model,
           input.provider,
           includeDeepSeekReasoningFallback,
+          userPrefix,
         ),
         max_tokens: maxOutputTokens,
         stream: true,
@@ -1013,6 +1112,68 @@ function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRe
   }
 }
 
+function decorateUserContent(
+  content: unknown,
+  context: RequestUserContext,
+  textType: "text" | "input_text" | null,
+  hasToolResults = false,
+): string | Array<Record<string, unknown>> {
+  const prefix = context.userPrefix?.trim();
+  const suffix = context.userSuffix?.trim();
+  const join = (text: string) => [prefix, text, suffix].filter(Boolean).join("\n");
+  if (typeof content === "string") return join(content);
+  const blocks = Array.isArray(content) ? [...content] : [];
+  const textBlock = (text: string): Record<string, unknown> =>
+    textType ? { type: textType, text } : { text };
+  const onlyBlock = blocks.length === 1 ? blocks[0] : null;
+  if (
+    !hasToolResults &&
+    onlyBlock &&
+    typeof onlyBlock.text === "string" &&
+    Object.keys(onlyBlock).every((key) => key === "type" || key === "text") &&
+    (textType === null ? onlyBlock.type === undefined : onlyBlock.type === textType)
+  )
+    return [{ ...onlyBlock, text: join(onlyBlock.text) }];
+  // Tool results must stay adjacent to their calls. Dynamic text also stays
+  // outside existing cache-marked blocks and after all attachment content.
+  if (prefix) {
+    if (hasToolResults) blocks.push(textBlock(prefix));
+    else blocks.unshift(textBlock(prefix));
+  }
+  if (suffix) blocks.push(textBlock(suffix));
+  return blocks;
+}
+
+function buildWireRequest(input: StreamTurnInput, forEstimation = false): WireRequest {
+  const request = buildBaseWireRequest(input, forEstimation);
+  const context = input.requestContext;
+  if (!context?.userPrefix?.trim() && !context?.userSuffix?.trim()) return request;
+  const gemini = input.provider.protocol === "gemini_generate_content";
+  const responses = input.provider.protocol === "openai_responses";
+  const key = gemini ? "contents" : responses ? "input" : "messages";
+  const items = [...(request.body[key] as Array<Record<string, unknown>>)];
+  const last = items.at(-1);
+  const ordinaryUser =
+    last?.role === "user" && (!responses || last.type === undefined || last.type === "message");
+  const contentKey = gemini ? "parts" : "content";
+  const content = ordinaryUser ? last[contentKey] : undefined;
+  const hasToolResults =
+    Array.isArray(content) &&
+    content.some((block) => block?.type === "tool_result" || block?.functionResponse);
+  const prefixAlreadyPlaced =
+    Boolean(context.userPrefix?.trim()) && trailingUserMessageStart(input.messages) >= 0;
+  const decorated = decorateUserContent(
+    content ?? (gemini || input.provider.protocol === "anthropic_messages" ? [] : ""),
+    prefixAlreadyPlaced ? { ...context, userPrefix: "" } : context,
+    gemini ? null : responses ? "input_text" : "text",
+    hasToolResults,
+  );
+  const user = { ...(ordinaryUser ? last : { role: "user" }), [contentKey]: decorated };
+  if (ordinaryUser) items[items.length - 1] = user;
+  else items.push(user);
+  return { ...request, body: { ...request.body, [key]: items } };
+}
+
 // Provider tokenizers differ. Estimate only the actual wire payload, never UI-only reasoning/diffs.
 export function estimateTextTokens(text: string): number {
   let ascii = 0;
@@ -1025,7 +1186,10 @@ export function estimateTextTokens(text: string): number {
 }
 
 export function estimateModelInputTokens(
-  input: Pick<StreamTurnInput, "provider" | "model" | "systemPrompt" | "messages" | "tools">,
+  input: Pick<
+    StreamTurnInput,
+    "provider" | "model" | "systemPrompt" | "messages" | "tools" | "requestContext"
+  >,
 ): number {
   // Response accounting runs before tools finish; only estimation accepts pending calls.
   const body = buildWireRequest(
@@ -1908,7 +2072,38 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
       completed: false,
     };
     try {
-      for await (const event of streamModelTurnInternal(input, (fingerprint) => {
+      let context: ModelRequestContext | null | undefined = input.requestContext;
+      if ((request === 1 || !input.beforeEachRequest) && input.firstRequestContext !== undefined) {
+        context = input.firstRequestContext;
+      } else if (input.beforeEachRequest) {
+        try {
+          context = await input.beforeEachRequest(input.provider, input.model);
+          input.signal.throwIfAborted();
+        } catch (cause) {
+          input.signal.throwIfAborted();
+          recordRuntimeError("plugin.beforeModelRequest", cause, {
+            providerId: input.provider.id,
+            modelId: input.model.id,
+          });
+          throw new Error(
+            `BeforeModelRequest failed; the next model request was not sent. ${cause instanceof Error ? cause.message : String(cause)}`,
+            { cause },
+          );
+        }
+      }
+      const effectiveInput = withModelRequestContext(input, context);
+      const estimatedInputTokens = estimateModelInputTokens(effectiveInput);
+      const requestInput = {
+        ...effectiveInput,
+        baseSystemPrompt: input.baseSystemPrompt ?? input.systemPrompt,
+        maxOutputTokens: Math.min(
+          input.maxOutputTokens ?? input.model.maxOutputTokens,
+          input.model.contextWindow - estimatedInputTokens - 256,
+        ),
+      };
+      if (requestInput.maxOutputTokens < 1)
+        throw new ModelInputBudgetError(estimatedInputTokens, input.model.contextWindow);
+      for await (const event of streamModelTurnInternal(requestInput, (fingerprint) => {
         measured.cacheRequest = fingerprint;
       })) {
         if (event.type === "usage") {
@@ -2041,11 +2236,13 @@ async function* streamModelTurnInternal(
       provider: input.provider,
       model: input.model,
       systemPrompt: input.systemPrompt,
+      baseSystemPrompt: input.baseSystemPrompt ?? input.systemPrompt,
       messages: input.messages,
       tools: input.tools,
       reasoningLevel: input.reasoningLevel,
       ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
       ...(input.topP !== undefined ? { topP: input.topP } : {}),
+      ...(input.requestContext ? { requestContext: { ...input.requestContext } } : {}),
     });
   } catch (cause) {
     recordRuntimeError("model.requestSnapshot", cause, {

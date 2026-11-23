@@ -1,6 +1,6 @@
 # Mingshen Harness 开发交接与维护记录
 
-最后核对日期：2026-11-21（Asia/Shanghai）。适用工作区版本：1.3.4。
+最后核对日期：2026-11-23（Asia/Shanghai）。适用工作区版本：1.3.6。
 
 本文供其他智能体、开发者和新对话接续工作，记录开发经过、已确认约束、实际代码位置、验证边界和打包方法。它不是功能全部完成、无漏洞或安装包已验收的证明。任何接续工作先核对当前源码、用户最新指令和 `git status`，不要直接照搬早期计划。
 
@@ -9,10 +9,10 @@
 1. 阅读本文和 [README.md](README.md)，涉及安全时阅读 [SECURITY.md](SECURITY.md)。
 2. 执行 `git status --short`，了解已有修改；本交接时工作区有大量未提交修改和未跟踪文件，包含有效实现，不是可直接清理的废料。
 3. 按任务阅读对应模块及相邻测试。优先小范围修复，沿用现有 Electron、React、TypeScript 和 pnpm 结构。
-4. 先阅读 [1.3.4 验证记录](docs/VALIDATION_1.3.4.md)；历史行为参考 [1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
+4. 先阅读 [1.3.6 验证记录](docs/VALIDATION_1.3.6.md)和 [1.3.5 验证记录](docs/VALIDATION_1.3.5.md)；历史行为参考 [1.3.4 验证记录](docs/VALIDATION_1.3.4.md)、[1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
 5. 完成后记录改了什么、执行了什么、结果及剩余边界；变更协议、打包、数据结构或安全边界时同步本文和对应文档。
 
-当前工作区目标版本为 1.3.4，DeepSeek thinking 工具链续接、原生 Memory 摘要预算、原生沙箱终止结算、会话目录增量恢复、宿主恢复路径竞态、工具结果缓存、持久命令清理以及退出/恢复生命周期修复已完成本地回归；最终证据见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)。1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。1.3.3 的实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
+当前工作区目标版本为 1.3.6。生图本地画布库、测试启动接续、有效图片尺寸偏差保存，以及逐次模型请求插件注入的前后位置/标识格式选项均已完成源码联动。最新最终串行 Vitest 于2026-11-23完成，203个测试文件结果（200通过、3跳过）、2,767项通过、15项跳过、0失败；类型检查、Lint、构建、资源预检、创作工作台20组和插件接口27项隔离Electron smoke均通过。正式1.3.6 NSIS/ZIP已按用户要求在本地生成并核验；尚未安装或验收升级/卸载。当前包元数据见第86节和[1.3.6验证记录](docs/VALIDATION_1.3.6.md)，第82至85节中未生成包的描述是打包前历史状态。1.3.4 的可靠性修复、创作工作面、ChatAgent 联网开关、工作站模板、技能版本去重及运行中引导继续保留；1.3.5 新增简约主题收紧、启动展示和可选桌面宠物，具体历史行为以源码与[1.3.5验证记录](docs/VALIDATION_1.3.5.md)为准。1.3.4 的最终证据仍见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)，不能把历史验证数字当作本轮新增功能的验收。1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。1.3.3 的实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
 
 1.3.0 包含内置 DOCX/PPTX/PDF、按 profile 配置子模型、原生 Responses 状态、图片工具、管道命令、分页读取/受控并发、父会话验证转交与 Token Saver 质量默认值；随后补充模型首次预填、K/M 数值输入、供应商连接编辑和 TencentDB 记忆库。最新工作区记忆设置及模型语义提取见第30节，取代历史离线规则摘录；官方提示词逐字对齐与真实请求核验见第31节。第二套“光轨”界面保留默认“简约”，按已确认预览重构为独立工作台，独立结构见第26节，最新材质打磨及主界面模型/供应商标签见第27节；第24节为首次接入历史。选择自动保存、重载或重启生效，共用全部业务功能。运行信息展开/收起、完整诊断与命令详情见第25节，并在独立结构中回归。各轮实际结果和未验证边界见 [1.3.0 验证记录](docs/VALIDATION_1.3.0.md)。主会话窗口15%的压缩输出预算及触顶恢复、TencentDB 本地记忆核心及项目二选一、工具参数流与 UTF-16 读写修复、缓存前缀优化与诊断、供应商缓存配置、同模型压缩复用、提问/修改冲突通知、Token Saver、执行链、项目记忆、自动重试及剪贴板图片附件见 [1.2.9 验证记录](docs/VALIDATION_1.2.9.md)；下方历史版本结果不能替代本轮验证。
 
@@ -32,6 +32,8 @@
 
 本地插件开发市场、原生清单/SDK/创建器、用户提供的 Work 技能流适配、SubAgent 无固定总时限和后台协作、小窗切换及持久置顶已进入源码，见第56节及[本地插件接口](docs/LOCAL_PLUGINS.md)。来源覆盖清单与运行时技能数量分别记录，不把兼容清单或源码资源存在当成第三方插件已验收。
 
+最新本地插件错误、逐次模型请求 Hook、更新轮询和网页请求预算修复见第76节及[1.3.5验证记录](docs/VALIDATION_1.3.5.md)。全量Vitest仍有7项Windows junction夹具 `EPERM`，不可写作全绿；定向测试、类型、Lint、构建、Electron插件smoke与资源预检分别记录。
+
 最新插件开发故障修复及 Work 技能全版本补齐见第57节：统一发现入口包含内置技能，主 Code/Work 宿主请求批准会话可使用只读插件校验，不再依赖沙箱外 SDK 或系统 Node；`WorkAgentSkill/` 全树实际为124个物理来源、104个不同源正文SHA、93个名称。第56节此前98份是只统计latest系列的历史结果，不是全树总数。来源逐项映射见[完整清单](apps/desktop/resources/prompts/skills/work-sources/inventory.md)，最终验证仍以[1.3.4验证记录](docs/VALIDATION_1.3.4.md)本轮追加部分为准。
 
 内置Skill/Plugin的手动引用、Work专属PPTMaster与ASD-STE100，以及参考T3 Code的下一轮队列初版见第58节；队列现已按用户最新要求升级为最多10条、正常完成后自动FIFO发送，见第62节，取代第58节的8条及手动继续行为。Code基础Skill仍为9个，Work为16个基础Skill加124个来源；两种模式各另有2个真实内置插件目录项。主界面Code/Work/Chat均支持队列，QuickChat和实际SubAgent不提供队列。最终检查以验证记录的最新追加结果为准。
@@ -43,7 +45,7 @@
 - 不擅自重建项目、迁移框架、移动模块、创建替代仓库或改变包管理器。
 - 不执行 `git reset --hard`、`git checkout --`、`git clean -fd` 等丢弃现有工作的命令；不把已有未跟踪源码当临时文件删除。
 - 未经明确请求不提交、推送、发布 GitHub Release、不执行云端 SQL、不生成或安装正式安装包。`--dir` 解包验证与正式 NSIS 安装包是两个不同操作。
-- 用户最新指定版本为 **1.3.4**；当前交付源码与实验版，未获明确要求时不生成或发布安装包。已生成的1.3.0/1.3.1/1.3.2/1.3.3安装包及发布SQL保留真实历史元数据，不代表包含当前源码。
+- 用户最新指定版本为 **1.3.6**；1.3.6 NSIS/ZIP 已于2026-11-23按用户要求在本地生成并核验，SHA-256和大小见第86节。尚未安装或验收升级/卸载，也未发布；没有公开ZIP直链，未生成发布SQL。后续仍须获得明确要求才进行安装或发布。
 - 保留用户已确定的水青色原子图标。不要替换成旧红色 M 或 Electron 默认图标。
 - 不将真实 API Key、OAuth Secret、Token、Cookie、个人数据库、日志、截图或会话内容加入代码、文档和测试夹具。历史对话中的测试 Key 不得再次使用。
 - 不通过关闭防护、加白名单、改系统 ACL、删除 DLL、修改官方二进制或跳过哈希校验来“修复”打包与隔离。
@@ -57,7 +59,7 @@
 | 产品名 / Agent 名 | Mingshen Harness / Mingshen |
 | 发布者 / 维护主体 | Ming / 新哲文院算法社 |
 | 平台 | Windows 10/11 x64 桌面 GUI；原生 MXC 需要兼容的较新 Windows 11，旧系统选择 Docker |
-| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.4 |
+| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.6 |
 | 协议修订号 | `apps/desktop/src/shared/release.ts` 中的 `2026-11-04.3`，与应用版本分别管理；新增备用审批/压缩供应商的数据发送说明，旧版用户重新同意 |
 | 分发 | 当前用户 x64 NSIS、首版不签名；1.2.6起确认后后台下载/校验ZIP并在会话结束后启动安装器，旧网页链接手动打开 |
 | 语言与外观 | 默认简体中文，支持 English；默认“简约”保留白色日间/近黑石墨夜间，第二风格“光轨”为冰白矿青/深墨青；风格重载或重启生效，日夜即时切换，原子图标保留 |
@@ -244,23 +246,23 @@ Set-Location -LiteralPath 'C:\Users\ASUS\Desktop\MingshenHarness'
 | `.\package-win.cmd` | 同上并创建 NSIS 安装包；复制最终发布文件回项目 |
 | `pnpm package:win` | pnpm 已可用时的正式安装包等效入口，同样使用仓库打包包装脚本 |
 
-版本 1.3.4 的预期输出（1.3.3 及更早历史版本发布材料保留）：
+版本 1.3.6 的预期输出（1.3.5 及更早历史版本发布材料保留）：
 
 ```text
-apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.exe
-apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip
-apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip.sha256
-apps\desktop\release-artifacts\MingshenHarness-1.3.4-x64.zip.json
+apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.exe
+apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip
+apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip.sha256
+apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip.json
 ```
 
 实际构建目录由脚本创建：
 
 ```text
-%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.4-<random>\
+%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.6-<random>\
   electron\                  临时原版运行时，结束后受限清理
   temp\                      构建子进程的 TEMP/TMP
   output\win-unpacked\      完整应用目录
-  output\MingshenHarness-1.3.4-x64.exe
+  output\MingshenHarness-1.3.6-x64.exe
 ```
 
 `--dir` 是可选的解包验证，不是生成安装包前必须单独执行的步骤。它会打印可运行 EXE 的绝对路径；正式打包会打印项目输出及 `Cached installer:`。如果安装包构建成功、只是复制回项目输出目录失败，使用控制台提示的缓存文件。ZIP、SHA256 及 JSON 各自复制失败时会显示 `Update artifact retained in build cache:`，需分别核对实际路径，不能仅凭退出0断定所有文件已复制回项目。构建失败时打印 `Build files retained for diagnostics:`；该目录不一定有成功安装包，先看构建退出码及目标文件，不要再次全盘清理重装。
@@ -1910,3 +1912,197 @@ Crow5报告仅为公开资料对比；没有安装对手产品、跑性能基准
 新增`package-native-dependencies.cjs`：对照锁文件SHA-512验证过的npm官方归档，固定校验7份预编译二进制SHA-256；源预检和afterPack共用验证，补查console-list绑定及JS入口。拒绝两套build/Release、Debug路径中的12种优先旧绑定；不删除用户依赖。通过electron-builder自身依赖锚点解析rebuild4.2.1，以同等prod/optional、sequential、Electron45.2.1与win32/x64选项，仅排除已校验node-pty。按照上游真实目录命名规则检查所有将被排除的实例，并在重编后重扫，目录集合变化即拒绝。任何失败不启动builder；成功后才传`npmRebuild=false`避免重复重编，保留正常生产依赖收集。不使用会关闭依赖收集的`beforeBuild`返回false方案。
 
 真实`package-win.cmd --dir`退出0，生成`%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.4-QbDHsf\output\win-unpacked\MingshenHarness.exe`，afterPack全部资源及生产依赖检查通过，EXE版本1.3.4。根脚本整套108项通过（含新增10项），0失败/跳过，48.04秒。`feature-asar-smoke.cjs --archive <实际app.asar>`在隔离Electron45.2.1中使用真实包内依赖，通过ConPTY输入/resize/退出及PID消失、sharp PNG/GIF解码、diff与gifenc；禁止回退宿主依赖。最初探测错误要求README仍在node_modules，但builder按既有配置将它保存在third-party-notices，夹具已分别核对实际布局；生产校验未放宽。此轮只改打包脚本、验证脚本和文档，不重跑全仓Vitest并冒称本轮2379项；源码版本保持1.3.4，未生成正式NSIS/ZIP、安装升级、提交或推送。最终检查见验证页新节。
+
+## 73. 2026-11-21 / 1.3.5 简约主题、启动展示与桌面宠物
+
+用户要求将当前版本升级为1.3.5，收紧默认“简约”主题，并加入可关闭的启动展示和可选桌面宠物。版本升级为1.3.5；schema、协议修订号、原子应用图标、用户数据路径和既有 Code/Work/Chat 能力保持不变；本节只记录源码入口与行为边界，完整命令结果以[1.3.5验证记录](docs/VALIDATION_1.3.5.md)为准。
+
+### 源码入口与行为
+
+- `apps/desktop/src/renderer/src/simple-workbench.css`：简约主题的局部布局和空任务区域收缩规则。该文件在现有主题样式之后加载，不能用全局规则覆盖光轨布局；没有计划或子任务时不保留大块空占位。
+- `apps/desktop/src/main/desktop/startup-presentation.ts`、`apps/desktop/src/shared/startup-presentation.ts`、`apps/desktop/src/renderer/src/StartupApp.tsx`：启动展示控制器、IPC 阶段协议和独立 Renderer。默认值为开启（只有设置值严格为`false`才关闭），设有从控制器启动起约8秒的兜底，但定时器不能硬抢占同步磁盘I/O；可信窗口可以跳过。准备、服务、窗口和进入工作区阶段由主进程发送，加载失败、关闭或超时只结束展示，不以展示失败阻塞主窗口启动。启动页使用现有原子标识的动画表现，系统减少动态效果时保留必要状态文字和焦点。
+- `apps/desktop/src/main/desktop/companion-controller.ts`、`apps/desktop/src/shared/desktop-companion.ts`、`apps/desktop/src/renderer/src/CompanionApp.tsx`：桌宠主进程状态机、共享偏好协议和透明独立窗口。默认关闭；开启后支持置顶、透明度、96–320px大小、拖动、工作区内位置钳制、位置恢复、问候、闲聊频率、闲置休息和通用任务提示。桌宠状态只映射开始、处理中、等待确认、完成、失败、休息等通用事件，不读取或展示模型回复、文件内容、路径、命令参数或审批细节。窗口关闭和应用退出会清理定时器与监听器，偏好仍保存在本地设置。
+- `apps/desktop/src/renderer/src/components/DesktopExperienceSettings.tsx`：设置 → 桌面体验入口。启动展示和桌宠偏好独立保存；桌宠保存失败会保留待重试修改，状态事件按服务端基线、在途补丁和排队补丁合并，迟到事件不能覆盖更新的本地编辑。
+- `apps/desktop/build/installer.nsh`、`apps/desktop/build/installer-header.bmp`、`apps/desktop/build/installer-sidebar.bmp` 及 `apps/desktop/build/installer-atom-mark.png`：Windows 安装器品牌资源和欢迎页动画脚本。资源预检与界面夹具不等于正式 NSIS 安装、升级、卸载或动画运行验收；正式包必须用本次源码重新执行`package-win.cmd`并读取产物元数据。
+- 后续桌宠动作素材、透明帧验收、右键菜单和播放器接线方案见[桌宠动画素材制作指南](docs/COMPANION_ANIMATION_ASSET_GUIDE_1.3.5.md)。在本节对应的早期阶段，右键菜单和动作播放器尚未接入；后续实现与验证见第74节及1.3.5验证记录。
+
+### 当前验证边界
+
+最终 Node/Web 类型检查和 Biome 494 文件通过；桌宠/启动定向 2 文件19项通过，根脚本整套119项通过（含安装器4项及UI-only编译夹具）。生产构建退出0，main163/renderer2319模块、3个独立preload/3个HTML，入口`index-C0yzxWSu.js`/`index-CJ5P6Gmd.css`；桌面资源专项与13,865项资源/生产依赖/1.3.5预检通过。最终真实Electron专项7组、17截图通过，0Renderer异常/console error；覆盖简约日夜/紧凑窗口、光轨切换、启动设置重启、桌宠透明像素、三档大小、PNG/SVG对齐、正常帧差和减少动态效果静帧、Enter轻拍及真实Pointer拖动。轨道裁切已修正；隐藏状态条不做可见几何断言，仍记录实际样式并严格检查可见元素。96px信息较密，不能把截图和DOM检查外推为完整DPI/辅助技术验收。
+
+较早完整串行Vitest183文件、2396项通过是阶段结果。最终源码完整串行回归退出1：176文件通过、7失败、3跳过；2389项通过、9失败、14跳过，627.24秒。失败7文件单独复跑仍121通过/9失败，312.45秒，涉及Windows junction/linked snapshot/真实PowerShell及EBUSY清理超时，不能宣称最终全量通过或无证据归因于负载。具体失败、阶段日志、本地截图路径和验证范围见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)。安装器UI-only EXE被Windows拒绝运行，正式欢迎页轮播、安装/升级/卸载没有运行验收；未生成正式NSIS/ZIP，未推送、发布或执行SQL。
+
+收尾补查中，最小Vitest junction探针、文件搜索junction、guarded static junction、guarded hard-link/reparse及真实PowerShell停止用例各自单独通过；但终端整文件复跑仍24通过/2超时，伴随EBUSY，根因未确定。这些补查不替代最终全量失败状态。对应测试进程已结束，未放宽安全断言或修改相关产品/真实测试；交付前再次类型检查和13,865项资源/生产依赖/1.3.5预检通过。
+
+本轮有一次未经要求的本地提交`e6f58016 fix: make companion preference saves retryable`（桌宠控制器与测试两个文件），未推送；接续不要reset/revert或继续提交。其余工作区修改保留。试用入口为`run-experimental.cmd`，正式打包由用户执行`package-win.cmd`，不得用既有安装包或第72节1.3.4的证据替代。
+
+### 桌宠视频素材指令补充
+
+用户随后要求自行按现有桌宠生成各种交互视频。本轮新增[36段桌宠图生视频完整指令集](docs/COMPANION_VIDEO_PROMPTS_1.3.5.md)，保留原序列帧指南并增加互链。视频路线统一母版、首尾锚点、24/30fps源视频、纯色/Alpha处理、36段独立动作、三批生成顺序及右键菜单对应建议；明确持续状态的进入/循环/退出、左右朝向不可镜像、坐姿与悬空配准及循环实际验收。此轮只整理素材指令与交接，不新增运行时代码，不声称视频导入、完整右键动作菜单或漫游已接入；版本仍为1.3.5，不重复执行应用测试或打包，第73节既有验证边界继续有效。
+
+## 74. 2026-11-21 / 1.3.5 桌宠视频动作、原生菜单与全屏启动
+
+用户已提供36段角色视频，本轮将它们接入桌宠动作系统，版本保持1.3.5。第73节及其素材指令补充描述此前阶段，不再用于判断本节动作和菜单是否存在；本轮实际资源、构建和桌面验收统一追加到[1.3.5验证记录](docs/VALIDATION_1.3.5.md)。原始`36个桌宠动画/1.mp4`至`36.mp4`须完整保留，不覆盖源视频，不自动生成正式安装包或提交源码。
+
+- `renderer/src/CompanionVideo.tsx`及`lib/companion-motion.ts`提供36动作映射与双视频槽播放；按任务状态、拖动、手动互动及休息切换进入、循环和退出片段。隐藏、停用动画和系统减少动态效果时释放媒体，加载超时或失败回退原角色静图。行走是动作预览，不代表自动桌面漫游；模型生成导致的身份、手部和姿态差异不因统一画布或去色自动修复。
+- `main/desktop/companion-menu.ts`构建原生右键菜单，提供匿名任务及会话跳转、主窗口、快捷ChatAgent、互动、状态预览、休息/唤醒、置顶、位置锁定、大小、不透明度、动画开关、设置、暂时隐藏和持久关闭。桌宠只接收通用任务状态，不展示正文、路径、命令参数或审批细节；手动休息不停止Agent，预览不改写真实任务结果。
+- 主进程和受限preload分别校验桌宠菜单、快捷Chat及动作IPC；快捷Chat仍沿用原有会话及权限边界。任务跳转不在Renderer接受导航前提前标记已读；桌面设置入口遵守既有未保存内容保护。设置保存失败的补丁和重试入口独立保留，显示/隐藏不能吞掉保存错误；输入中的休息分钟草稿不被任务事件覆盖。拖动设阈值并逐帧合并移动，外部锁定时清除捕获和拖动状态。
+- 启动窗口使用主屏完整bounds与置顶等级，保留原子标识。轨道从屏幕边缘汇聚，真实阶段及跳过支持中英文；主窗口就绪后在动画下方显示，退场透明渐隐。正常展示按4,680ms可见等待加320ms退场控制为约5秒；500ms加载宽限、8秒总生命周期保护及失败放行分别处理，用户可提前跳过。慢启动、加载失败和同步磁盘I/O不保证精确5秒；完整DPI/GPU/多屏与正式安装升级另行验收。
+- 动画显示后以`setImmediate`调度可选SQLite索引预读，仅在已同意协议、展示仍活跃且应用未退出时复用已有连接。两条固定的覆盖索引查询各`LIMIT 32`，只取常量，分别覆盖未归档顶层会话目录及Chat目录；不读取正文或凭据，不生成应用级缓存快照。临时将`busy_timeout`设为0并在`finally`恢复，失败不阻止启动。数据库打开及迁移仍在展示之前，索引页预热不等同完整首屏加载或性能提升证明；锁等待预算不构成对同步磁盘I/O的抢占时限。
+- 首次未同意时，三份协议的读取等待本次启动展示结束，且主窗口原生`isVisible() && !isMinimized()`确认后才放行；`show()`调用完成或后台`showInactive()`都不能单独释放计时。`startup-reveal-gate.ts`默认以最多80次、每次25ms的有界轮询确认窗口可见；同一代际并发请求合并，取消、重载或窗口替换使旧代际失效，新的有效请求可立即重启。主窗口先`showInactive()`再`show()`；Windows真实运行曾发现跳过早于主窗口ready时`show()`返回但`visible=false`，已改为等待可见性后再放行。`DesktopController.policy`在异步文件读取后、改变计时或手册状态前再次检查。保留主进程与界面各自至少5秒门槛，避免5秒启动动画抵扣阅读时间；退出因草稿落盘失败而取消时恢复尚未完成的主窗口显示。
+- `scripts/package-desktop-surfaces.cjs`检查三组HTML/preload及36个动作的字节、SHA和实际Renderer入口依赖图；源码存在或静态WebM签名不代表Alpha解码成功，必须结合真实Electron逐段解码检查。
+
+动作调度修复前阶段的完整串行Vitest退出0：186文件通过、3文件跳过，2438项通过、14项环境跳过，0失败，336.57秒；报告位于`.impeccable/review/v135-companion-full-vitest.json`。该结果不覆盖后续`greeting`到`idle`切换误清排队跳舞的修复。第73节此前全量超时失败仍为真实历史结果，不改写为通过；本轮也没有为通过测试放宽那些边界断言。素材验收、后续构建和真实桌面检查继续以验证记录的本节追加结果为准。
+
+36段最终WebM为720×720、24fps，合计31,863,747字节和4,404帧；第20/22段各145帧约6.042秒，其余各121帧约5.042秒。`scripts/prepare-companion-motions.cjs`通过显式指定的开发期FFmpeg/FFprobe执行有界流式解码、边界连通去红底及VP9 Alpha编码；不捆绑外部媒体运行时。`scripts/companion-video-key.cjs`固定去色算法，第21段先去底，再缩为512×512并放入720×720透明画布的x101/y208位置。清单`renderer/companion-assets/motions/manifest.json`逐条记录来源/输出SHA、大小、帧数、时长及采样；清单SHA为`98924497d6317c325fed0afb67fcb636d674333994a47669d80a3d49843d5f37`。透明样本中alpha=1仍会计入大于零的统计，不能用它推定可见角色面积。全部浅/深背景接触表已查看，部分手指/皮肤边缘有抠像损失及轻微红边，源视频角色、服饰和姿态差异保留；不保证无损抠像或无缝衔接。
+
+素材就位且动作调度修复前的阶段中，根脚本完整套件137项通过、0失败/跳过，25.99秒；Biome500文件通过。该阶段生产构建退出0，main164模块/2,072.86kB、renderer2358模块，三组HTML/preload及36段动作的入口可达性与SHA检查通过；13,865项资源、生产依赖和1.3.5版本预检通过。主入口为`index-DZcYCaeS.js`/`index-CJ5P6Gmd.css`，桌宠为`companion-nF_tdeLQ.js`/`companion-BQvzCU6b.css`，启动为`startup-DiQLLh_R.js`/`startup-s2DYVeUi.css`。这些是该阶段源码构建证据，不覆盖后续动作调度修复；真实Electron逐段播放、菜单和全屏展示的结果仍按验证页后续记录，不等于正式安装/升级验收。
+
+动作调度随后修复了问候结束时清空待播互动的问题：普通状态切换保留待播手动动作，拖动、休息、成功、失败及明确取消仍按规则中断；任务徽标立即反映真实状态，工作动画可能等待当前互动结束。动作调度修复后、启动可见性修复前的阶段全量为188文件通过、3跳过，2,453项通过、14项环境跳过，0失败、311.09秒；报告见`.impeccable/review/v135-five-second-final-vitest.json`及同前缀日志，不能取代后续最终回归。启动可见性修复后的最终完整串行Vitest为188文件通过、3跳过，2,460项通过、14项环境跳过，0失败、318.75秒，报告见`.impeccable/review/v135-startup-complete-final-vitest.json`及同前缀日志。最新根脚本套件137项通过、0失败/取消/跳过，30.25秒；Node/Web类型检查、Biome504文件、生产构建、桌面入口资源检查及13,865项/1.3.5打包资源预检通过。最终Electron专项为22组、88张截图、68组几何记录、36/36动作解码、0异常与0 console error，结果与范围见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)。首轮smoke清理遇到迟到本地SSE夹具请求，已调整夹具收尾等待请求结算，未改产品断言；保留中间失败及历史全量超时，不据最终单次通过推断原超时根因消除。生产构建和资源预检不替代正式NSIS安装、升级或卸载验收。
+
+## 75. 2026-11-22 / 1.3.5 桌宠任务面板、待机互动与 Chat 批量管理
+
+版本保持1.3.5。本轮在既有桌宠基础上增加真实工作会话列表、状态和本地耗时，支持折叠与可靠跳转；同一会话的多项运行合并，等待确认优先。标题默认显示，可在桌面体验设置或菜单关闭；成功保存后主进程先脱敏，桌宠IPC标题为`null`，面板与菜单使用匿名名称。标题本身可能敏感，关闭但保存失败时仍可能显示，设置页明确标注尚未生效。桌宠不接收正文、目录、命令参数或审批详情；跳转须由主界面实际接受，失败、未保存计划拒绝、页面重载、超时与并发会有回执，不能提前标记已读。
+
+- `companion-controller.ts`计算真实工作区内的窗口几何并通过`state.layout`传递有效角色尺寸与面板高度；小工作区的适配不改用户保存的96–320px大小。显式`enabled:true`在窗口创建或显示瞬时失败后可重试，修改其他设置不重新打开暂时隐藏的桌宠。
+- 待机趣味动作可设为关、低、普通、高，间隔分别约180–300、90–180、45–90秒；只在无活动任务且动态效果可用时触发。免打扰暂停自动问候、闲聊、趣味动作及自动休息，不停止Agent或阻断手动互动。喝水只是角色动画，不是独立健康提醒。手动轻拍、自动问候与随机挥手的来源分别处理。
+- `CompanionVideo.tsx`在自动动作被任务或免打扰中断时释放旧视频，不等新片完成解码；迟到的`play()`结果不得重新显示旧片。媒体故障回退静图，后续动作或重新打开时允许重试，不永久拉黑失败片段。
+- `ChatSidebar.tsx`复用既有会话批处理计划与后端保护，支持跨分组、按搜索结果多选归档、恢复及永久删除；归档/删除确认、运行任务保护、草稿落盘与失败逐项反馈保留。归档暂停关联定时任务，恢复不自动重启；批处理期间限制冲突导航和创建。
+- 本轮重新处理全部36段动作，补充闭合红色背景区域与特定片段地面残影的保守清理；原始36份MP4只读保留。最终清单、浅深背景检查、构建及Electron实际结果见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)新增节，不沿用第74节旧清单SHA或大小。
+
+调研范围与迁移取舍见[开发调研记录](docs/COMPANION_RESEARCH_1.3.5.md)。本轮没有新增后台麦克风、屏幕采集、自动批准、隐式额度读取、桌面自动漫游、桌宠插件包、每日统计或养成系统；主界面已有审查、检查点和引导不等于桌宠新增这些操作。保持既有权限、用户数据路径、版本、应用图标与启动展示行为。
+
+本轮第一阶段完整串行Vitest190文件、2506项通过，14项环境跳过；显式启用重试补丁后再次全量为189文件、2508项通过，1项失败、14项跳过（348.57秒）。失败为`guarded-workspace-io.test.ts`闲置回收用例收到守护进程退出，不是超时；单独用例、整文件13项和重复10次随后均通过，但缺少退出来源证据，未修改worker或放宽断言，不能声称该次全量通过或根因已经解决。最后构建、资源及桌面专项结果继续以验证页追加内容为准。
+
+后续补齐桌宠导航的同步预检、最终领取、过期回执及并发顺序保护，未保存的消息编辑、项目记忆、跨目录文件编辑、生图及工作站草稿遵守离开保护。快捷Chat主进程切换先锁定Renderer，等待在途输入处理及草稿保存，再提交目标快照/归档状态后解锁；未保存历史编辑、保存失败及revision冲突保留原会话供处理。Chat跨组批处理期间暂停冲突输入与新建/导航，逐项失败可重试。最新完整串行Vitest为**196文件通过、3文件跳过，2,621项通过、14项环境跳过，0失败，345.05秒**，最终JSON为仓库`.impeccable/review/v135-companion-followup-final-vitest.json`，SHA-256=`29fd1443a06a476755b97c763d28e5a3eb93055e3a93760c07c8fac26e186900`；同名旧log仍属于190文件/2506项阶段，不要混用。历史守护进程退出根因没有因此被证明消除。
+
+最终第33段仅对精确原片SHA启用下部ROI独立红幕碎点清理，保留完整8连通人物、低alpha桥、斜向连接及肤色/异色域。121帧编码前RGBA证明及编码后浅深背景预览见`.impeccable/review/companion-33-debris-fix-135/final/`；该证明不代表有损WebM像素不变。第33段为797,420字节、SHA=`5457bed21ae4a675cd819e5b9772cf4ef5968f14c21666a3cbe86fee3c30bbba`；其他35段输出及36原片SHA保留，36段最终合计32,760,385字节/4,404帧，manifest SHA=`11bf5abcb116e07a9920288e644469f72546e476d42bb1960ecfd7a0638bf557`。320px预览未见可辨鞋边碎点，放大仍可能有极低Alpha色晕、边缘残色或抠像损失；不宣称逐像素完美或无损。
+
+最终媒体冻结后根脚本整套157项通过、0失败/跳过，29.75秒；Node/Web类型检查、Biome519文件、生产构建、3组桌面入口/36动作SHA与引用图、13,865项资源/生产依赖/1.3.5预检通过。主入口`index-Ca2GyCVz.js`/`index-Bg4OjqQj.css`、桌宠`companion-DAKnv3x9.js`/`companion-Dddzz5AG.css`，启动入口保持`startup-DiQLLh_R.js`/`startup-s2DYVeUi.css`。最终真实Electron专项结果仍按[验证记录](docs/VALIDATION_1.3.5.md)本轮后续条目，不把构建或静态预检当作桌面/正式NSIS安装升级验收。
+
+工作会话与Chat批量管理的完整真实Electron专项随后退出0：32组、118截图、75组几何、36/36旧媒体解码各3时点，0异常、0 console error、0截图重试，结果为`.impeccable/review/v135-desktop-experience-1795338412733/result.json`。覆盖真实工作状态/耗时/标题脱敏、240×280小工作区、未保存消息/项目记忆拒绝跳转、延迟导航领取、真实待机与迟到播放保护、跨组批量归档/恢复/删除、第二页目录失败恢复、快捷Chat及主窗草稿revision冲突与删除后迟到保存。中间焦点前提、Electron夹具方法代理、错误选择器、合成有限动画采样及纯截图超时均如实记录在验证页；产品断言未放宽。纯截图可有一次受限重试，最终未触发；历史失败根因不因后续通过而确定。专项进程及临时profile已清理。该次产品回归发生在下述透明RGB扩散媒体更新之前，后续媒体须另行构建与解码，不混用资源证据。
+
+最终36段再次接入6px透明RGB扩散以减轻VP9色度采样的红边回流，只更改去色后完全透明像素的RGB。4,404帧及385,716,795个非零Alpha像素的逐帧比较证明扩散前后Alpha及非透明RGBA不变；证明止于第21段缩放和有损编码之前，不能推成最终成品无损。第12段小样轮廓红色优势指标下降约30%至38%，但整体合成MSE略升；浅深接触表已逐张查看，高倍仍可能有细微暖边。最终36段为47,530,948字节/4,404帧，较前一版增加14,770,563字节（约45.1%媒体体积），36原片SHA保持不变。manifest SHA=`541f509ccc77128f9ee8edc47c8e926c4533e0ddb61ca9f2782e7ba33c279f13`；生成脚本SHA=`cd5f1ae86d243df3feb994737f115256ee8a3cfc103e85a536d38b0d98e3e9c0`、key脚本SHA=`b426f0041eca0dc185e11d53e58f5c4d93926122b408a4f2f261b6943633ae24`。证明和接触表见`.impeccable/review/companion-edge-alpha-audit-135/final-36-report.json`及同目录`final-36/`；不再复用上一段32,760,385字节或旧清单作为当前媒体结果。
+
+这次媒体冻结后根脚本完整160项通过、0失败/跳过（23.56秒），生产构建、3组桌面入口/36媒体SHA引用图及13,865项资源/依赖/1.3.5预检均退出0；桌宠入口更新为`companion-DR-7HiLX.js`，主工作台和启动入口保持。新构建运行`desktop-experience-smoke.mjs --media-only`退出0：2组、38截图、2几何，36/36视频各3时点共108次采样，透明/可见非黑/帧变化断言全部通过，0异常、console error与截图重试。结果为`.impeccable/review/v135-desktop-experience-1795339351075/result.json`，SHA=`92e8222d0eedbeb1f46ecdaa2f39d961cce8f13b98be84755aff6b027ed12ddc`；当前smoke脚本SHA=`807090ad2bf80931d8e532e40450b54abb03e8fdcdf8660584a8b6c0740cf21f`。该媒体专项不冒充完整32组产品再测，应用逻辑仍使用上述2,621项及完整32组的对应证据。Node/Electron专项进程和临时profile均清理；相关文档入口经双语交叉核对，未生成正式安装包、安装、发布或推送，版本保持1.3.5。
+
+## 76. 2026-11-22 / 1.3.5 本地插件故障、逐请求 Hook 与网页预算修复
+
+版本保持1.3.5。用户导出的1.3.4日志包含12次 `SKILL_RESOURCE_NOT_FOUND`，根因是 Harness Plugin API 技能声明了缺失的按需参考资源；补齐清单、Hook、接口、Schema和开发流程参考，并让 `use_skill` 在资源缺失时列出可用相对路径。插件校验现在区分单插件目录和 `marketplace.json` 市场根，市场根逐项检查目录而不注册或安装。用户插件 `route-marker/hooks/hooks.json` 的日志显示 UTF-8/JSON 字符串未闭合，属于该插件源文件内容问题；本轮不改写用户工作区插件文件，校验会明确拒绝错误声明。
+
+- `web_search`、`web_fetch` 的单次总请求预算调整为90秒，搜索备用来源共用同一截止时间；将用户取消、90秒超时及网页服务/网络错误分开反馈。此预算不覆盖模型请求或其他工具。日志中历史“operation was aborted”还包含较早版本的多个阶段及非搜索请求，不能把所有旧记录归因为同一20秒超时；90秒也不能修复DNS、断网、远端拒绝或协议不兼容。
+- `BeforeModelRequest` 为prompt-only Hook，覆盖主 Code/Work 活跃运行的每次模型请求、后续轮次、网络重试及该运行触发的压缩/记忆请求。实际由活动父运行经 `runSubagent` 创建的子任务，初始读取父会话选择及派生时已激活插件，父运行之后按需激活的插件在该子任务下一次未发送请求前生效。状态位于独立prompt-only集合，不写入子任务运行激活/MCP集合；子任务不获得插件MCP、动作Hook、`UserPromptSubmit`、`Interrupt`、命令或 `local_plugin`。独立 `@` 子会话、Chat、安全审批、AutoDrive、草稿润色和运行后标题请求仍不在该Hook范围。
+- 验证与运行共用 `plugin-prompt-declaration.ts`。`BeforeModelRequest` 的 `type:"prompt"` 若缺少非空字符串 `text`，目录校验直接报错；运行时遇到同类已安装插件坏声明时fail-closed，不发送该模型请求。command/MCP嵌套的prompt形状不会被误解析或执行。Hook声明读取失败、超时或超出单项/合计预算均在发送前失败。
+- 市场更新每轮round-robin最多扫描10个市场、每个清单最多200条，按市场缓存候选并合并跨批结果；只替换本批市场结果，并复核市场身份、provenance、安装状态与版本以清理已移除、卸载、来源不符或已追平的候选。UI明确表示轮换下一批，不声称一次检查全部市场。无来源或来源不可追踪的直接导入插件不按同名自动认领；用户确认来源并点击更新后才安装，不会静默执行新版。
+- 技能参考、SDK、创建器说明、中英文本地插件手册/更新日志及README已同步上述行为与隔离边界；README另修正了旧的750ms跳过说明，改为3秒总预算、请求发送前fail-closed，并记录实际派生子任务只继承提示文本。90秒请求反馈及市场轮换说明也同步到双语使用手册。版本、数据模式、协议修订号均不变。
+
+本轮验证：7个受影响测试文件（插件校验/Hook/子Agent/市场轮询/网页/压缩）**161项通过、1项平台跳过**；聊天模型与压缩缓存的另4文件回归**214项通过**。根 Node 脚本套件**160项通过**；类型检查通过；Biome **522文件**通过；生产构建退出0（main 171模块/2,149.03kB，renderer 2,362模块）；桌面入口资源专项通过；`package-win.cmd --check`核对**13,871项资源**、生产依赖与1.3.5。隔离 Electron 插件 smoke 退出0：**27场景、89次模型请求、15张截图**；新增子Agent证据为父3次/子2次请求均含标记，子只读工具循环完成，未暴露插件MCP工具且Hook调用日志未变化。结果为`.impeccable/review/v133-local-plugins-1795351462798/result.json`，SHA-256=`e1490d265b8da7ed2a4376d69717b68eb2f85d6f2ae9a6bea21aa05e52b77a0f`；当前smoke脚本SHA-256=`9ff28a56c5fd6831fb3a1555a9424aae8c44599c79ff228087feab45d8691b79`。
+
+本轮 `pnpm test` 的完整回归退出1：**191文件通过、6文件失败、3文件跳过；2,664项通过、7项失败、16项跳过**。全部7项失败均在 Windows 创建 junction/symlink 的夹具准备阶段返回 `EPERM`，没有抵达被测安全断言，分布于LSP、`local_plugin`、Terminal、guarded workspace IO（2项）、LocalReview及WorkspaceSearch；不放宽链接安全测试，也不将本次全量写为通过。`pnpm lint`、类型、根脚本、构建和打包预检通过；未生成正式NSIS/ZIP、未安装、未发布、未执行SQL或提交/推送。完整记录见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)。
+
+最终交接复核：README文案同步后，插件验证/Hook/市场/SubAgent/网页/压缩与模型流共9个Vitest文件**289项通过、1项平台条件跳过**；`node scripts/package-desktop-surfaces.cjs`通过（3个preload、3个HTML、36段47,530,948字节动作素材）；`package-win.cmd --check`通过（13,871项资源、生产依赖及1.3.5）；`git diff --check`退出0，只有既有LF/CRLF转换提示。README只改文档，无需重建生产入口。打包预检没有生成正式安装包；此前7项junction/symlink夹具`EPERM`仍是完整Vitest的真实环境失败。
+
+## 78. 2026-11-22 / 1.3.5 生图配置复核与桌宠置顶补强
+
+版本继续保持1.3.5。Image Studio已有的质量、自动/预设/自定义尺寸、比例、透明背景、1–10张生成与素材原图下载流程复核保持：共享schema校验请求，主进程检查供应商返回的Base64图片并按素材ID使用系统保存对话框导出。只接受兼容模型实际支持的参数，供应商拒绝时返回错误；本轮未增加模型能力猜测或静默降级。
+
+- `companion-controller.ts`在Windows置顶且可见时每200ms重新应用topmost并调`moveTop()`，覆盖未产生`blur`等Electron窗口状态变化的可见遮挡。原生右键菜单打开期间暂不重提Z序；检测到隐藏/最小化后120ms尝试无焦点恢复。主动隐藏、关闭、禁用、取消置顶和退出仍取消相应恢复逻辑。
+- 中英文用户手册、更新日志、README和1.3.5验证记录已同步。真实Win32 `Win+D`、`Win+M`、其他进程/原生浮层、UAC、独占全屏及不同Windows会话尚未实测；此逻辑不是Shell豁免或对所有系统窗口的保证。
+
+本轮6个受影响Vitest文件**101项通过**；完整串行Vitest**198文件通过、3文件跳过，2,694项通过、15项跳过、0失败**。根Node脚本**160项通过**；`pnpm typecheck`、Biome **523文件**、`pnpm build`（main171模块/2,162.20kB，renderer2,362模块）、3组桌面入口/36段动作资源检查及`package-win.cmd --check`（13,871项资源、生产依赖和1.3.5）通过；`git diff --check`退出0，只有已有行尾提示。完整结果见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)本节。未生成正式NSIS/ZIP、未安装或发布、未提交/推送；没有改变数据schema、协议修订号、用户路径、图标或版本。
+
+## 77. 2026-11-22 / 1.3.5 生图工作台与桌宠置顶恢复
+
+版本保持1.3.5。生图工作台当前完整请求设置包括质量、自动/预设/自定义宽高、比例、透明背景与1–10张输出；设置通过共享schema验证并存入工作区，再经主进程发送到OpenAI Images兼容`/images/generations`端点。供应商/模型不协商各参数支持矩阵，故不支持项依赖供应商错误明确反馈。返回图片要求Base64，拒绝远程URL并校验格式、尺寸、请求数量及合计字节后才写入素材。每项素材的下载只通过素材ID进入IPC，主进程先复核素材再打开系统保存对话框，不接受Renderer任意目标路径。
+
+- `companion-controller.ts`的Windows置顶仍使用Electron `screen-saver`层级；失焦时重新申明置顶并调用`moveTop()`。置顶且未被用户主动隐藏时，以200ms单次递归定时器监视Electron报告的`isMinimized()/isVisible()`；检测到隐藏后等待300ms恢复，并优先通过`showInactive()`避免主动抢焦点。用户隐藏/关闭、禁用、取消置顶、替换窗口和退出都会清理恢复/看护定时器。该实现只在检测到的窗口状态上做应用级尽力恢复，不是对Win32 Shell的豁免，也未实机按`Win+D`验收；不能保证覆盖UAC安全桌面、独占全屏、不同Windows会话、系统级窗口或不暴露为hidden/minimized的cloaked状态。
+- 中英文README/用户手册/更新日志同步下载、生成选项、供应商兼容边界和桌宠置顶行为；文档不把模拟事件测试写成真实Shell验收。未改变数据schema、协议修订号、用户数据目录、图标或版本。
+
+本轮最终验证：Image Studio/Preload与桌宠控制器定向5个Vitest文件**89项通过**；完整串行Vitest `pnpm --filter @mingshen/desktop exec vitest run --maxWorkers=1 --no-file-parallelism`为**198文件通过、3文件跳过，2,692项通过、15项跳过、0失败**，282.50秒；新增桌宠看护测试通过，但模拟的是无Electron事件时的隐藏状态，不是实际`Win+D`。根Node脚本套件**160项通过、0失败/取消/跳过**；`pnpm typecheck`通过；Biome**523文件**通过；生产构建退出0（main171模块/2,161.74kB，renderer2,362模块）；`node scripts/package-desktop-surfaces.cjs`验证3组preload/HTML和36段动作通过；`package-win.cmd --check`验证**13,871项资源**、生产依赖及1.3.5通过；文档同步后`git diff --check`退出0，只有既有Windows行尾转换提示。未生成正式安装包、未安装、发布、提交或推送。
+
+## 79. 2026-11-23 / 1.3.5 NSIS 欢迎页插件解析修复
+
+用户正式打包已通过Electron准备、生产构建、13,871项源码资源/依赖预检及afterPack校验，但NSIS编译在自定义`installer.nsh`调用`${If} ${isUpdated}`时找不到`StdUtils::TestParameter`。本机`nsis-resources-3.4.1`缓存SHA-256与electron-builder内置校验值一致，Unicode插件目录内的`StdUtils.dll`存在；未清理或修改全局缓存、`node_modules`或上游工具。
+
+欢迎页改用NSIS内置`FileFunc.nsh`解析`/updated`参数，在自定义include被读取时不再提前触发StdUtils插件调用；更新安装仍跳过欢迎页。用户重试后发现冗余且未引用的页面离开回调触发NSIS `warning 6010`并被electron-builder视为错误；已删除该回调，清理仍在`nsDialogs::Show`返回后执行。真实makensis隔离夹具现启用`/WX`并验证无警告，`node --test scripts/installer-visuals.test.cjs` **4项通过**；`node scripts/installer-visuals.cjs`通过；`package-win.cmd --check`通过（**13,871项资源**、生产依赖与1.3.5）。完整正式打包尚未再次运行，未确认NSIS/ZIP生成成功；版本1.3.5不变。详情见[1.3.5验证记录](docs/VALIDATION_1.3.5.md)新节。
+
+## 80. 2026-11-23 / 1.3.5 NSIS 警告修复与正式包完成
+
+后续重试发现两项新的NSIS严格警告：`warning 6040`来自electron-builder默认加入26种语言，而欢迎页自定义字符串只定义英语/简体中文；`warning 6001`来自仅给测试追帧使用、正式安装器未启用的`TraceFile`变量。`electron-builder.yml`现在将`nsis.installerLanguages`限定为`en_US`和`zh_CN`，保留双语选择并与LCID 1033/2052匹配；删除无产品用途的TraceFile变量和条件代码。测试及打包预检会断言安装语言配置，真实NSIS fixture以`/WX`编译并检查没有警告。`warning 6010`冗余离开回调已在第79节记录移除。
+
+完整正式打包退出0：生产构建、13,871项资源/依赖预检、afterPack及NSIS安装器/卸载器生成通过；安装器保持未签名。实际发布目录`apps/desktop/release-artifacts/`包含1.3.5 x64 EXE、ZIP、ZIP SHA-256及JSON元数据。EXE大小379,004,650字节，文件及产品版本资源均为1.3.5，SHA-256=`e5bb860cb8358069d465f28fdc07b94720fe3150dca2ab12f34c8a21b938200`。ZIP大小378,071,417字节，SHA-256=`c7dec5c38ac1af95f737752bd44f82e0605b00fa0e8f736290665e971e9620e1`；`.sha256`文件和JSON中的SHA、大小、文件名、版本均与ZIP实测一致。
+
+`node --test scripts/installer-visuals.test.cjs` **4/4通过**（严格NSIS编译无警告）；`node scripts/installer-visuals.cjs`通过；`package-win.cmd --check`通过（13,871项资源及1.3.5）；正式打包最终退出0。没有安装或运行新EXE，也没有改变版本、schema、协议修订号或用户数据；未提交/发布。
+
+## 81. 2026-11-23 / 1.3.5 Release SQL
+
+维护者提供1.3.5 GitHub ZIP直链并要求补入完整文件大小和SHA-256。新增[发布脚本](supabase/publish-release-1.3.5.sql)，使用 `public.mingshen_app_releases`、0003 ZIP字段和 `on conflict (version)` 幂等upsert；本地实测 ZIP 为378,071,417字节，SHA-256=`c7dec5c38ac1af95f737752bd44f82e0605b00fa0e8f736290665e971e9620e1`，与 sidecar/JSON一致。脚本公告符合notes 1000字符限制，链接使用维护者提供的 `V1.3.5/MingshenHarness-1.3.5-x64.zip` 直链。更新[Supabase说明](supabase/README.md)与[1.3.5发布说明](docs/RELEASE_1.3.5.md)。远端ZIP未下载，本轮未上传、执行云端SQL、提交或推送；维护者须在已部署0003的Supabase SQL Editor手动执行。
+
+## 82. 2026-11-23 / 1.3.6 生图画布库版本与文档接续
+
+本节保留文档准备阶段的历史状态；源码实装和最终验证已由第83节及[1.3.6验证记录](docs/VALIDATION_1.3.6.md)接续，不再适用下文“未执行”的阶段判断。
+
+用户要求版本升级为1.3.6，并实现生图画布的新建、导入、重新打开、重命名、关闭及“我的画布”文件管理。本轮文档工作仅同步版本和交付边界，不改变1.3.5历史发布文案、验证数字、桌宠说明、正式包SHA-256、大小、GitHub直链或`publish-release-1.3.5.sql`。
+
+- 根`package.json`、桌面`package.json`和`apps/desktop/src/shared/release.ts`统一为1.3.6；`package-win.cmd`、`run-experimental.cmd`和本地插件SDK说明同步显示1.3.6。`electron-builder.yml`和打包脚本继续从桌面`package.json`动态读取版本。
+- README增加1.3.6生图画布库说明，并把当前Release、验证、预期EXE/ZIP和构建缓存路径指向1.3.6；1.3.5功能段落和桌面体验历史仍保留。
+- 双语更新日志增加1.3.6开发中条目；双语使用手册说明独立画布工程、关闭与删除语义、“我的画布”操作、导入素材/画布区别和本地数据边界。三份协议只更新当前适用软件版本，生效日期和协议修订号`2026-11-04.3`保持不变。
+- 新增[1.3.6发布草案](docs/RELEASE_1.3.6.md)、[1.3.6验证记录](docs/VALIDATION_1.3.6.md)和[生图画布库调研](docs/IMAGE_STUDIO_RESEARCH_1.3.6.md)。发布草案明确尚未生成正式包、ZIP元数据或发布SQL；验证记录把定向测试、类型、Lint、完整测试、构建、资源预检、Electron smoke及正式安装包全部标为未执行。
+- 画布库最终架构目标仍是独立本地JSON工程加共享不可变素材：关闭标签只移出打开列表，删除工程必须显式执行；复制画布生成新画布和图层ID但复用素材；保存、重命名、复制和删除串行化；Renderer只传合法画布ID。旧SQLite工作区应幂等迁移并保留原值备份。该目标不代表当前源码、IPC、preload、UI、迁移和测试已经完成。
+
+本轮只修改版本与文档，没有完成代码实现或应用验证。11个预检要求的文档版本头通过；`pnpm package:check`通过，核对13871项资源、生产依赖闭包和版本1.3.6。`pnpm typecheck`、`pnpm lint`、Vitest、生产构建、`package-win.cmd --check`入口复核、Electron smoke、正式NSIS/ZIP、安装/升级/卸载均未执行；资源预检不等于源码、构建或安装器验收。没有创建`publish-release-1.3.6.sql`，没有修改或执行1.3.5发布事实，也没有提交或推送。任何后续完成状态必须追加到[1.3.6验证记录](docs/VALIDATION_1.3.6.md)，不得复用1.3.5结果。
+
+## 83. 2026-11-23 / 1.3.6 本地画布实装、测试启动与尺寸警告
+
+版本保持1.3.6。本地画布库已接通主进程、IPC、preload、Renderer和迁移，工程保存在`%userData%/image-studio/canvases/<canvasId>.mingcanvas.json`，共享素材不重复复制。顶部和“我的画布”支持新建、导入、重命名、关闭、搜索、重开、复制、删除和定位；关闭不删除文件，删除工程不级联删除共享图片。旧SQLite工作区保留迁移备份，损坏工程显示错误；仍保存完整工作区，保留2 MiB、40张同时打开画布和200项素材上限，不宣称改成纯文件索引或无限容量。
+
+- 保存与文件操作统一串行，临时文件同步后同目录替换，跨文件/SQLite失败有补偿而非严格事务。删除素材检查关闭工程引用，素材并集超限拒绝而非丢图层。缺失工程用`CanvasProjectNotFoundError`区分，缺失素材不会当作新工程覆盖旧稿。
+- `CanvasRecoveryError`使内部部分写入回滚失败和数据库提交后补偿失败统一保留本轮新素材，提示可能需要人工恢复；回滚成功仍清理新素材。服务测试覆盖第二工程保存失败且第一工程回滚也失败的路径。
+- `ImageStudio`在关闭、删除、复制和重命名时设置`inert` / `aria-busy`，防止迟到编辑与保存把关闭标签重新打开。真实smoke通过挂起关闭IPC验证该状态后释放继续。
+- 用户截图停在协议页的根因是smoke的CDP选择了首个page，实际是约5秒后销毁的`startup.html`；现主进程只选`node`，Renderer只选`/renderer/index.html`，不再连接启动页。测试使用独立临时profile按正常UI勾选三项协议、等待阅读并完成手册，不给正常产品增加自动同意或绕过。
+- 有效图片返回尺寸与请求不同时，`warnings`携带逐张`size_mismatch`及请求/实际尺寸，图片按真实解码宽高保存并可加入画布；界面持久显示可关闭警告。真实2,880×2,880 PNG对应3,840×3,840请求已测试落盘。自动尺寸或相同尺寸不警告；Base64、完整解码、格式、数量、字节、透明格式和远程URL拒绝规则不变。
+
+业务源码冻结后完整串行Vitest退出0：**198文件通过、3文件跳过，2,710项通过、15项跳过、0失败**，335.01秒；JSON为`.impeccable/review/v136-vitest-final.json`。Image Studio/shared/队列/preload定向4文件50项通过，服务其中25项；根Node脚本18文件160项通过、0失败/跳过。类型检查、Biome523文件、生产构建、3个preload/3个HTML/36段47,530,948字节动作专项、13,871项资源/生产依赖/1.3.6预检及`package-win.cmd --check`均退出0。
+
+隔离真实Electron smoke退出0：**20组场景、55张截图、466组几何、6次本地合成供应商请求，0运行异常、0服务夹具错误**；结果`.impeccable/review/v136-creative-image-1795417479606/result.json`。覆盖首次协议接续、780模板与交接、润色/反推/生成/尺寸警告、指针编辑、PNG/GIF解码、工程导入导出、画布生命周期及两种风格/语言/日夜/1440/800/680布局。截图是脚本产出，不宣称逐张人工查看。中间隐藏设置栏和素材排序引起的夹具失败及其修正如实记录到验证页；最终完整流程重新通过。
+
+文档同步README、双语手册/日志、Release草案和验证记录；1.3.5历史包、SQL、SHA和大小不改。本地同用户链接替换TOCTOU、删除后孤立素材及异常元数据规范化仍有边界，不宣称全部消除。未使用正常用户profile或付费供应商，未验证真实磁盘满/断电/杀毒竞争，未生成或安装1.3.6正式NSIS/ZIP，未执行发布SQL、Git提交或推送。详细命令、构建入口和限制见[1.3.6验证记录](docs/VALIDATION_1.3.6.md)。
+
+## 84. 2026-11-23 / 1.3.6 BeforeModelRequest 可配置前后注入
+
+版本保持1.3.6。每个本地插件 `BeforeModelRequest` 的 `type: "prompt"` 声明现在可独立设置 `position: "before" | "after"` 与 `format: "context" | "plain"`；省略时兼容旧行为 `before + context`。`plain` 不附加插件名、ID、来源或 `<mingshen_plugin_context>` 包装；`after + plain` 可把 `123abc` 直接放在本轮 `xxxx` 请求原文之后。这里的前后位置指发往模型的当前请求，不是模型响应。`context` 仍带低优先级、不可信的插件上下文标签，`plain` 是普通用户优先级文本；两者均不提高权限，也不保证模型遵从。
+
+- 每次活动主 Code/Work 运行模型请求重新收集声明，包含重试、工具循环、运行关联的压缩/记忆请求，以及活动父运行经 `runSubagent` 派生子任务的首个和后续请求。注入只存在于请求载荷，不写回对话历史或下一轮；按需激活从下一次未发送的请求开始。
+- 四种组合保持相互独立。普通用户轮次中按声明位置装饰本轮输入；在 Anthropic/Gemini 等工具结果轮次中，按协议把用户文本放在完整工具结果内容之后，不把它插到 tool call / tool result 配对之间，也不拆分工具结果和随附附件。`after` 的注入不会伪装为新的用户响应或改变已发送请求。
+- 中英文 README、用户指南、更新日志、Release 草案、本地插件接口说明、SDK 与插件创建技能均已同步字段、示例、默认值、预算/失败语义和信任边界。普通插件作者可在单条 `type: "prompt"` 上组合两个字段，不需专用运行时接口或工具调用。
+
+验证结果：最新串行 Vitest JSON `.impeccable/review/v136-hook-vitest-final-2.json` 包含203个测试文件结果，**2,765项通过、15项跳过、0失败**。定向 Hook/Provider/压缩回归共10个文件、361项通过；另有31项请求组合专测通过。根 Node 脚本套件160项通过；`pnpm typecheck`、Biome 525文件、`pnpm build`、`pnpm package:check` 和 `package-win.cmd --check` 均通过，后者核对13,871项资源、生产依赖和1.3.6。
+
+隔离 Electron 插件 smoke `.impeccable/review/v133-local-plugins-1795422054492/result.json` 退出0：27项场景断言、91次本地合成模型请求、15张截图。四种组合在一次网络失败重试及父/子 Agent 请求中均被验证；运行证据为父3次、子2次请求包含注入，子任务只读工具循环完成，插件 MCP 工具未暴露给子任务且 MCP 动作日志未变化。测试使用临时 profile、本地合成模型和临时插件，不使用真实 Key、付费服务、用户数据库或正式安装包。截图为自动化产物，不声称逐张人工审阅。
+
+`git diff --check` 在文档更新后通过。测试只证明请求负载和集成路径，不证明真实供应商对所有网关的兼容，也不保证模型会服从普通文本。ChatAgent、独立 `@` 子会话、审批安全审查、独立 AutoDrive/草稿润色和任务完成后的标题请求仍不触发此 Hook；插件提示文本仍受既有 3 秒/单条4,000/聚合12,000字符限制，Hook读取失败、超时或超限时当前请求 fail-closed。没有生成或安装1.3.6正式NSIS/ZIP，未执行发布 SQL、提交或推送。
+
+## 85. 2026-11-23 / 1.3.6 Hook 顺序与可复用归属选项收口
+
+在上一节的四种组合基础上，修正了连续运行中引导消息下的跨协议顺序：Responses、Chat Completions、Anthropic Messages 和 Gemini GenerateContent 都从原始消息序列定位尾部连续 user 消息的起点，将 `before/plain` 放在第一条引导及其附件之前；`after` 仍附加在最后一条引导之后。工具调用、工具结果、工具图片及其 ID/配对不被拆开或重排。没有尾部 user 消息时继续使用协议合法的普通 user 尾消息回退路径。
+
+`format: "plain"` 作为不带插件归属的可复用选项，与 `position: "before" | "after"` 独立组合；不会发送插件 ID、标题、来源或 `<mingshen_plugin_context>` 包装。`format: "context"` 继续使用低优先级、不可信上下文包装。实际纯文本拼接为单个换行（`xxxx\n123abc`），README、双语手册、Local Plugins、SDK、Harness Plugin API 和 Plugin Creator 文档已统一该示例。
+
+本轮新增连续引导/工具图片回归后，Hook/Provider/压缩相邻定向测试 **287 项通过**，`pnpm --filter @mingshen/desktop typecheck`、Biome 相关文件、`pnpm package:check`（13,871 项资源、生产依赖和1.3.6）以及 `node --check scripts/local-plugin-smoke.mjs` 均通过。完整历史测试数字仍以第84节冻结记录为基线；尚未生成或安装正式1.3.6 NSIS/ZIP。
+
+最终回归随后完成：Vitest 203 个测试文件结果，200 通过、3 跳过；**2,767 项通过、15 项跳过、0 失败**，358.94 秒，退出 0。同次 `package:check` 退出 0，核对 13,871 项资源和版本 1.3.6。本节只追加本次结果，不覆盖第84节及上文的 2,765 历史基线；新的持久 JSON 路径尚待确认。
+
+## 86. 2026-11-23 / 1.3.6 正式 Windows 包生成
+
+用户要求生成 1.3.6 安装包后，在仓库根目录运行 `.\package-win.cmd`，退出码为0。Windows x64 Electron运行时准备、生产构建、13,871项资源与生产依赖预检、afterPack校验、NSIS安装器及更新ZIP均成功；安装器按项目配置未签名。验证记录及发布草案已更新，原有1.3.6源码验证结果不变。
+
+`apps/desktop/release-artifacts/` 的实际产物：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.6-x64.exe` | 379,034,508 | `0f767921cde4cbb826eaa74b7a7a8a679e7051947570be8873db72e096317906` |
+| `MingshenHarness-1.3.6-x64.zip` | 378,102,275 | `b989ad93ca44a5438d2d524064d7e0b78981fe9a6fd60ba0c7247eba98163a7b` |
+
+另有393,070字节的EXE blockmap、96字节ZIP SHA sidecar及216字节JSON元数据。独立检查确认EXE的FileVersion/ProductVersion均为1.3.6；ZIP仅含根条目`MingshenHarness-1.3.6-x64.exe`，条目大小和SHA-256与发布目录中的EXE一致，ZIP sidecar和JSON中的字节数/SHA与ZIP实测一致。
+
+未运行安装器，安装、升级、卸载未验收；未提供公开ZIP直链，故未生成Release SQL、未上传或发布、未执行云SQL、未提交或推送。后续发版时须使用维护者提供的真实直链，并以实际部署schema为准生成发布SQL。

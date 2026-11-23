@@ -61,6 +61,80 @@
   margin-top: 2px;
 }
 
+.local-plugin-marketplace__updates {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.local-plugin-marketplace__updates.has-updates {
+  border-color: color-mix(in srgb, var(--brand) 44%, var(--line));
+}
+
+.local-plugin-marketplace__updates-heading,
+.local-plugin-marketplace__updates-heading > span,
+.local-plugin-marketplace__updates li,
+.local-plugin-marketplace__updates li > span {
+  display: flex;
+  align-items: center;
+}
+
+.local-plugin-marketplace__updates-heading,
+.local-plugin-marketplace__updates li {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.local-plugin-marketplace__updates-heading > span {
+  gap: 7px;
+}
+
+.local-plugin-marketplace__updates ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.local-plugin-marketplace__updates li {
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.local-plugin-marketplace__updates li > span {
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.local-plugin-marketplace__updates li strong {
+  color: var(--text);
+}
+
+.local-plugin-marketplace__updates li small,
+.local-plugin-marketplace__updates details p {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.local-plugin-marketplace__updates details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.local-plugin-marketplace__updates details p {
+  margin: 6px 0 0;
+}
+
 .local-plugin-marketplace__form,
 .local-plugin-marketplace__validator {
   width: 100%;
@@ -597,6 +671,45 @@
   overflow: hidden;
   min-width: 0;
   max-width: 100%;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-plugin-marketplace__directory-plugin {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.local-plugin-marketplace__directory-plugin.has-errors {
+  color: var(--danger);
+}
+
+.local-plugin-marketplace__directory-plugin > div:first-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.local-plugin-marketplace__directory-plugin strong {
+  font-size: 11px;
+}
+
+.local-plugin-marketplace__directory-plugin span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.local-plugin-marketplace__directory-plugin code {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
   color: var(--faint);
   font-size: 10px;
   text-overflow: ellipsis;

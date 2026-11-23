@@ -54,6 +54,7 @@ function fixture() {
     querySelector: vi.fn(() => (state.dirty ? {} : null)),
   });
   const flushAll = vi.spyOn(composerDrafts, "flushAll").mockResolvedValue();
+  const flushIfPresent = vi.spyOn(composerDrafts, "flushIfPresent").mockResolvedValue();
   const hasPending = vi.spyOn(composerDrafts, "hasPending").mockReturnValue(false);
   const lifecycleCleanup = registerComposerDraftLifecycle();
   let disposed = false;
@@ -68,9 +69,11 @@ function fixture() {
     reload,
     state,
     flushAll,
+    flushIfPresent,
     hasPending,
     unsubscribeChanges,
-    flush: (purpose: ComposerDraftFlushPurpose) => flushListener("request-id", purpose),
+    flush: (purpose: ComposerDraftFlushPurpose, sessionId?: string) =>
+      flushListener("request-id", purpose, sessionId),
     changeDraft: (sessionId: string, revision: string | null) =>
       changeListener({ sessionId, revision }),
     setDraft: (next: ComposerDraft | null) => {
@@ -92,6 +95,44 @@ afterEach(() => {
 });
 
 describe("composer lifecycle during interface reload", () => {
+  it("acknowledges a targeted save only after that session has been flushed", async () => {
+    const f = fixture();
+    const saving = deferred();
+    f.flushIfPresent.mockReturnValueOnce(saving.promise);
+    f.flush("save", "target-chat");
+    expect(f.flushIfPresent).toHaveBeenCalledWith("target-chat");
+    expect(f.flushAll).not.toHaveBeenCalled();
+    expect(f.api.acknowledgeComposerDraftFlush).not.toHaveBeenCalled();
+    saving.resolve();
+    await vi.waitFor(() =>
+      expect(f.api.acknowledgeComposerDraftFlush).toHaveBeenCalledWith("request-id"),
+    );
+  });
+
+  it("reports a targeted conflict without flushing unrelated sessions", async () => {
+    const f = fixture();
+    f.flushIfPresent.mockRejectedValueOnce(new Error("draft revision conflict"));
+    f.flush("save", "target-chat");
+    await vi.waitFor(() =>
+      expect(f.api.acknowledgeComposerDraftFlush).toHaveBeenCalledWith(
+        "request-id",
+        "draft revision conflict",
+      ),
+    );
+    expect(f.flushIfPresent).toHaveBeenCalledWith("target-chat");
+    expect(f.flushAll).not.toHaveBeenCalled();
+  });
+
+  it("continues flushing all sessions for a legacy request without a target", async () => {
+    const f = fixture();
+    f.flush("shutdown");
+    await vi.waitFor(() =>
+      expect(f.api.acknowledgeComposerDraftFlush).toHaveBeenCalledWith("request-id"),
+    );
+    expect(f.flushAll).toHaveBeenCalledOnce();
+    expect(f.flushIfPresent).not.toHaveBeenCalled();
+  });
+
   it("refreshes a loaded clean draft from change notifications and unsubscribes on cleanup", async () => {
     const f = fixture();
     const sessionId = "draft-change-session";

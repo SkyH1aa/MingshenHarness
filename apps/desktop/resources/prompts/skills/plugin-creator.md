@@ -62,6 +62,27 @@ Skills, commands, MCP tools, and hooks to user intents. Do not leave a generic
 For a new plugin start at `0.1.0`. On update, increment semantic `version`, preserve
 identity, and retain unrelated marketplace entries.
 
+Omitting manifest `activation` defaults to `on-demand`. Enabled on-demand plugins are
+discoverable and may be selected by the primary Code/Work Agent with `use_plugin` for
+the current run. Use `activation: "required"` only when a user must explicitly add the
+plugin to the session first. Activation is temporary and never changes installation,
+enabled state, or persistent session selection.
+
+If the plugin needs a marker on child-model requests, use only a declarative
+`BeforeModelRequest` `type:"prompt"` hook. Set `position:"after"` and `format:"plain"`
+when the declared text must appear at the end of each request without
+`<mingshen_plugin_context>`, a `Plugin N` header or attribution labels; omitted fields
+retain the existing before/context behavior. Plain text is ordinary user-priority
+request content, not a system-instruction upgrade. Actual children derived through an active
+parent run's `runSubagent` path inherit the parent's selected/activated context from
+their initial request; later parent activation is consulted before later unsent child
+requests. Children do not gain plugin activation, `UserPromptSubmit`, `Interrupt`,
+plugin commands, MCP, action hooks or `local_plugin`. An independent child conversation
+opened directly with `@` and no active parent-run mapping does not inherit it. ChatAgent,
+approval-safety reviews, independent AutoDrive/draft-polishing and post-run-title jobs
+remain outside the hook scope. Load `references/hooks.md` from `builtin:harness-plugin-api`
+for the full failure and budget contract.
+
 ## Validate before distribution
 
 Call the actual `local_plugin` tool on the workspace source:
@@ -144,9 +165,12 @@ Give the actual absolute market root and these real UI steps:
 5. Choose **安装** on the validated plugin row.
 6. Use the row switch to enable or disable the installed plugin. Removing the market
    source later does not uninstall the plugin.
-7. Start or open a CodeAgent/WorkAgent conversation and reference the plugin from the
-   composer **+** menu or `/plugins`. Installation and enablement alone do not activate
-   the plugin's hooks.
+7. Start or open a CodeAgent/WorkAgent conversation. An enabled `on-demand` plugin can
+   be discovered with `discover_capabilities` and activated for this run with
+   `use_plugin`; the user may also reference it from the composer **+** menu or
+   `/plugins`. A plugin with `activation: "required"`, or one whose `UserPromptSubmit`
+   hook must run on the first message, must be referenced before that message is sent.
+   `use_plugin` does not retroactively run `UserPromptSubmit`.
 8. Run the concrete acceptance prompt and report actual approval/execution evidence.
    Action hooks require host execution, Full Access and a trusted project; Request
    Approval, Docker, ChatAgent, actual SubAgents and read-only profiles do not execute
@@ -188,6 +212,12 @@ markets automatically. On a validation or installation error, preserve the sourc
 inspect the actual message, fix the source/catalog mismatch, and repeat authoritative
 validation. If update reports incomplete MCP synchronization, use
 **重试 MCP 同步** on the installed plugin row to retry that import.
+
+Read-only checks rotate through at most 10 registered markets per check and 200 entries
+per market. Only strictly newer semantic versions with a rechecked matching source can
+offer an update. Missing or untraceable installed-source records are not automatically
+matched by name; ask the user to confirm the original source instead of adopting an
+unrelated entry. Checks never install or execute a version.
 
 ## Delivery
 

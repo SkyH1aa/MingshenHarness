@@ -376,6 +376,124 @@ describe("ExtensionService", () => {
     ).rejects.toThrow("CHAT_TOOL_DENIED");
   });
 
+  it("allows on-demand plugin selection per run but keeps required plugins behind explicit session reference", async () => {
+    const workspace = await makeWorkspace();
+    const optionalRoot = join(workspace.root, "optional-plugin");
+    const requiredRoot = join(workspace.root, "required-plugin");
+    for (const root of [optionalRoot, requiredRoot]) {
+      await mkdir(join(root, ".mingshen-plugin"), { recursive: true });
+      await mkdir(join(root, "skills", "plugin-skill"), { recursive: true });
+      await writeFile(
+        join(root, "skills", "plugin-skill", "SKILL.md"),
+        "---\nname: plugin-skill\ndescription: Plugin skill summary.\n---\nPrivate skill body.",
+        "utf8",
+      );
+    }
+    await writeFile(
+      join(optionalRoot, ".mingshen-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "optional-plugin",
+        version: "1.0.0",
+        description: "Select only when useful.",
+        mcpServers: { "optional-server": { url: "https://example.invalid/mcp" } },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(requiredRoot, ".mingshen-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "required-plugin",
+        version: "1.0.0",
+        description: "Always-on session context.",
+        activation: "required",
+        mcpServers: { "required-server": { url: "https://example.invalid/mcp" } },
+      }),
+      "utf8",
+    );
+    const optional = await workspace.service.importDirectory(optionalRoot);
+    const required = await workspace.service.importDirectory(requiredRoot);
+    const session = workspace.repository.insertSession({
+      title: "Plugin activation",
+      agentMode: "code",
+      providerId: "provider",
+      modelId: "model",
+      agentProfileId: "primary",
+      workspacePath: rootPath(workspace.root),
+      systemPrompt: "",
+      reasoningLevel: null,
+      permissionMode: "request_approval",
+      executionMode: "host",
+      patchOnly: false,
+    });
+    const optionalExtension = optional.imported[0];
+    const requiredExtension = required.imported[0];
+    expect(optionalExtension?.type).toBe("plugin");
+    expect(requiredExtension?.type).toBe("plugin");
+    if (!optionalExtension || !requiredExtension) throw new Error("plugin fixture import failed");
+
+    const discovered = await workspace.service.discoverCapabilities(session.id, {
+      query: "plugin",
+      kind: "plugin",
+      offset: 0,
+      limit: 20,
+    });
+    expect(discovered).toContain('"activation_policy": "on-demand"');
+    expect(discovered).toContain('"activation_policy": "required"');
+    expect(discovered).toContain('"selectable_by_agent": false');
+
+    const optionalContext = await workspace.service.getPluginUseContext(
+      session.id,
+      optionalExtension.id,
+    );
+    expect(optionalContext).toMatchObject({
+      id: optionalExtension.id,
+      activationPolicy: "on-demand",
+      sessionSelected: false,
+    });
+    expect(optionalContext.skills[0]).toMatchObject({
+      id: `${optionalExtension.id}/skills/plugin-skill/SKILL.md`,
+      name: "plugin-skill",
+    });
+    expect(workspace.repository.listSessionExtensionIds(session.id)).toEqual([]);
+    const optionalServerId = `plugin-${optionalExtension.id.slice(0, 8)}-optional_server`;
+    const requiredServerId = `plugin-${requiredExtension.id.slice(0, 8)}-required_server`;
+    expect(
+      workspace.service.getAvailablePluginMcpServerIds(session.id, [
+        optionalExtension.id,
+        requiredExtension.id,
+      ]),
+    ).toEqual(new Set([optionalServerId]));
+    expect(workspace.service.getPluginMcpServerOwnerExtensionId(optionalServerId)).toBe(
+      optionalExtension.id,
+    );
+    expect(workspace.service.getPluginMcpServerOwnerExtensionId(requiredServerId)).toBe(
+      requiredExtension.id,
+    );
+    await expect(
+      workspace.service.getPluginUseContext(session.id, requiredExtension.id),
+    ).rejects.toThrow("PLUGIN_REQUIRES_EXPLICIT_REFERENCE");
+    expect(
+      await workspace.service.getEnabledPluginExtensionIdForSkill(
+        session.id,
+        `${requiredExtension.id}/skills/plugin-skill/SKILL.md`,
+      ),
+    ).toBeNull();
+
+    workspace.repository.setSessionExtension(session.id, requiredExtension.id, true);
+    expect(
+      workspace.service.getAvailablePluginMcpServerIds(session.id, [optionalExtension.id]),
+    ).toEqual(new Set([optionalServerId, requiredServerId]));
+    await expect(
+      workspace.service.getPluginUseContext(session.id, requiredExtension.id),
+    ).resolves.toMatchObject({ activationPolicy: "required", sessionSelected: true });
+    expect(
+      await workspace.service.getEnabledPluginExtensionIdForSkill(
+        session.id,
+        `${requiredExtension.id}/skills/plugin-skill/SKILL.md`,
+      ),
+    ).toBe(requiredExtension.id);
+  });
+
   it("reads Codex plugin manifests and records MCP and hook declarations", async () => {
     const workspace = await makeWorkspace();
     const source = join(workspace.root, "demo-plugin");
@@ -483,7 +601,7 @@ describe("ExtensionService", () => {
     expect(workspace.service.list()).toEqual([]);
   });
 
-  it("warns that non-prompt UserPromptSubmit and Interrupt actions are skipped", async () => {
+  it("warns that non-prompt prompt-event and Interrupt actions are skipped", async () => {
     const workspace = await makeWorkspace();
     const source = join(workspace.root, "declarative-hook-plugin");
     await mkdir(join(source, ".mingshen-plugin"), { recursive: true });
@@ -497,6 +615,11 @@ describe("ExtensionService", () => {
           UserPromptSubmit: [
             { hooks: [{ type: "prompt", text: "allowed" }] },
             { hooks: [{ type: "command", command: "Write-Output skipped" }] },
+          ],
+          BeforeModelRequest: [
+            { hooks: [{ type: "prompt", text: "per-request context" }] },
+            { hooks: [{ type: "command", command: "Write-Output skipped" }] },
+            { hooks: [{ type: "mcp_tool", server: "demo", tool: "notify", input: {} }] },
           ],
           Interrupt: [
             { hooks: [{ type: "command", command: "Write-Output skipped" }] },
@@ -520,6 +643,11 @@ describe("ExtensionService", () => {
         }),
         expect.objectContaining({
           code: "hook-action-will-be-skipped",
+          path: "hooks.BeforeModelRequest",
+          message: expect.stringMatching(/type:"command".*type:"mcp_tool"/u),
+        }),
+        expect.objectContaining({
+          code: "hook-action-will-be-skipped",
           path: "hooks.Interrupt",
           message: expect.stringMatching(
             /type:"command".*type:"mcp".*type:"mcp_tool".*不请求批准/u,
@@ -527,6 +655,46 @@ describe("ExtensionService", () => {
         }),
       ]),
     );
+  });
+
+  it.each([
+    { prompt: "legacy prompt field" },
+    { text: 123 },
+    { text: " \n \t " },
+    { text: "invalid position", position: "middle" },
+    { text: "invalid position", position: null },
+    { text: "invalid format", format: "system" },
+    { text: "invalid format", format: "" },
+  ])("rejects malformed BeforeModelRequest prompt declarations: %o", async (prompt) => {
+    const workspace = await makeWorkspace();
+    const source = join(workspace.root, "invalid-before-model-prompt");
+    await mkdir(join(source, ".mingshen-plugin"), { recursive: true });
+    await writeFile(
+      join(source, ".mingshen-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "invalid-before-model-prompt",
+        version: "0.1.0",
+        description: "Invalid per-model prompt fixture",
+        hooks: {
+          BeforeModelRequest: [{ hooks: [{ type: "prompt", ...prompt }] }],
+        },
+      }),
+      "utf8",
+    );
+
+    const validation = await workspace.service.inspectPluginDirectory(source);
+
+    expect(validation.ok).toBe(false);
+    expect(validation.errors).toContainEqual(
+      expect.objectContaining({
+        code: "before-model-request-prompt-invalid",
+        path: expect.stringContaining("hooks.BeforeModelRequest"),
+      }),
+    );
+    await expect(workspace.service.importDirectory(source)).rejects.toThrow(
+      "before-model-request-prompt-invalid",
+    );
+    expect(workspace.service.list()).toEqual([]);
   });
 });
 

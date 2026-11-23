@@ -1,5 +1,6 @@
 import { LoaderCircle, Maximize2, Pin, PinOff, SquarePen, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type {
   ActivityEvent,
   ChatAttachmentInput,
@@ -15,7 +16,11 @@ import { ChatView } from "./components/ChatView";
 import { setLocale, tr, useLocale } from "./i18n/index";
 import { runtimeText } from "./i18n/runtime";
 import type { LiveRun } from "./lib/chat-types";
-import { composerDrafts } from "./lib/use-composer-draft";
+import {
+  QuickChatTransitionWork,
+  quickChatTransitionReady,
+} from "./lib/quick-chat-transition-work";
+import { composerDrafts, useComposerDraft } from "./lib/use-composer-draft";
 
 function errorText(cause: unknown): string {
   return runtimeText(cause instanceof Error ? cause.message : String(cause));
@@ -58,6 +63,98 @@ function focusComposer(): void {
   requestAnimationFrame(focus);
 }
 
+function ArchivedDraft({
+  sessionId,
+  interactionLocked,
+  onModePreparationChange,
+}: {
+  sessionId: string;
+  interactionLocked: boolean;
+  onModePreparationChange: (sessionId: string, preparing: boolean) => void;
+}) {
+  const draft = useComposerDraft(sessionId);
+  const recoveryRef = useRef(false);
+  const [recovering, setRecovering] = useState(false);
+  const recover = async (resolution?: "overwrite" | "reload") => {
+    if (interactionLocked || recoveryRef.current) return;
+    recoveryRef.current = true;
+    setRecovering(true);
+    onModePreparationChange(sessionId, true);
+    try {
+      if (resolution) await composerDrafts.resolveConflict(sessionId, resolution);
+      else await composerDrafts.flush(sessionId);
+    } catch {
+      // The draft store retains the recovery error for the existing UI.
+    } finally {
+      onModePreparationChange(sessionId, false);
+      recoveryRef.current = false;
+      setRecovering(false);
+    }
+  };
+  return (
+    <div className="quick-chat__unavailable" data-testid="quick-chat-archived">
+      <h1>{tr("此对话已归档")}</h1>
+      <p>{tr("草稿保留在原对话中。处理完保存问题后，可新建快捷对话。")}</p>
+      {draft.ready && draft.value.text ? (
+        <textarea
+          data-testid="quick-chat-archived-draft"
+          aria-label={tr("已归档对话的草稿")}
+          value={draft.value.text}
+          rows={6}
+          readOnly
+        />
+      ) : null}
+      {draft.value.attachments.length ? (
+        <ul aria-label={tr("草稿附件")}>
+          {draft.value.attachments.map((attachment) => (
+            <li key={attachment.id}>{attachment.file.name}</li>
+          ))}
+        </ul>
+      ) : null}
+      {draft.error ? (
+        <div role="alert">
+          <p>
+            {draft.conflict
+              ? tr("另一个窗口已更新此草稿。当前窗口的内容已保留，请选择如何处理。")
+              : tr("草稿保存或恢复失败：{0}", [runtimeText(draft.error)])}
+          </p>
+          <div className="quick-chat__recovery-actions">
+            {draft.conflict ? (
+              <>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  disabled={interactionLocked || draft.saving || recovering}
+                  onClick={() => void recover("overwrite")}
+                >
+                  {tr("用本地内容覆盖")}
+                </button>
+                <button
+                  className="btn btn--secondary"
+                  type="button"
+                  disabled={interactionLocked || draft.saving || recovering}
+                  onClick={() => void recover("reload")}
+                >
+                  {tr("载入最新草稿")}
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn btn--secondary"
+                type="button"
+                disabled={interactionLocked || draft.saving || recovering}
+                onClick={() => void recover()}
+              >
+                {tr("重试")}
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function QuickChatApp() {
   useLocale();
   const [snapshot, setSnapshot] = useState<QuickChatState | null>(null);
@@ -68,12 +165,96 @@ export function QuickChatApp() {
   const [context, setContext] = useState<QuickChatState["context"]>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [transitionLocked, setTransitionLocked] = useState(false);
   const [initialStatus, setInitialStatus] = useState<"loading" | "ready" | "error">("loading");
   const [initialRetry, setInitialRetry] = useState(0);
   const currentSessionId = useRef<string | null>(null);
   const snapshotGeneration = useRef(0);
   const actionSequence = useRef(0);
+  const actionBusyRef = useRef(false);
   const runEventVersion = useRef(0);
+  const transitionWork = useRef(new QuickChatTransitionWork()).current;
+  const preparationFinishers = useRef(new Map<string, Array<() => void>>());
+  const transitionRef = useRef<{ requestId: string; controller: AbortController } | null>(null);
+  const deferredConsumed = useRef(new Map<string, Set<string>>());
+
+  const reconcileConsumedDraft = useCallback(
+    (sessionId: string, revision: string) => {
+      const finish = transitionWork.begin();
+      void composerDrafts
+        .accepted(sessionId, revision)
+        .catch(() => undefined)
+        .finally(finish);
+    },
+    [transitionWork],
+  );
+
+  const onModePreparationChange = useCallback(
+    (sessionId: string, preparing: boolean) => {
+      const finishers = preparationFinishers.current.get(sessionId) ?? [];
+      if (preparing) {
+        finishers.push(transitionWork.begin());
+        preparationFinishers.current.set(sessionId, finishers);
+      } else {
+        finishers.shift()?.();
+        if (finishers.length === 0) preparationFinishers.current.delete(sessionId);
+      }
+    },
+    [transitionWork],
+  );
+
+  useLayoutEffect(() => {
+    const unsubscribe = window.mingshen.onQuickChatTransition((requestId, locked) => {
+      if (!locked) {
+        if (transitionRef.current?.requestId !== requestId) return;
+        transitionRef.current.controller.abort();
+        transitionRef.current = null;
+        flushSync(() => setTransitionLocked(false));
+        const sessionId = currentSessionId.current;
+        if (sessionId) {
+          for (const revision of deferredConsumed.current.get(sessionId) ?? [])
+            reconcileConsumedDraft(sessionId, revision);
+        }
+        deferredConsumed.current.clear();
+        return;
+      }
+      if (transitionRef.current?.requestId === requestId) return;
+      transitionRef.current?.controller.abort();
+      const transition = { requestId, controller: new AbortController() };
+      transitionRef.current = transition;
+      // Preload may replay an existing lock during effect registration.
+      queueMicrotask(() => {
+        if (transitionRef.current !== transition) return;
+        flushSync(() => setTransitionLocked(true));
+        void (async () => {
+          try {
+            const ready = await quickChatTransitionReady(
+              transitionWork,
+              transition.controller.signal,
+              () => Boolean(document.querySelector('[data-unsaved="true"]')),
+            );
+            if (transitionRef.current !== transition) return;
+            if (!ready) {
+              window.mingshen.acknowledgeQuickChatTransition(
+                requestId,
+                tr("存在未保存的消息编辑，请先提交或取消。"),
+              );
+              return;
+            }
+            window.mingshen.acknowledgeQuickChatTransition(requestId);
+          } catch (cause) {
+            if (transitionRef.current === transition && !transition.controller.signal.aborted)
+              window.mingshen.acknowledgeQuickChatTransition(requestId, errorText(cause));
+          }
+        })();
+      });
+    });
+    return () => {
+      unsubscribe();
+      transitionRef.current?.controller.abort();
+      transitionRef.current = null;
+    };
+  }, [reconcileConsumedDraft, transitionWork]);
 
   useEffect(() => {
     let active = true;
@@ -101,7 +282,12 @@ export function QuickChatApp() {
   const applySnapshot = useCallback((next: QuickChatState, focus = false) => {
     snapshotGeneration.current += 1;
     runEventVersion.current += 1;
-    const changed = currentSessionId.current !== (next.session?.id ?? null);
+    const previousSessionId = currentSessionId.current;
+    const changed = previousSessionId !== (next.session?.id ?? null);
+    if (changed && previousSessionId && transitionRef.current) {
+      deferredConsumed.current.delete(previousSessionId);
+      composerDrafts.forget([previousSessionId]);
+    }
     currentSessionId.current = next.session?.id ?? null;
     setSnapshot(next);
     setMessages(next.messages);
@@ -124,13 +310,15 @@ export function QuickChatApp() {
     const requestGeneration = snapshotGeneration.current;
     const unsubscribe = window.mingshen.onQuickChatState((next) => {
       if (!active) return;
-      applySnapshot(next, true);
+      if (transitionRef.current) flushSync(() => applySnapshot(next, true));
+      else applySnapshot(next, true);
     });
     void window.mingshen
       .getQuickChatState()
       .then((next) => {
         if (!active || snapshotGeneration.current !== requestGeneration) return;
-        applySnapshot(next, true);
+        if (transitionRef.current) flushSync(() => applySnapshot(next, true));
+        else applySnapshot(next, true);
       })
       .catch((cause) => {
         if (!active || snapshotGeneration.current !== requestGeneration) return;
@@ -145,6 +333,7 @@ export function QuickChatApp() {
 
   useEffect(() => {
     const unsubscribe = window.mingshen.onRuntimeEvent((event: ChatStreamEvent) => {
+      if (event.type === "session_removed") composerDrafts.forget([event.sessionId]);
       const sessionId = currentSessionId.current;
       if (!sessionId) return;
       const eventSessionId =
@@ -160,16 +349,27 @@ export function QuickChatApp() {
       if (eventSessionId !== sessionId) return;
       switch (event.type) {
         case "composer_draft_consumed":
-          void composerDrafts.accepted(sessionId, event.revision).catch(() => undefined);
+          if (transitionRef.current) {
+            const revisions = deferredConsumed.current.get(sessionId) ?? new Set<string>();
+            revisions.add(event.revision);
+            deferredConsumed.current.set(sessionId, revisions);
+          } else reconcileConsumedDraft(sessionId, event.revision);
           return;
         case "session_updated":
-          setSnapshot((current) =>
-            currentSessionId.current === sessionId && current
-              ? { ...current, session: event.session }
-              : current,
-          );
+          snapshotGeneration.current += 1;
+          {
+            const update = () =>
+              setSnapshot((current) =>
+                currentSessionId.current === sessionId && current
+                  ? { ...current, session: event.session }
+                  : current,
+              );
+            if (transitionRef.current) flushSync(update);
+            else update();
+          }
           return;
         case "session_removed":
+          snapshotGeneration.current += 1;
           runEventVersion.current += 1;
           currentSessionId.current = null;
           setSnapshot((current) =>
@@ -178,6 +378,8 @@ export function QuickChatApp() {
           setMessages([]);
           setLive(null);
           setRunState(null);
+          setContext(null);
+          setActivities([]);
           return;
         case "run_started": {
           runEventVersion.current += 1;
@@ -305,7 +507,32 @@ export function QuickChatApp() {
       }
     });
     return unsubscribe;
-  }, []);
+  }, [reconcileConsumedDraft]);
+
+  const action = useCallback(
+    async (name: QuickChatAction) => {
+      if (actionBusyRef.current || transitionRef.current) return;
+      actionBusyRef.current = true;
+      const request = ++actionSequence.current;
+      const generation = snapshotGeneration.current;
+      flushSync(() => setActionBusy(true));
+      setError(null);
+      try {
+        const next = await window.mingshen.quickChatAction(name);
+        if (next && request === actionSequence.current && generation === snapshotGeneration.current)
+          flushSync(() => applySnapshot(next, name === "show" || name === "new"));
+      } catch (cause) {
+        if (request === actionSequence.current && generation === snapshotGeneration.current)
+          setError(errorText(cause));
+      } finally {
+        if (request === actionSequence.current) {
+          actionBusyRef.current = false;
+          setActionBusy(false);
+        }
+      }
+    },
+    [applySnapshot],
+  );
 
   useEffect(() => {
     const hide = (event: KeyboardEvent) => {
@@ -317,32 +544,11 @@ export function QuickChatApp() {
         document.querySelector('[role="dialog"], [role="alertdialog"]')
       )
         return;
-      void window.mingshen.quickChatAction("hide").catch(() => undefined);
+      void action("hide");
     };
     window.addEventListener("keydown", hide);
     return () => window.removeEventListener("keydown", hide);
-  }, []);
-
-  const action = useCallback(
-    async (name: QuickChatAction) => {
-      if (actionBusy) return;
-      const request = ++actionSequence.current;
-      const generation = snapshotGeneration.current;
-      setActionBusy(true);
-      setError(null);
-      try {
-        const next = await window.mingshen.quickChatAction(name);
-        if (next && request === actionSequence.current && generation === snapshotGeneration.current)
-          applySnapshot(next, name === "show" || name === "new");
-      } catch (cause) {
-        if (request === actionSequence.current && generation === snapshotGeneration.current)
-          setError(errorText(cause));
-      } finally {
-        if (request === actionSequence.current) setActionBusy(false);
-      }
-    },
-    [actionBusy, applySnapshot],
-  );
+  }, [action]);
 
   const current = snapshot;
   const session = current?.session ?? null;
@@ -366,7 +572,7 @@ export function QuickChatApp() {
 
   const send = useCallback(
     async (text: string, attachments: ChatAttachmentInput[], draftRevision: string) => {
-      if (!session) throw new Error(tr("当前对话不可用。"));
+      if (!session || session.archived) throw new Error(tr("当前对话不可用。"));
       setError(null);
       const version = runEventVersion.current;
       const result = await window.mingshen.sendChat({
@@ -389,24 +595,31 @@ export function QuickChatApp() {
 
   const rewrite = useCallback(
     async (messageId: string, text: string) => {
-      if (!session) throw new Error(tr("当前对话不可用。"));
+      if (!session || session.archived) throw new Error(tr("当前对话不可用。"));
+      if (actionBusyRef.current || transitionRef.current)
+        throw new Error(tr("正在切换对话，请稍后重试。"));
       setError(null);
       const version = runEventVersion.current;
-      const result = await window.mingshen.rewriteAndSendChat({
-        sessionId: session.id,
-        messageId,
-        text,
-      });
-      if (currentSessionId.current !== session.id || runEventVersion.current !== version) return;
-      setSnapshot((current) =>
-        currentSessionId.current === session.id && current?.session
-          ? { ...current, session: { ...current.session, status: "running" } }
-          : current,
-      );
-      if (currentSessionId.current === session.id)
-        setRunState(runningState(session.id, result.runId));
+      const finish = transitionWork.begin();
+      try {
+        const result = await window.mingshen.rewriteAndSendChat({
+          sessionId: session.id,
+          messageId,
+          text,
+        });
+        if (currentSessionId.current !== session.id || runEventVersion.current !== version) return;
+        setSnapshot((current) =>
+          currentSessionId.current === session.id && current?.session
+            ? { ...current, session: { ...current.session, status: "running" } }
+            : current,
+        );
+        if (currentSessionId.current === session.id)
+          setRunState(runningState(session.id, result.runId));
+      } finally {
+        finish();
+      }
     },
-    [session],
+    [session, transitionWork],
   );
 
   const stop = useCallback(async () => {
@@ -468,7 +681,7 @@ export function QuickChatApp() {
             title={current?.pinned ? tr("取消置顶窗口") : tr("置顶窗口")}
             aria-pressed={current?.pinned ?? false}
             data-testid="quick-chat-pin"
-            disabled={actionBusy}
+            disabled={actionBusy || transitionLocked}
             onClick={() => void action("toggle-pin")}
           >
             {current?.pinned ? (
@@ -481,7 +694,7 @@ export function QuickChatApp() {
             type="button"
             aria-label={tr("新建对话")}
             title={tr("新建对话")}
-            disabled={actionBusy}
+            disabled={actionBusy || transitionLocked}
             onClick={() => void action("new")}
           >
             <SquarePen aria-hidden="true" size={15} />
@@ -490,7 +703,7 @@ export function QuickChatApp() {
             type="button"
             aria-label={tr("打开主界面")}
             title={tr("打开主界面")}
-            disabled={actionBusy}
+            disabled={actionBusy || transitionLocked}
             onClick={() => void action("open-main")}
           >
             <Maximize2 aria-hidden="true" size={15} />
@@ -499,7 +712,7 @@ export function QuickChatApp() {
             type="button"
             aria-label={tr("隐藏小窗口")}
             title={tr("隐藏小窗口")}
-            disabled={actionBusy}
+            disabled={actionBusy || transitionLocked}
             onClick={() => void action("hide")}
           >
             <X aria-hidden="true" size={16} />
@@ -531,7 +744,7 @@ export function QuickChatApp() {
             <button
               type="button"
               className="btn btn--primary"
-              disabled={actionBusy}
+              disabled={actionBusy || transitionLocked}
               onClick={() => void action("configure")}
             >
               {tr("打开模型设置")}
@@ -543,6 +756,12 @@ export function QuickChatApp() {
           <LoaderCircle className="spin" aria-hidden="true" size={18} />
           <span>{tr("正在恢复对话…")}</span>
         </div>
+      ) : session?.archived ? (
+        <ArchivedDraft
+          sessionId={session.id}
+          interactionLocked={actionBusy || transitionLocked}
+          onModePreparationChange={onModePreparationChange}
+        />
       ) : !session && (!available || current.error) ? (
         <div className="quick-chat__unavailable">
           <BrandMark size={40} />
@@ -551,7 +770,7 @@ export function QuickChatApp() {
           <button
             type="button"
             className="btn btn--primary"
-            disabled={actionBusy}
+            disabled={actionBusy || transitionLocked}
             onClick={() => void action("configure")}
           >
             {tr("打开模型设置")}
@@ -561,6 +780,7 @@ export function QuickChatApp() {
         <div className="quick-chat__surface" data-testid="quick-chat-surface">
           <ChatView
             compact
+            interactionLocked={actionBusy || transitionLocked}
             agentMode="chat"
             session={session}
             providers={providers}
@@ -582,7 +802,7 @@ export function QuickChatApp() {
             onSelectSession={() => undefined}
             onSend={send}
             onRewriteMessage={rewrite}
-            onModePreparationChange={() => undefined}
+            onModePreparationChange={onModePreparationChange}
             onStop={stop}
             onFork={() => action("new").then(() => undefined)}
             onCompact={compact}

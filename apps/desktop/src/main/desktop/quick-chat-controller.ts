@@ -112,6 +112,14 @@ export class QuickChatController {
     );
   }
 
+  acceptsDraftSession(sessionId: string | null): boolean {
+    return Boolean(
+      sessionId &&
+        sessionId === this.currentSessionId &&
+        this.structuralSession(sessionId, true) !== null,
+    );
+  }
+
   activate(forceNew = false): Promise<QuickChatState> {
     if (!forceNew && this.activation) return this.activation;
     const previous = forceNew ? this.activation : null;
@@ -128,9 +136,14 @@ export class QuickChatController {
   }
 
   async state(): Promise<QuickChatState> {
-    const providers = this.repository.listProviders();
     const sessionId = this.currentSessionId;
-    const session = sessionId ? this.structuralSession(sessionId) : null;
+    const initialSession = sessionId ? this.structuralSession(sessionId, true) : null;
+    const context = initialSession
+      ? await Promise.resolve(this.context(initialSession.id)).catch(() => null)
+      : null;
+    if (sessionId !== this.currentSessionId) return this.state();
+    const providers = this.repository.listProviders();
+    const session = sessionId ? this.structuralSession(sessionId, true) : null;
     if (sessionId && !session) {
       this.lease = null;
       this.persistLease();
@@ -143,15 +156,12 @@ export class QuickChatController {
     } else {
       error = this.lastError;
     }
-    const context = session
-      ? await Promise.resolve(this.context(session.id)).catch(() => null)
-      : null;
     return {
       session,
       providers,
       messages: session ? this.sessionService.getMessages(session.id) : [],
       runState: session ? this.repository.latestSessionRun(session.id) : null,
-      context,
+      context: session ? context : null,
       expiresAt: this.lease?.expiresAt ?? null,
       pinned: this.pinned,
       error,
@@ -198,12 +208,15 @@ export class QuickChatController {
       return args.length === 1 && this.acceptsSession(this.inputSessionId(args[0]));
     }
     if (channel === IPC_CHANNELS.composerDraftSave) {
-      return this.acceptsSession(this.inputSessionId(args[0]));
+      return args.length === 1 && this.acceptsDraftSession(this.inputSessionId(args[0]));
+    }
+    if (channel === IPC_CHANNELS.composerDraftGet) {
+      return args.length === 1 && this.acceptsDraftSession(asString(args[0]));
     }
     if (channel === IPC_CHANNELS.composerDraftClear) {
       return (
         args.length === 2 &&
-        this.acceptsSession(asString(args[0])) &&
+        this.acceptsDraftSession(asString(args[0])) &&
         typeof args[1] === "string" &&
         Boolean(args[1])
       );
@@ -216,7 +229,7 @@ export class QuickChatController {
 
   permitsRuntimeEvent(event: ChatStreamEvent): boolean {
     if (event.type === "context_updated") return this.acceptsSession(event.context.sessionId);
-    if (event.type === "session_updated") return this.acceptsSession(event.session.id);
+    if (event.type === "session_updated") return this.acceptsDraftSession(event.session.id);
     if (event.type === "session_removed") return event.sessionId === this.currentSessionId;
     if (event.type === "activity") return this.acceptsSession(event.activity.sessionId);
     if ("sessionId" in event) return this.acceptsSession(event.sessionId);
@@ -293,12 +306,12 @@ export class QuickChatController {
     if (session) this.emit({ type: "session_updated", session });
   }
 
-  private structuralSession(sessionId: string): SessionView | null {
+  private structuralSession(sessionId: string, allowArchived = false): SessionView | null {
     if (!UUID_PATTERN.test(sessionId)) return null;
     const session = this.repository.getSession(sessionId);
     if (
       session?.agentMode !== "chat" ||
-      session.archived ||
+      (session.archived && !allowArchived) ||
       session.parentSessionId !== null ||
       session.workspacePath !== null ||
       session.agentProfileId !== "primary" ||

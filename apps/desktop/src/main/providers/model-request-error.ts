@@ -17,6 +17,16 @@ export class ModelOutputLimitError extends ModelRequestError {
   }
 }
 
+export class ModelInputBudgetError extends ModelRequestError {
+  constructor(inputTokens: number, contextWindow: number) {
+    super(
+      `Estimated model input (${inputTokens} tokens) leaves no safe output budget in the ${contextWindow}-token context window. No request was sent.`,
+      false,
+    );
+    this.name = "ModelInputBudgetError";
+  }
+}
+
 export function retryableStatus(status: number): boolean {
   return [408, 409, 425, 429].includes(status) || (status >= 500 && status <= 599);
 }

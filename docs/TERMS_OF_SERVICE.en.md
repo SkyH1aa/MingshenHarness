@@ -1,6 +1,6 @@
 # Mingshen Harness Terms of Service
 
-Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.4.
+Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.6.
 
 These terms are between 新哲文院算法社 (the Provider) and the person or organization using Mingshen Harness (the User). Read them together with the Privacy Policy, Disclaimer and permission prompts. The Chinese and English documents describe the same product; mandatory legal rights prevail over conflicting wording.
 

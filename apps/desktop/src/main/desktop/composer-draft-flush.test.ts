@@ -107,6 +107,44 @@ describe("composer draft flush before closing", () => {
     },
   );
 
+  it("includes the target session only for a targeted flush", async () => {
+    const f = fixture();
+    const pending = flushComposerDrafts(
+      f.window as unknown as BrowserWindow,
+      f.events as unknown as IpcMain,
+      1000,
+      "save",
+      "target-chat",
+    );
+    expect(f.contents.send).toHaveBeenCalledWith(
+      IPC_CHANNELS.composerDraftFlushRequest,
+      expect.any(String),
+      "save",
+      "target-chat",
+    );
+    f.acknowledge();
+    await pending;
+    expect(f.events.listenerCount(IPC_CHANNELS.composerDraftFlushAck)).toBe(0);
+  });
+
+  it.each(["", "a".repeat(129)])(
+    "rejects an invalid target without sending a request",
+    async (id) => {
+      const f = fixture();
+      await expect(
+        flushComposerDrafts(
+          f.window as unknown as BrowserWindow,
+          f.events as unknown as IpcMain,
+          1000,
+          "save",
+          id,
+        ),
+      ).rejects.toThrow("Invalid session ID");
+      expect(f.contents.send).not.toHaveBeenCalled();
+      expect(f.events.listenerCount(IPC_CHANNELS.composerDraftFlushAck)).toBe(0);
+    },
+  );
+
   it("surfaces renderer persistence failures instead of accepting a failed save", async () => {
     const f = fixture();
     const pending = f.flush();

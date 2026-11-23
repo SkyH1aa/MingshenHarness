@@ -87,9 +87,12 @@ export function registerComposerDraftLifecycle(): () => void {
   const unsubscribeChanges = window.mingshen.onComposerDraftChanged(({ sessionId, revision }) => {
     void composerDrafts.refreshIfClean(sessionId, revision).catch(() => undefined);
   });
-  const unsubscribe = window.mingshen.onComposerDraftFlush((requestId, purpose) => {
+  const unsubscribe = window.mingshen.onComposerDraftFlush((requestId, purpose, sessionId) => {
     if (purpose === "shutdown") interfaceReloadIntent = null;
-    void composerDrafts.flushAll().then(
+    const pending = sessionId
+      ? composerDrafts.flushIfPresent(sessionId)
+      : composerDrafts.flushAll();
+    void pending.then(
       () => window.mingshen.acknowledgeComposerDraftFlush(requestId),
       (cause: unknown) =>
         window.mingshen.acknowledgeComposerDraftFlush(

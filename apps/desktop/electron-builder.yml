@@ -75,9 +75,16 @@ win:
       arch:
         - x64
 nsis:
+  include: build/installer.nsh
+  installerLanguages:
+    - en_US
+    - zh_CN
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   installerHeaderIcon: build/icon.ico
+  installerHeader: build/installer-header.bmp
+  installerSidebar: build/installer-sidebar.bmp
+  uninstallerSidebar: build/installer-sidebar.bmp
   oneClick: false
   perMachine: false
   allowElevation: false

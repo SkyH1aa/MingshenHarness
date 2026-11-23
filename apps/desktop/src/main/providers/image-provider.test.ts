@@ -9,7 +9,7 @@ import { imageOutputProviders, textOutputProviders } from "../../shared/model-ca
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import type { SecretStore } from "../storage/secret-store";
-import { parseImageGenerationResponse } from "./image-generation";
+import { parseImageGenerationResponse, parseImageGenerationResponses } from "./image-generation";
 import { ProviderService } from "./provider-service";
 
 const TINY_PNG_BASE64 =
@@ -122,6 +122,28 @@ describe("image generation response", () => {
       byteLength: Buffer.from(TINY_PNG_BASE64, "base64").length,
       revisedPrompt: "A test image",
     });
+  });
+
+  it("parses every image in a bounded multi-image response", async () => {
+    await expect(
+      parseImageGenerationResponses({
+        data: [
+          { b64_json: TINY_PNG_BASE64, revised_prompt: "First" },
+          { b64_json: TINY_PNG_BASE64, revised_prompt: "Second" },
+        ],
+      }),
+    ).resolves.toMatchObject([
+      { mimeType: "image/png", revisedPrompt: "First" },
+      { mimeType: "image/png", revisedPrompt: "Second" },
+    ]);
+  });
+
+  it("rejects a provider response with more than ten images", async () => {
+    await expect(
+      parseImageGenerationResponses({
+        data: Array.from({ length: 11 }, () => ({ b64_json: TINY_PNG_BASE64 })),
+      }),
+    ).rejects.toThrow("10 张上限");
   });
 
   it.each([
@@ -241,7 +263,6 @@ describe("image connection test", () => {
       prompt: "Generate one small test image.",
       n: 1,
       size: "1024x1024",
-      response_format: "b64_json",
     });
     expect(repository.getModel(imageModel.id)?.outputModalities).toEqual(["image"]);
   });

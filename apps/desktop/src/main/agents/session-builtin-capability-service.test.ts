@@ -638,7 +638,9 @@ describe("session built-in capability selection", () => {
     vi.spyOn(repository, "getAgentProfile").mockReturnValue(profile);
     const chat = new ChatService({
       repository,
-      extensionService: {} as ExtensionService,
+      extensionService: {
+        getEnabledPluginExtensionIdForSkill: vi.fn().mockResolvedValue(null),
+      } as unknown as ExtensionService,
       promptDirectory,
       sessionBuiltinCapabilityService: service,
     } as unknown as ConstructorParameters<typeof ChatService>[0]);

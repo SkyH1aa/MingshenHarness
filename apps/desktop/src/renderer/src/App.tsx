@@ -54,9 +54,9 @@ import type {
   SessionUpdateInput,
   SessionView,
 } from "../../shared/domain";
+import type { CompanionSessionNavigationFailure } from "../../shared/ipc";
 import type { QueuedPromptContinueResult, QueuedPromptView } from "../../shared/queued-prompt";
 import { APP_VERSION } from "../../shared/release";
-import type { SessionPage } from "../../shared/session-catalog";
 import type { WorkbenchLayout } from "../../shared/ui-preferences";
 import { AgentGuide } from "./components/AgentGuide";
 import { AgentModeSwitcher } from "./components/AgentModeSwitcher";
@@ -90,12 +90,20 @@ import {
   questionsFromSnapshot,
 } from "./lib/approval-state";
 import type { LiveRun, SessionUsage } from "./lib/chat-types";
+import {
+  respondToCompanionNavigation,
+  SessionSelectionSequence,
+} from "./lib/companion-session-navigation";
 import { ComposerDraftHandoff } from "./lib/composer-draft-handoff";
 import {
+  applyChatBatchResult,
+  loadChatSessionSnapshot,
   loadSessionCatalogRefresh,
   replaceActiveChatSessions,
   replaceWorkspaceCatalogPreservingChat,
 } from "./lib/session-catalog-sync";
+import type { SessionBatchAction, SessionBatchResult } from "./lib/session-management";
+import { sessionNavigationBlock } from "./lib/session-navigation-guard";
 import { composerDrafts } from "./lib/use-composer-draft";
 
 type Theme = "day" | "night";
@@ -164,6 +172,9 @@ export function App() {
   }, []);
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [sessions, setSessions] = useState<SessionView[]>([]);
+  const [chatCatalogReady, setChatCatalogReady] = useState(false);
+  const [chatCatalogError, setChatCatalogError] = useState("");
+  const chatCatalogRequest = useRef(0);
   const [sessionGroups, setSessionGroups] = useState<
     import("../../shared/session-catalog").SessionWorkspaceGroup[]
   >([]);
@@ -273,12 +284,22 @@ export function App() {
     setLayout({ sidebarOpen: open, ...(open && sidebarDrawer ? { inspectorOpen: false } : {}) });
   };
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsNavigationRequestId, setSettingsNavigationRequestId] = useState(0);
   const sessionManagementBusyRef = useRef(false);
+  const chatBatchBusyRef = useRef(false);
+  const [chatBatchBusy, setChatBatchBusy] = useState(false);
   const onSessionManagementBusyChange = useCallback((busy: boolean) => {
     sessionManagementBusyRef.current = busy;
   }, []);
   const [settingsSection, setSettingsSection] = useState<
-    "appearance" | "providers" | "permissions" | "context" | "extensions" | "mcp" | "project"
+    | "appearance"
+    | "desktop"
+    | "providers"
+    | "permissions"
+    | "context"
+    | "extensions"
+    | "mcp"
+    | "project"
   >("appearance");
   const workspaceOpen = layout.inspectorOpen;
   const shellWidth = optical ? ORBIT_INSPECTOR_SHELL_WIDTH : 12;
@@ -314,6 +335,7 @@ export function App() {
   const [inspectorView, setInspectorView] = useState<"tasks" | "workspace">("tasks");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionWorkspace, setNewSessionWorkspace] = useState<string | null>(null);
+  const newSessionSelection = useRef<(() => boolean) | null>(null);
   const [creatingChatSession, setCreatingChatSession] = useState(false);
   const [chatSessionError, setChatSessionError] = useState("");
   const creatingChatSessionRef = useRef(false);
@@ -328,24 +350,81 @@ export function App() {
   const updateModePreparationLock = useCallback((sessionId: string, preparing: boolean) => {
     setModePreparationSessionIds((current) => updateSessionLockSet(current, sessionId, preparing));
   }, []);
+  const planNavigationBlock = useCallback((nextSessionId: string | null) => {
+    if (chatBatchBusyRef.current) return { reason: "busy" as const, sessionId: null };
+    const editor = document.querySelector<HTMLElement>('.task-workbench[data-unsaved="true"]');
+    if (!editor || editor.dataset.taskSession === nextSessionId) return null;
+    return { reason: "unsaved_plan" as const, sessionId: editor.dataset.taskSession ?? null };
+  }, []);
   const allowPlanNavigation = useCallback(
     (nextSessionId: string | null) => {
-      const editor = document.querySelector<HTMLElement>('.task-workbench[data-unsaved="true"]');
-      if (!editor || editor.dataset.taskSession === nextSessionId) return true;
+      const block = planNavigationBlock(nextSessionId);
+      if (!block) return true;
+      if (block.reason === "busy") return false;
       setWorkspaceOpen(true);
       setTaskViewRequest({
-        sessionId: editor.dataset.taskSession ?? null,
+        sessionId: block.sessionId,
         tab: "plan",
         requestKey: performance.now(),
         notice: tr("请先保存或取消计划编辑，再切换会话或 ChatAgent。"),
       });
       return false;
     },
-    [setWorkspaceOpen],
+    [planNavigationBlock, setWorkspaceOpen],
   );
+  const selectionNavigationBlock = useCallback(
+    (
+      nextSessionId: string | null,
+      nextSession: SessionView | null | undefined,
+      leavingStudio: boolean,
+    ) => {
+      const currentId = creativeContextRef.current.selectedSessionId;
+      const currentSession = sessionsRef.current.find((session) => session.id === currentId);
+      return sessionNavigationBlock({
+        document,
+        selectedSessionId: currentId,
+        currentRoot: currentSession?.workspacePath ?? null,
+        targetSessionId: nextSessionId,
+        targetRoot: nextSession === undefined ? undefined : (nextSession?.workspacePath ?? null),
+        busy: chatBatchBusyRef.current,
+        leavingStudio,
+      });
+    },
+    [],
+  );
+  const allowSessionNavigation = useCallback(
+    (
+      nextSessionId: string | null,
+      nextSession: SessionView | null | undefined,
+      leavingStudio: boolean,
+    ) => {
+      const block = selectionNavigationBlock(nextSessionId, nextSession, leavingStudio);
+      if (!block) return true;
+      if (block.reason === "unsaved_plan") return allowPlanNavigation(nextSessionId);
+      if (block.reason === "unsaved_edits") {
+        setSurfaceError(
+          locale === "en"
+            ? "Save, apply, export or cancel unfinished edits before switching sessions."
+            : "请先保存、应用、导出或取消尚未完成的编辑，再切换会话。",
+        );
+      } else if (!chatBatchBusyRef.current) {
+        setSurfaceError(
+          locale === "en"
+            ? "Wait for the current studio operation to finish before switching sessions."
+            : "请等待当前工作台操作完成后再切换会话。",
+        );
+      }
+      return false;
+    },
+    [allowPlanNavigation, locale, selectionNavigationBlock],
+  );
+  const sessionSelectionSequence = useRef(new SessionSelectionSequence());
   const applySessionSelection = useCallback(
     (session: SessionView) => {
-      if (!allowPlanNavigation(session.id)) return false;
+      if (!allowSessionNavigation(session.id, session, true)) return false;
+      sessionSelectionSequence.current.begin();
+      setNewSessionOpen(false);
+      setNewSessionWorkspace(null);
       setSurface("conversation");
       if (session.agentMode === "chat") {
         setChatSessionId(session.id);
@@ -356,34 +435,67 @@ export function App() {
       setAgentMode(session.agentMode === "work" ? "work" : "code");
       return true;
     },
-    [allowPlanNavigation],
+    [allowSessionNavigation],
   );
   const selectSession = useCallback(
-    async (sessionId: string | null) => {
-      if (!allowPlanNavigation(sessionId)) return false;
+    async (
+      sessionId: string | null,
+      onDenied?: (reason: CompanionSessionNavigationFailure) => void,
+    ) => {
+      const isCurrentSelection = sessionSelectionSequence.current.begin();
+      const known = sessionId
+        ? sessionsRef.current.find((session) => session.id === sessionId)
+        : null;
+      const deniedNavigation = (session: SessionView | null | undefined) =>
+        onDenied?.(
+          selectionNavigationBlock(sessionId, session, Boolean(sessionId))?.reason ?? "failed",
+        );
+      if (!allowSessionNavigation(sessionId, known, Boolean(sessionId))) {
+        deniedNavigation(known);
+        return false;
+      }
       if (!sessionId) {
         if (agentMode === "chat") setChatSessionId(null);
         else setWorkbenchSessionId(null);
         return true;
       }
-      const known = sessionsRef.current.find((session) => session.id === sessionId);
       if (known) {
-        return applySessionSelection(known);
+        if (known.archived) {
+          onDenied?.("unavailable");
+          return false;
+        }
+        const selected = applySessionSelection(known);
+        if (!selected) deniedNavigation(known);
+        return selected;
       }
       try {
         const session = await window.mingshen.getSession(sessionId);
-        if (!session) {
+        if (!isCurrentSelection()) {
+          onDenied?.("failed");
+          return false;
+        }
+        if (!session || session.archived) {
           setBootError(tr("会话不存在。"));
+          onDenied?.("unavailable");
           return false;
         }
         mergeSessions([session]);
-        return applySessionSelection(session);
+        const selected = applySessionSelection(session);
+        if (!selected) deniedNavigation(session);
+        return selected;
       } catch (error) {
         setBootError(errorMessage(error));
+        onDenied?.("failed");
         return false;
       }
     },
-    [agentMode, allowPlanNavigation, applySessionSelection, mergeSessions],
+    [
+      agentMode,
+      allowSessionNavigation,
+      applySessionSelection,
+      mergeSessions,
+      selectionNavigationBlock,
+    ],
   );
   const setSelectedSessionId = useCallback(
     (next: SetStateAction<string | null>) => {
@@ -529,15 +641,42 @@ export function App() {
       window.mingshen.onDesktopEvent((event) => {
         if (event.type === "open-provider-settings") {
           setSettingsSection("providers");
+          setSettingsNavigationRequestId((value) => value + 1);
+          setSettingsOpen(true);
+        }
+        if (event.type === "open-desktop-settings") {
+          setSettingsSection("desktop");
+          setSettingsNavigationRequestId((value) => value + 1);
           setSettingsOpen(true);
         }
         if (
           (event.type === "select-session" || event.type === "notification-reply-failed") &&
           event.sessionId
-        )
-          void selectSession(event.sessionId);
+        ) {
+          if (event.type === "select-session" && event.requestId) {
+            void respondToCompanionNavigation({
+              requestId: event.requestId,
+              sessionId: event.sessionId,
+              sequence: sessionSelectionSequence.current,
+              knownSession: (sessionId) =>
+                sessionsRef.current.find((session) => session.id === sessionId),
+              loadSession: window.mingshen.getSession,
+              navigationFailure: (sessionId, session) =>
+                selectionNavigationBlock(sessionId, session, true)?.reason ?? null,
+              preflight: window.mingshen.preflightCompanionSessionNavigation,
+              claim: window.mingshen.claimCompanionSessionNavigation,
+              commit: (session, loaded) => {
+                if (loaded) mergeSessions([session]);
+                applySessionSelection(session);
+              },
+              report: window.mingshen.reportCompanionSessionNavigation,
+            }).catch(() => undefined);
+          } else {
+            void selectSession(event.sessionId);
+          }
+        }
       }),
-    [selectSession],
+    [applySessionSelection, mergeSessions, selectionNavigationBlock, selectSession],
   );
 
   const loadChatGroups = useCallback(async () => {
@@ -547,20 +686,23 @@ export function App() {
 
   const loadAllChatSessions = useCallback(
     async (replaceActive = false) => {
-      const rows: SessionView[] = [];
-      let cursor: string | null = null;
-      do {
-        const page: SessionPage = await window.mingshen.listSessionPage({
-          agentMode: "chat",
-          archived: false,
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        });
-        rows.push(...page.sessions);
-        cursor = page.nextCursor;
-      } while (cursor);
-      if (replaceActive) setSessions((current) => replaceActiveChatSessions(current, rows));
-      else mergeSessions(rows);
+      const request = ++chatCatalogRequest.current;
+      setChatCatalogReady(false);
+      setChatCatalogError("");
+      try {
+        const rows = await loadChatSessionSnapshot(
+          (input) => window.mingshen.listSessionPage(input),
+          false,
+        );
+        if (request !== chatCatalogRequest.current) return;
+        if (replaceActive) setSessions((current) => replaceActiveChatSessions(current, rows));
+        else mergeSessions(rows);
+        setChatCatalogReady(true);
+      } catch (cause) {
+        if (request !== chatCatalogRequest.current) return;
+        setChatCatalogError(errorMessage(cause));
+        throw cause;
+      }
     },
     [mergeSessions],
   );
@@ -1001,7 +1143,6 @@ export function App() {
           requestKey: Date.now(),
         });
         setInspectorView("workspace");
-        if (!sessionManagementBusyRef.current) setSettingsOpen(false);
         setWorkspaceOpen(true);
         return;
       }
@@ -1169,8 +1310,9 @@ export function App() {
     setFileRequest(null);
   }, [browserRequest, selectedSessionId]);
 
-  const createSessionFromDialog = (session: SessionView) => {
+  const createSessionFromDialog = (session: SessionView, select = true) => {
     mergeSessions([session]);
+    if (!select) return;
     if (applySessionSelection(session)) setMessages([]);
     setNewSessionOpen(false);
     setNewSessionWorkspace(null);
@@ -1302,6 +1444,7 @@ export function App() {
 
   const openSurface = (next: AppSurface) => {
     if (next !== "conversation" && !allowPlanNavigation(null)) return;
+    sessionSelectionSequence.current.begin();
     setSurfaceError("");
     setSurface(next);
   };
@@ -1327,27 +1470,35 @@ export function App() {
 
   const openNewSession = (workspacePath: string | null) => {
     if (!allowPlanNavigation(null)) return;
+    newSessionSelection.current = sessionSelectionSequence.current.begin();
     setNewSessionWorkspace(workspacePath);
     setNewSessionOpen(true);
   };
 
   const changeAgentMode = async (next: AgentMode) => {
-    if (next === agentMode || activeTaskRunning) return;
+    if (next === agentMode || activeTaskRunning || chatBatchBusyRef.current) return;
     const previousUiMode = agentMode;
     if (next === "chat") {
-      if (!allowPlanNavigation(chatSessionId)) return;
+      const firstChat = chatSessionId
+        ? (sessions.find((session) => session.id === chatSessionId) ?? null)
+        : (sessions.find((session) => session.agentMode === "chat" && !session.archived) ?? null);
+      if (!allowSessionNavigation(chatSessionId ?? firstChat?.id ?? null, firstChat, false)) return;
+      sessionSelectionSequence.current.begin();
       setNewSessionOpen(false);
       setNewSessionWorkspace(null);
       setAgentMode("chat");
       if (!chatSessionId) {
-        const firstChat = sessions.find(
-          (session) => session.agentMode === "chat" && !session.archived,
-        );
         setChatSessionId(firstChat?.id ?? null);
         if (!firstChat) void loadAllChatSessions().catch(() => undefined);
       }
       return;
     }
+    if (
+      agentMode === "chat" &&
+      !allowSessionNavigation(workbenchSessionId, workspaceSession, false)
+    )
+      return;
+    const isCurrentSelection = sessionSelectionSequence.current.begin();
     setAgentMode(next);
     if (!workspaceSession || sessionAgentMode(workspaceSession) === next) return;
     const currentProfile = agentProfiles.find(
@@ -1378,7 +1529,7 @@ export function App() {
       });
       mergeSessions([updated]);
     } catch (error) {
-      setAgentMode(previousUiMode);
+      if (isCurrentSelection()) setAgentMode(previousUiMode);
       setBootError(errorMessage(error));
     }
   };
@@ -1386,6 +1537,7 @@ export function App() {
   const createWorkspaceSession = async (workspacePath: string | null) => {
     if (!allowPlanNavigation(null)) return;
     if (creatingWorkspaceSessionRef.current) return;
+    const isCurrentSelection = sessionSelectionSequence.current.begin();
     creatingWorkspaceSessionRef.current = true;
     setCreatingWorkspaceSession(true);
     setWorkspaceSessionError("");
@@ -1394,8 +1546,9 @@ export function App() {
         workspacePath,
         agentMode === "work" ? "work" : "code",
       );
-      setSearch("");
-      createSessionFromDialog(session);
+      const select = isCurrentSelection();
+      if (select) setSearch("");
+      createSessionFromDialog(session, select);
     } catch (error) {
       setWorkspaceSessionError(errorMessage(error));
     } finally {
@@ -1443,6 +1596,42 @@ export function App() {
     await refreshAll();
   };
 
+  const finishChatBatch = async (action: SessionBatchAction, result: SessionBatchResult) => {
+    const removed = new Set(result.removedIds);
+    if (removed.size) {
+      composerDrafts.forget([...removed]);
+      draftHandoff.current.forget([...removed]);
+      for (const id of removed) {
+        queuedPromptLoadVersionsRef.current.set(
+          id,
+          (queuedPromptLoadVersionsRef.current.get(id) ?? 0) + 1,
+        );
+        const timer = queuedPromptRefreshTimersRef.current.get(id);
+        if (timer) clearTimeout(timer);
+        queuedPromptRefreshTimersRef.current.delete(id);
+        updateModeStartLock(id, false);
+        updateModePreparationLock(id, false);
+      }
+      const withoutRemoved = <T,>(current: Record<string, T>): Record<string, T> =>
+        Object.fromEntries(Object.entries(current).filter(([id]) => !removed.has(id)));
+      setContextsBySession(withoutRemoved);
+      setQueuedPromptsBySession(withoutRemoved);
+      setRunsBySession(withoutRemoved);
+      setActivitiesBySession(withoutRemoved);
+      setWorkbenchSessionId((current) => (current && removed.has(current) ? null : current));
+    }
+    const archived = action === "archive" ? new Set(result.succeeded) : new Set<string>();
+    setChatSessionId((current) =>
+      current && (removed.has(current) || archived.has(current)) ? null : current,
+    );
+    setSessions((current) => applyChatBatchResult(current, action, result));
+    try {
+      await refreshAll();
+    } finally {
+      await loadAllChatSessions(true);
+    }
+  };
+
   const createChatGroup = async (name: string) => {
     await window.mingshen.createChatGroup(name);
     await loadChatGroups();
@@ -1465,13 +1654,15 @@ export function App() {
 
   const createChatSession = async (groupId: string | null = null) => {
     if (!allowPlanNavigation(null) || creatingChatSessionRef.current) return;
+    const isCurrentSelection = sessionSelectionSequence.current.begin();
     creatingChatSessionRef.current = true;
     setCreatingChatSession(true);
     setChatSessionError("");
     try {
       const session = await window.mingshen.createChatSessionInGroup(groupId);
-      createSessionFromDialog(session);
-      if (chatSidebarDrawer) setChatSidebarOpen(false);
+      const select = isCurrentSelection();
+      createSessionFromDialog(session, select);
+      if (select && chatSidebarDrawer) setChatSidebarOpen(false);
     } catch (error) {
       setChatSessionError(errorMessage(error));
       setChatSidebarOpen(true);
@@ -1779,6 +1970,8 @@ export function App() {
     );
   }
 
+  const sessionDialogSelection = newSessionSelection.current;
+
   return (
     <>
       <div
@@ -1832,6 +2025,7 @@ export function App() {
             <AgentModeSwitcher
               value={agentMode}
               running={activeTaskRunning}
+              managingSessions={chatBatchBusy}
               onChange={(next) => {
                 openSurface("conversation");
                 void changeAgentMode(next);
@@ -2221,9 +2415,17 @@ export function App() {
                 onNewChat={(groupId) => void createChatSession(groupId)}
                 creatingChatSession={creatingChatSession}
                 chatSessionError={chatSessionError}
+                catalogReady={chatCatalogReady}
+                catalogError={chatCatalogError}
+                onRetryCatalog={() => void loadAllChatSessions(true).catch(() => undefined)}
                 onLoadSessions={mergeSessions}
                 onPatch={patchSession}
                 onRemove={removeSessionCascade}
+                onBatchChanged={finishChatBatch}
+                onBatchBusyChange={(busy) => {
+                  chatBatchBusyRef.current = busy;
+                  setChatBatchBusy(busy);
+                }}
                 onCreateGroup={createChatGroup}
                 onRenameGroup={renameChatGroup}
                 onRemoveGroup={removeChatGroup}
@@ -2265,6 +2467,7 @@ export function App() {
           <ChatView
             key={selectedSessionId}
             notificationDraft={completionNotifications?.replyDraft ?? null}
+            managingSessions={chatBatchBusy}
             agentMode={agentMode}
             session={selectedSession}
             providers={providers}
@@ -2468,6 +2671,7 @@ export function App() {
       {settingsOpen ? (
         <SettingsDrawer
           initialSection={settingsSection}
+          navigationRequestId={settingsNavigationRequestId}
           providers={providers}
           agentProfiles={agentProfiles}
           extensions={extensions}
@@ -2492,10 +2696,13 @@ export function App() {
           initialAgentMode={agentMode}
           initialWorkspacePath={newSessionWorkspace}
           onClose={() => {
+            if (sessionDialogSelection?.()) sessionSelectionSequence.current.begin();
             setNewSessionOpen(false);
             setNewSessionWorkspace(null);
           }}
-          onCreated={createSessionFromDialog}
+          onCreated={(session) =>
+            createSessionFromDialog(session, sessionDialogSelection?.() ?? false)
+          }
         />
       ) : null}
     </>

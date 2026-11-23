@@ -1,21 +1,45 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { COMPANION_IPC_CHANNELS } from "../shared/desktop-companion";
 import type { ChatStreamEvent } from "../shared/domain";
 import type { ComposerDraftFlushPurpose, MingshenDesktopApi } from "../shared/ipc";
 import { IPC_CHANNELS } from "../shared/ipc";
 
 const composerDraftFlushListeners = new Set<
-  (requestId: string, purpose: ComposerDraftFlushPurpose) => void
+  (requestId: string, purpose: ComposerDraftFlushPurpose, sessionId?: string) => void
 >();
+const quickChatTransitionListeners = new Set<(requestId: string, locked: boolean) => void>();
+let quickChatTransitionId: string | null = null;
+ipcRenderer.on(IPC_CHANNELS.quickChatTransition, (_event, requestId: unknown, locked: unknown) => {
+  if (typeof requestId !== "string" || !requestId || typeof locked !== "boolean") return;
+  if (locked) {
+    quickChatTransitionId = requestId;
+    // A renderer that has not mounted cannot yet contain an in-memory draft.
+    // Retain the lock so an app mounted before release still starts locked.
+    if (!quickChatTransitionListeners.size)
+      ipcRenderer.send(IPC_CHANNELS.quickChatTransitionAck, requestId);
+  } else {
+    if (requestId !== quickChatTransitionId) return;
+    quickChatTransitionId = null;
+  }
+  for (const listener of quickChatTransitionListeners) listener(requestId, locked);
+});
 ipcRenderer.on(
   IPC_CHANNELS.composerDraftFlushRequest,
-  (_event, requestId: unknown, purpose: unknown) => {
+  (_event, requestId: unknown, purpose: unknown, sessionId: unknown) => {
     if (typeof requestId !== "string") return;
+    if (
+      sessionId !== undefined &&
+      (typeof sessionId !== "string" || !sessionId || sessionId.length > 128)
+    )
+      return;
     const flushPurpose =
       purpose === "interface-reload" || purpose === "save" ? purpose : "shutdown";
     // Before the renderer starts there can be no unsaved in-memory input.
     if (!composerDraftFlushListeners.size)
       ipcRenderer.send(IPC_CHANNELS.composerDraftFlushAck, requestId);
-    else for (const listener of composerDraftFlushListeners) listener(requestId, flushPurpose);
+    else
+      for (const listener of composerDraftFlushListeners)
+        listener(requestId, flushPurpose, sessionId);
   },
 );
 
@@ -77,6 +101,29 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.desktopShortcutsSet, settings),
   setDesktopShortcutRecording: (recording) =>
     ipcRenderer.invoke(IPC_CHANNELS.desktopShortcutRecording, recording),
+  getStartupAnimationEnabled: () => ipcRenderer.invoke(IPC_CHANNELS.startupAnimationGet),
+  setStartupAnimationEnabled: (enabled) =>
+    ipcRenderer.invoke(IPC_CHANNELS.startupAnimationSet, enabled),
+  getCompanionState: () => ipcRenderer.invoke(COMPANION_IPC_CHANNELS.getState),
+  getCompanionPreferences: () => ipcRenderer.invoke(COMPANION_IPC_CHANNELS.getPreferences),
+  setCompanionPreferences: (patch) =>
+    ipcRenderer.invoke(COMPANION_IPC_CHANNELS.setPreferences, patch),
+  showCompanion: () => ipcRenderer.invoke(COMPANION_IPC_CHANNELS.show),
+  hideCompanion: () => ipcRenderer.invoke(COMPANION_IPC_CHANNELS.hide),
+  onCompanionState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
+      listener(state);
+    ipcRenderer.on(COMPANION_IPC_CHANNELS.state, handler);
+    return () => ipcRenderer.removeListener(COMPANION_IPC_CHANNELS.state, handler);
+  },
+  preflightCompanionSessionNavigation: (requestId, sessionId) =>
+    ipcRenderer.sendSync(IPC_CHANNELS.companionSessionNavigationPreflight, requestId, sessionId) ===
+    true,
+  claimCompanionSessionNavigation: (requestId, sessionId) =>
+    ipcRenderer.sendSync(IPC_CHANNELS.companionSessionNavigationClaim, requestId, sessionId) ===
+    true,
+  reportCompanionSessionNavigation: (result) =>
+    ipcRenderer.invoke(IPC_CHANNELS.companionSessionNavigationResult, result),
   getQuickChatState: () => ipcRenderer.invoke(IPC_CHANNELS.quickChatState),
   quickChatAction: (action) => ipcRenderer.invoke(IPC_CHANNELS.quickChatAction, action),
   onQuickChatState: (listener) => {
@@ -85,6 +132,15 @@ const api: MingshenDesktopApi = {
     ipcRenderer.on(IPC_CHANNELS.quickChatEvent, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.quickChatEvent, handler);
   },
+  onQuickChatTransition: (listener) => {
+    quickChatTransitionListeners.add(listener);
+    if (quickChatTransitionId !== null) listener(quickChatTransitionId, true);
+    return () => {
+      quickChatTransitionListeners.delete(listener);
+    };
+  },
+  acknowledgeQuickChatTransition: (requestId, error) =>
+    ipcRenderer.send(IPC_CHANNELS.quickChatTransitionAck, requestId, error),
   desktopAction: (action, value, remember) =>
     ipcRenderer.invoke(IPC_CHANNELS.desktopAction, action, value, remember),
   readPolicy: (document, locale) => ipcRenderer.invoke(IPC_CHANNELS.policyRead, document, locale),
@@ -132,11 +188,25 @@ const api: MingshenDesktopApi = {
   getImageStudioWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGet),
   saveImageStudioWorkspace: (workspace) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioSave, workspace),
+  listImageStudioCanvases: () => ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasesList),
+  openImageStudioCanvas: (canvasId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasOpen, canvasId),
+  closeImageStudioCanvas: (canvasId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasClose, canvasId),
+  renameImageStudioCanvas: (canvasId, name) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasRename, canvasId, name),
+  duplicateImageStudioCanvas: (canvasId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasDuplicate, canvasId),
+  deleteImageStudioCanvas: (canvasId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasDelete, canvasId),
+  revealImageStudioCanvasFolder: () => ipcRenderer.invoke(IPC_CHANNELS.imageStudioCanvasFolder),
   getImageStudioAssetData: (assetId) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioAssetData, assetId),
   importImageStudioAssets: (files) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioImport, files),
   removeImageStudioAsset: (assetId) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoveAsset, assetId),
+  exportImageStudioAsset: (assetId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioExportAsset, assetId),
   generateImageStudioImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGenerate, input),
   polishImageStudioPrompt: (input) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioPolishPrompt, input),
@@ -295,6 +365,7 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.marketplaceInstall, source, path),
   validateLocalPlugin: (rootPath) => ipcRenderer.invoke(IPC_CHANNELS.localPluginValidate, rootPath),
   listLocalPluginMarkets: () => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketsList),
+  checkLocalPluginUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.localPluginUpdatesCheck),
   addLocalPluginMarket: (path) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketAdd, path),
   getLocalPluginMarket: (id) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketGet, id),
   refreshLocalPluginMarket: (id) => ipcRenderer.invoke(IPC_CHANNELS.localPluginMarketRefresh, id),

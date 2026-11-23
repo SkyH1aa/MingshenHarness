@@ -14,6 +14,12 @@
 The referenced Skill is the Harness adapter. Additional Skills may cover reusable
 sub-workflows. Paths are relative to the plugin root and must not escape it.
 
+Omitting manifest `activation` defaults to `on-demand`. Enabled plugins with this policy
+are discoverable and the primary Code/Work Agent can activate them with `use_plugin` for
+the current run. `activation: "required"` means the user must select the plugin in the
+session first. Activation is temporary and does not modify installation, enabled state,
+or persistent session selection.
+
 ## Inline declarations
 
 ```json
@@ -65,8 +71,43 @@ than the host limit.
 
 ## Hook safety
 
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`, and `Interrupt`
-are supported event names. Hook commands are not implicitly trusted or silently run:
+`UserPromptSubmit`, `BeforeModelRequest`, `PreToolUse`, `PostToolUse`, `Stop`,
+`SubagentStop`, and `Interrupt` are supported event names. Once an enabled on-demand
+plugin has been discovered and selected with `use_plugin`, `BeforeModelRequest` runs
+before each subsequent model request in the active primary Code/Work run, including
+network retries and run-owned context compaction or memory analysis/summaries. It only
+handles bounded `type:"prompt"` text. Optional `position:"before"|"after"` and
+`format:"context"|"plain"` fields control placement and labeling. The default
+before/context preserves the existing wrapped low-priority context.
+`position:"after", format:"plain"` appends only the declared text as ordinary
+user-visible content with one newline and no blank separator. `format:"plain"` is the
+reusable attribution opt-out: with either position it removes the plugin ID, heading,
+source attribution and `<mingshen_plugin_context>` wrapper. Legacy `format:"context"`
+keeps that attribution. Plain text remains user-priority text and cannot override higher-priority safety rules.
+`before + context` remains system context. When a request ends with tool results, other
+user-content additions go after the complete tool-result group in the protocol-valid
+form: a content block in the existing user message or a separate user tail message. They
+must not split a tool call from its result or rewrite their pairing. Declared command/MCP
+actions are skipped. An initial request already sent before the
+plugin is selected is not replayed. Hook load, file, timeout, or validation errors are
+logged and fail closed: the affected request is not sent, and the failure is returned to
+its owning generation, compaction, or memory operation rather than silently proceeding
+without the hook context. Cancellation propagates. Actual children derived through an
+active parent run's `runSubagent` path inherit only the parent's selected/activated
+plugins' declarative `type:"prompt"` context from the initial request. Later parent
+activation is consulted before each subsequent unsent child request. This does not
+expose plugin activation, `UserPromptSubmit`, `Interrupt`, plugin commands, MCP, action
+hooks or `local_plugin` to the child. Independent child conversations opened directly
+with `@` and no active parent-run mapping do not inherit it. The hook does not run for
+ChatAgent, automatic-approval reviews, independent AutoDrive/draft-polish jobs, or
+post-run titles.
+
+`UserPromptSubmit` only sees plugins selected when the user submits the turn; it cannot
+be triggered retroactively by `use_plugin`. Other event hooks from an enabled on-demand
+plugin selected with `use_plugin` are available for subsequent events in the primary
+Code/Work run, subject to the same host security checks as session-selected plugins;
+this does not enable child action hooks or plugin tools. Hook commands are not implicitly
+trusted or silently run:
 shell hooks require an explicit enablement plus trust and per-action approval as
 implemented by the host. Use MCP actions when the capability fits the MCP boundary.
 
@@ -108,6 +149,12 @@ reflect the new files. A changed semantic version exposes the update action; sou
 edits never hot-reload an installed copy. Removing a source does not uninstall the
 plugin. If the action reports incomplete MCP synchronization, use
 **重试 MCP 同步** on the installed plugin row to retry that import.
+
+Read-only checks rotate through at most 10 registered markets per check and 200 entries
+per market. They offer only strictly newer semantic versions with a rechecked matching
+source path. A plugin with missing or untraceable installed-source records is not
+automatically claimed by a same-name entry; the user must confirm its original source.
+Checks do not install or execute an update.
 
 ## Status vocabulary
 

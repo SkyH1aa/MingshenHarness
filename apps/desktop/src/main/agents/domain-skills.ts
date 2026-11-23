@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { z } from "zod";
@@ -609,6 +609,49 @@ async function readBuiltinText(path: string): Promise<string> {
   }
 }
 
+async function availableBuiltinReferences(referencesRoot: string): Promise<string[]> {
+  const rootMetadata = await lstat(referencesRoot).catch(() => null);
+  if (!rootMetadata?.isDirectory() || rootMetadata.isSymbolicLink()) return [];
+  const rootReal = await realpath(referencesRoot).catch(() => null);
+  if (!rootReal) return [];
+
+  const pending = [{ path: referencesRoot, relativePath: "", depth: 0 }];
+  const files: string[] = [];
+  let visitedDirectories = 0;
+  while (pending.length && visitedDirectories < 256 && files.length < 80) {
+    const current = pending.shift();
+    if (!current || current.depth > 12) continue;
+    const metadata = await lstat(current.path).catch(() => null);
+    if (!metadata?.isDirectory() || metadata.isSymbolicLink()) continue;
+    const currentReal = await realpath(current.path).catch(() => null);
+    if (!currentReal || (currentReal !== rootReal && !isInside(rootReal, currentReal))) continue;
+    visitedDirectories += 1;
+
+    const children = await readdir(current.path, { withFileTypes: true }).catch(() => []);
+    for (const child of children) {
+      const childPath = join(current.path, child.name);
+      const relativePath = current.relativePath
+        ? `${current.relativePath}/${child.name}`
+        : child.name;
+      if (child.isSymbolicLink()) continue;
+      if (child.isDirectory()) {
+        pending.push({ path: childPath, relativePath, depth: current.depth + 1 });
+      } else if (child.isFile() && files.length < 80) {
+        const fileMetadata = await lstat(childPath).catch(() => null);
+        if (fileMetadata?.isFile() && !fileMetadata.isSymbolicLink()) files.push(relativePath);
+      }
+    }
+  }
+  return files.sort((left, right) => left.localeCompare(right)).map((path) => `references/${path}`);
+}
+
+async function missingBuiltinReference(skillId: string, referencesRoot: string): Promise<Error> {
+  const references = await availableBuiltinReferences(referencesRoot);
+  return new Error(
+    `SKILL_RESOURCE_NOT_FOUND: referenced resource is unavailable. Load the entry with resource:"${skillId}.md" or omit resource (SKILL.md). Available references: ${references.join(", ") || "(none)"}.`,
+  );
+}
+
 async function readBuiltinSkillResource(
   skillsDirectory: string,
   skillId: string,
@@ -621,7 +664,7 @@ async function readBuiltinSkillResource(
     throw new Error("SKILL_RESOURCE_NOT_FOUND: packaged skills directory is unavailable.");
   }
 
-  if (!resource || resource === "SKILL.md") {
+  if (!resource || resource === "SKILL.md" || resource === `${skillId}.md`) {
     const entry = resolve(skillsDirectory, `${skillId}.md`);
     await assertNoLinkedPath(skillsDirectory, entry);
     const entryReal = await realpath(entry).catch(() => null);
@@ -637,8 +680,20 @@ async function readBuiltinSkillResource(
   if (!isInside(referencesRoot, lexicalTarget))
     throw new Error("SKILL_RESOURCE_PATH_INVALID: resource must stay inside references/.");
 
-  await assertNoLinkedPath(skillsRoot, referencesRoot);
-  await assertNoLinkedPath(referencesRoot, lexicalTarget);
+  try {
+    await assertNoLinkedPath(skillsRoot, referencesRoot);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("SKILL_RESOURCE_NOT_FOUND:"))
+      throw await missingBuiltinReference(skillId, referencesRoot);
+    throw error;
+  }
+  try {
+    await assertNoLinkedPath(referencesRoot, lexicalTarget);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("SKILL_RESOURCE_NOT_FOUND:"))
+      throw await missingBuiltinReference(skillId, referencesRoot);
+    throw error;
+  }
   const skillRootReal = await realpath(skillRoot).catch(() => null);
   const referencesRootReal = await realpath(referencesRoot).catch(() => null);
   if (!skillRootReal || !referencesRootReal || !isInside(skillsRoot, skillRootReal))
@@ -647,7 +702,7 @@ async function readBuiltinSkillResource(
     throw new Error("SKILL_RESOURCE_ESCAPE: references root must stay inside its skill.");
 
   const targetReal = await realpath(lexicalTarget).catch(() => null);
-  if (!targetReal) throw new Error("SKILL_RESOURCE_NOT_FOUND: referenced resource is unavailable.");
+  if (!targetReal) throw await missingBuiltinReference(skillId, referencesRoot);
   if (!isInside(referencesRootReal, targetReal))
     throw new Error("SKILL_RESOURCE_ESCAPE: referenced resource leaves its skill references root.");
   return {
@@ -832,7 +887,7 @@ export async function loadDomainSkill(
 export const USE_SKILL_TOOL = {
   name: "use_skill",
   description:
-    "Load a relevant built-in or installed enabled Skill on demand. Use an exact id from the built-in catalog or discover_capabilities. Optional resource is a text path relative to that Skill; built-in references use paths such as references/guide.md inside that skill's own references folder. char_offset pages large resources. Loading text never executes scripts or grants additional permissions.",
+    'Load a relevant built-in or installed enabled Skill on demand. Use an exact id from the built-in catalog or discover_capabilities. Omit resource or use "SKILL.md" for the built-in entry; the exact entry filename matching the id is also accepted (builtin:plugin-creator accepts "plugin-creator.md"; builtin:harness-plugin-api accepts "harness-plugin-api.md"). Their valid references are respectively "references/local-plugin-development.md" and "references/interface-template.md". Other built-in resources must be exact relative paths under that Skill\'s references/ directory, taken from the loaded entry. char_offset pages large resources. Loading text never executes scripts or grants additional permissions.',
   parameters: z.toJSONSchema(skillRequestSchema, { target: "draft-7" }),
 };
 

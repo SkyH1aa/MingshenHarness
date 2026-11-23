@@ -1,7 +1,11 @@
 import {
+  AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
+  Copy,
+  Download,
   Film,
+  FolderOpen,
   Image as ImageIcon,
   Images,
   Layers3,
@@ -9,6 +13,7 @@ import {
   Maximize2,
   Minus,
   PanelRight,
+  Pencil,
   Plus,
   Sparkles,
   Trash2,
@@ -28,14 +33,25 @@ import {
 } from "react";
 import type { ProviderView } from "../../../shared/domain";
 import {
+  alignImageStudioDimension,
   emptyImageStudioWorkspace,
+  IMAGE_STUDIO_MAX_DIMENSION,
+  IMAGE_STUDIO_MAX_DOCUMENTS,
   IMAGE_STUDIO_MAX_GIF_FRAMES,
   IMAGE_STUDIO_MAX_IMPORT_BYTES,
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
+  IMAGE_STUDIO_MIN_DIMENSION,
+  type ImageStudioAspectRatio,
   type ImageStudioAsset,
   type ImageStudioCanvas,
+  type ImageStudioCanvasSummary,
+  type ImageStudioGenerationSettings,
+  type ImageStudioGenerationWarning,
   type ImageStudioLayer,
+  type ImageStudioQuality,
+  type ImageStudioResolution,
   type ImageStudioWorkspace,
+  imageStudioPresetDimensions,
 } from "../../../shared/image-studio";
 import { isVisionTextModel } from "../../../shared/model-capabilities";
 import { useLocale } from "../i18n";
@@ -90,6 +106,32 @@ const assetUrlValues = new ImageStudioUrlCache(32 * 1024 * 1024);
 const workspaceQueue = new ImageStudioWorkspaceQueue((workspace) =>
   window.mingshen.saveImageStudioWorkspace(workspace),
 );
+const imageQualityOptions: Array<{ value: ImageStudioQuality; zh: string; en: string }> = [
+  { value: "auto", zh: "自动", en: "Auto" },
+  { value: "low", zh: "低", en: "Low" },
+  { value: "medium", zh: "中", en: "Medium" },
+  { value: "high", zh: "高", en: "High" },
+  { value: "xhigh", zh: "极高", en: "Very high" },
+  { value: "max", zh: "最高", en: "Maximum" },
+];
+const imageResolutionOptions: Array<{ value: ImageStudioResolution; label: string }> = [
+  { value: "1k", label: "1k" },
+  { value: "2k", label: "2k" },
+  { value: "4k", label: "4k" },
+  { value: "auto", label: "自动" },
+];
+const imageAspectRatios: Array<{ value: ImageStudioAspectRatio; ratio?: string }> = [
+  { value: "1:1", ratio: "1 / 1" },
+  { value: "2:3", ratio: "2 / 3" },
+  { value: "3:2", ratio: "3 / 2" },
+  { value: "4:3", ratio: "4 / 3" },
+  { value: "3:4", ratio: "3 / 4" },
+  { value: "16:9", ratio: "16 / 9" },
+  { value: "9:16", ratio: "9 / 16" },
+  { value: "21:9", ratio: "21 / 9" },
+  { value: "9:21", ratio: "9 / 21" },
+  { value: "auto" },
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -163,16 +205,22 @@ function AssetThumbnail({
   selectedOrder,
   onToggle,
   onAdd,
+  onDownload,
   onDelete,
+  downloadBusy,
   disabled,
 }: {
   asset: ImageStudioAsset;
   selectedOrder: number | null;
   onToggle: () => void;
   onAdd: () => void;
+  onDownload: () => void;
   onDelete: () => void;
+  downloadBusy: boolean;
   disabled: boolean;
 }) {
+  const en = useLocale() === "en";
+  const tx = (zh: string, english: string) => (en ? english : zh);
   const containerRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const url = useAssetUrl(visible ? asset.id : null);
@@ -216,13 +264,32 @@ function AssetThumbnail({
         </small>
       </button>
       <div className="image-asset__actions">
-        <button type="button" title="加入当前画布" aria-label="加入当前画布" onClick={onAdd}>
+        <button
+          type="button"
+          data-testid="image-asset-download"
+          title={tx("保存原图到本地", "Save original image")}
+          aria-label={tx(`保存 ${asset.name} 到本地`, `Save ${asset.name} locally`)}
+          disabled={disabled}
+          onClick={onDownload}
+        >
+          {downloadBusy ? (
+            <LoaderCircle className="spin" aria-hidden="true" size={14} />
+          ) : (
+            <Download aria-hidden="true" size={14} />
+          )}
+        </button>
+        <button
+          type="button"
+          title={tx("加入当前画布", "Add to current canvas")}
+          aria-label={tx("加入当前画布", "Add to current canvas")}
+          onClick={onAdd}
+        >
           <Plus aria-hidden="true" size={14} />
         </button>
         <button
           type="button"
-          title="删除素材"
-          aria-label="删除素材"
+          title={tx("删除素材", "Delete asset")}
+          aria-label={tx("删除素材", "Delete asset")}
           disabled={disabled}
           onClick={onDelete}
         >
@@ -283,6 +350,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [generationWarnings, setGenerationWarnings] = useState<ImageStudioGenerationWarning[]>([]);
   const [promptPreview, setPromptPreview] = useState<{
     text: string;
     sourcePrompt: string;
@@ -292,13 +360,19 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const [assetsExpanded, setAssetsExpanded] = useState(
     () => typeof window === "undefined" || !window.matchMedia("(max-width: 920px)").matches,
   );
+  const [libraryView, setLibraryView] = useState<"assets" | "canvases">("assets");
+  const [canvasProjects, setCanvasProjects] = useState<ImageStudioCanvasSummary[]>([]);
+  const [renamingCanvasId, setRenamingCanvasId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [inspectorExpanded, setInspectorExpanded] = useState(
     () => typeof window === "undefined" || !window.matchMedia("(max-width: 920px)").matches,
   );
   const [frameDelay, setFrameDelay] = useState(350);
+  const [imageCountDraft, setImageCountDraft] = useState("1");
   const [search, setSearch] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bundleInputRef = useRef<HTMLInputElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const interaction = useRef<LayerInteraction | null>(null);
   const mounted = useRef(false);
@@ -308,6 +382,13 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const busyRef = useRef<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelRenameRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!renamingCanvasId) return;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [renamingCanvasId]);
 
   const currentDocument =
     workspace.documents.find((document) => document.id === workspace.activeDocumentId) ?? null;
@@ -318,13 +399,23 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     .filter((asset): asset is ImageStudioAsset => Boolean(asset));
   const filteredAssets = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    if (!query) return workspace.assets;
-    return workspace.assets.filter(
+    const newestFirst = [...workspace.assets].reverse();
+    if (!query) return newestFirst;
+    return newestFirst.filter(
       (asset) =>
         asset.name.toLocaleLowerCase().includes(query) ||
         asset.prompt?.toLocaleLowerCase().includes(query),
     );
   }, [search, workspace.assets]);
+  const filteredCanvasProjects = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    if (!query) return canvasProjects;
+    return canvasProjects.filter((project) => project.name.toLocaleLowerCase().includes(query));
+  }, [canvasProjects, search]);
+
+  useEffect(() => {
+    setImageCountDraft(String(workspace.generation.imageCount));
+  }, [workspace.generation.imageCount]);
 
   useEffect(() => {
     mounted.current = true;
@@ -345,13 +436,20 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     loadVersion.current = version;
     setLoadError(null);
     void workspaceQueue
-      .run(async () => normalizeWorkspace(await window.mingshen.getImageStudioWorkspace()))
+      .run(async () => {
+        const [workspace, projects] = await Promise.all([
+          window.mingshen.getImageStudioWorkspace(),
+          window.mingshen.listImageStudioCanvases(),
+        ]);
+        return { workspace: normalizeWorkspace(workspace), projects };
+      })
       .then(
-        (next) => {
+        ({ workspace: next, projects }) => {
           if (!active || loadVersion.current !== version) return;
           workspaceRef.current = next;
           loadedRef.current = true;
           setWorkspace(next);
+          setCanvasProjects(projects);
           setLoaded(true);
         },
         (cause) => {
@@ -400,6 +498,69 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     setInspectorExpanded((current) => !current);
   };
 
+  const updateGeneration = (
+    update:
+      | Partial<ImageStudioGenerationSettings>
+      | ((current: ImageStudioGenerationSettings) => ImageStudioGenerationSettings),
+  ) => {
+    updateWorkspace((current) => ({
+      ...current,
+      generation: {
+        ...current.generation,
+        ...(typeof update === "function" ? update(current.generation) : update),
+      },
+    }));
+  };
+
+  const chooseResolution = (resolution: ImageStudioResolution) => {
+    if (resolution === "auto") {
+      updateGeneration({ resolution, aspectRatio: "auto" });
+      return;
+    }
+    if (resolution === "custom") {
+      updateGeneration({ resolution, aspectRatio: "custom" });
+      return;
+    }
+    const current = workspaceRef.current.generation;
+    const aspectRatio: Exclude<ImageStudioAspectRatio, "auto" | "custom"> =
+      current.aspectRatio === "auto" || current.aspectRatio === "custom"
+        ? "1:1"
+        : current.aspectRatio;
+    const dimensions = imageStudioPresetDimensions(resolution, aspectRatio, current.alignTo16);
+    updateGeneration({ resolution, aspectRatio, ...dimensions });
+  };
+
+  const chooseAspectRatio = (aspectRatio: ImageStudioAspectRatio) => {
+    const current = workspaceRef.current.generation;
+    if (aspectRatio === "auto") {
+      updateGeneration({ aspectRatio, resolution: "auto" });
+      return;
+    }
+    if (aspectRatio === "custom") {
+      updateGeneration({ aspectRatio, resolution: "custom" });
+      return;
+    }
+    const resolution: Exclude<ImageStudioResolution, "auto" | "custom"> =
+      current.resolution === "auto" || current.resolution === "custom" ? "1k" : current.resolution;
+    const dimensions = imageStudioPresetDimensions(resolution, aspectRatio, current.alignTo16);
+    updateGeneration({ resolution, aspectRatio, ...dimensions });
+  };
+
+  const updateDimension = (field: "width" | "height", value: string) => {
+    const current = workspaceRef.current.generation;
+    const parsed = Number(value);
+    const next = clamp(
+      Number.isFinite(parsed) ? Math.round(parsed) : IMAGE_STUDIO_MIN_DIMENSION,
+      IMAGE_STUDIO_MIN_DIMENSION,
+      IMAGE_STUDIO_MAX_DIMENSION,
+    );
+    updateGeneration({
+      [field]: current.alignTo16 ? alignImageStudioDimension(next) : next,
+      resolution: "custom",
+      aspectRatio: "custom",
+    });
+  };
+
   const showNotice = (text: string) => {
     if (!mounted.current) return;
     setNotice(text);
@@ -410,6 +571,42 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const setOperation = (next: string | null) => {
     busyRef.current = next;
     if (mounted.current) setBusy(next);
+  };
+
+  const applyWorkspaceSnapshot = (next: ImageStudioWorkspace) => {
+    workspaceRef.current = next;
+    if (mounted.current) setWorkspace(next);
+  };
+
+  const refreshCanvasProjects = async () => {
+    try {
+      const projects = await workspaceQueue.run(() => window.mingshen.listImageStudioCanvases());
+      if (mounted.current) setCanvasProjects(projects);
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const runCanvasMutation = async (
+    operation: string,
+    action: () => Promise<ImageStudioWorkspace>,
+  ): Promise<boolean> => {
+    if (busyRef.current || !mounted.current) return false;
+    setOperation(operation);
+    setError(null);
+    try {
+      const next = await workspaceQueue.run(action);
+      if (!mounted.current) return false;
+      applyWorkspaceSnapshot(next);
+      setSelectedLayerId(null);
+      await refreshCanvasProjects();
+      return true;
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      if (busyRef.current === operation) setOperation(null);
+    }
   };
 
   const updateWorkspace = (
@@ -456,6 +653,16 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
 
   const createCanvas = () => {
     const current = workspaceRef.current;
+    if (busyRef.current) return;
+    if (current.documents.length >= IMAGE_STUDIO_MAX_DOCUMENTS) {
+      setError(
+        tx(
+          `最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布。`,
+          `You can open up to ${IMAGE_STUDIO_MAX_DOCUMENTS} canvases at once.`,
+        ),
+      );
+      return;
+    }
     const now = new Date().toISOString();
     const document: ImageStudioCanvas = {
       id: crypto.randomUUID(),
@@ -479,32 +686,79 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
       activeDocumentId: document.id,
       documents: [...current.documents, document],
     });
+    void refreshCanvasProjects();
   };
 
-  const removeCanvas = async () => {
-    if (!currentDocument) return;
+  const closeCanvas = async (canvasId: string) => {
+    const closed = await runCanvasMutation("canvas-close", () =>
+      window.mingshen.closeImageStudioCanvas(canvasId),
+    );
+    if (closed)
+      showNotice(tx("画布已关闭，工程仍保存在本地", "Canvas closed; project remains saved"));
+  };
+
+  const deleteCanvasProject = async (project: ImageStudioCanvasSummary) => {
+    if (busyRef.current) return;
     const yes = await confirm({
       title: tx("删除画布", "Delete canvas"),
       description: tx(
-        `将删除「${currentDocument.name}」的画布布局，素材仍保留在素材库。`,
-        `Delete the layout for “${currentDocument.name}”. Assets stay in the library.`,
+        `将永久删除「${project.name}」的本地画布工程；素材文件仍保留在素材库。`,
+        `Permanently delete the local canvas project “${project.name}”. Its image assets stay in the library.`,
       ),
       confirmLabel: tx("删除画布", "Delete"),
       tone: "danger",
     });
     if (!yes || !mounted.current) return;
-    setSelectedLayerId(null);
-    updateWorkspace((current) => {
-      const documents = current.documents.filter((item) => item.id !== currentDocument.id);
-      return {
-        ...current,
-        documents,
-        activeDocumentId:
-          current.activeDocumentId === currentDocument.id
-            ? (documents[0]?.id ?? null)
-            : current.activeDocumentId,
-      };
-    });
+    const deleted = await runCanvasMutation("canvas-delete", () =>
+      window.mingshen.deleteImageStudioCanvas(project.id),
+    );
+    if (deleted) showNotice(tx("画布工程已删除", "Canvas project deleted"));
+  };
+
+  const duplicateCanvasProject = async (project: ImageStudioCanvasSummary) => {
+    const duplicated = await runCanvasMutation("canvas-duplicate", () =>
+      window.mingshen.duplicateImageStudioCanvas(project.id),
+    );
+    if (duplicated) showNotice(tx("画布副本已创建", "Canvas copy created"));
+  };
+
+  const beginCanvasRename = (project: ImageStudioCanvasSummary) => {
+    if (!project.available || busyRef.current) return;
+    setRenamingCanvasId(project.id);
+    setRenameDraft(project.name);
+  };
+
+  const cancelCanvasRename = (canvasId: string) => {
+    cancelRenameRef.current = canvasId;
+    setRenamingCanvasId(null);
+    setRenameDraft("");
+  };
+
+  const commitCanvasRename = async (project: ImageStudioCanvasSummary) => {
+    if (renamingCanvasId !== project.id || cancelRenameRef.current === project.id) {
+      cancelRenameRef.current = null;
+      return;
+    }
+    if (!renameDraft.trim()) {
+      setError(tx("画布名称不能为空。", "Canvas name cannot be empty."));
+      return;
+    }
+    const renamed = await runCanvasMutation("canvas-rename", () =>
+      window.mingshen.renameImageStudioCanvas(project.id, renameDraft),
+    );
+    if (renamed) {
+      setRenamingCanvasId(null);
+      setRenameDraft("");
+    }
+  };
+
+  const revealCanvasFolder = async () => {
+    if (busyRef.current) return;
+    try {
+      await workspaceQueue.run(() => window.mingshen.revealImageStudioCanvasFolder());
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    }
   };
 
   const addAssetToCanvas = (asset: ImageStudioAsset) => {
@@ -513,6 +767,15 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     let document = current.documents.find((item) => item.id === current.activeDocumentId) ?? null;
     const hadDocument = Boolean(document);
     if (!document) {
+      if (current.documents.length >= IMAGE_STUDIO_MAX_DOCUMENTS) {
+        setError(
+          tx(
+            `最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布。`,
+            `You can open up to ${IMAGE_STUDIO_MAX_DOCUMENTS} canvases at once.`,
+          ),
+        );
+        return;
+      }
       const now = new Date().toISOString();
       document = {
         id: crypto.randomUUID(),
@@ -560,6 +823,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
       activeDocumentId: nextDocument.id,
       documents,
     });
+    if (!hadDocument) void refreshCanvasProjects();
     if (window.matchMedia("(max-width: 680px)").matches) setAssetsExpanded(false);
   };
 
@@ -636,6 +900,24 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     }
   };
 
+  const downloadAsset = async (asset: ImageStudioAsset) => {
+    if (busyRef.current) return;
+    const operation = `download-${asset.id}`;
+    setOperation(operation);
+    setError(null);
+    try {
+      const path = await workspaceQueue.run(() => window.mingshen.exportImageStudioAsset(asset.id));
+      if (path && mounted.current) {
+        const filename = path.split(/[\\/]/).at(-1) || asset.name;
+        showNotice(tx(`已保存：${filename}`, `Saved: ${filename}`));
+      }
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (busyRef.current === operation) setOperation(null);
+    }
+  };
+
   const generate = async () => {
     if (busyRef.current) return;
     const snapshot = workspaceRef.current;
@@ -650,6 +932,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     }
     setOperation("generate");
     setError(null);
+    setGenerationWarnings([]);
     const requestId = crypto.randomUUID();
     activeRequestId.current = requestId;
     try {
@@ -660,13 +943,21 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
           model: imageModel,
           prompt: snapshot.prompt,
           negativePrompt: snapshot.negativePrompt,
-          size: "1024x1024",
+          generation: snapshot.generation,
           addToActiveCanvas: true,
         });
         if (!mounted.current || activeRequestId.current !== requestId) return;
-        assetUrlValues.set(result.asset.id, result.dataUrl);
         updateWorkspace((current) => mergeGeneratedResult(current, result));
-        showNotice(tx("图片已生成并保存到素材库", "Image generated and saved"));
+        setGenerationWarnings(result.warnings);
+        setAssetsExpanded(true);
+        setInspectorExpanded(false);
+        setSearch("");
+        showNotice(
+          tx(
+            `已生成 ${result.generatedAssets.length} 张并保存到素材库`,
+            `Generated ${result.generatedAssets.length} images and saved them to the library`,
+          ),
+        );
       });
     } catch (cause) {
       if (mounted.current && activeRequestId.current === requestId)
@@ -840,6 +1131,13 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
         !Array.isArray(bundle.canvas.layers)
       )
         throw new Error(tx("不是有效的 Mingshen 画布工程。", "Invalid Mingshen canvas bundle."));
+      if (workspaceRef.current.documents.length >= IMAGE_STUDIO_MAX_DOCUMENTS)
+        throw new Error(
+          tx(
+            `最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布，请先关闭一个标签。`,
+            `You can open up to ${IMAGE_STUDIO_MAX_DOCUMENTS} canvases. Close a tab first.`,
+          ),
+        );
       const bundleIds = new Set(bundle.assets.map((asset) => asset?.id));
       if (
         bundle.assets.length > 20 ||
@@ -884,6 +1182,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
           documents: [...current.documents, canvas],
         }));
       });
+      await refreshCanvasProjects();
       showNotice(tx("画布工程已导入", "Canvas bundle imported"));
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
@@ -1067,12 +1366,21 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     providers
       .find((provider) => provider.id === workspace.textModel?.providerId)
       ?.models.find((model) => model.id === workspace.textModel?.modelId);
+  const canvasMutationBusy =
+    busy === "canvas-close" ||
+    busy === "canvas-delete" ||
+    busy === "canvas-duplicate" ||
+    busy === "canvas-rename";
 
   return (
     <section
       className="image-studio"
       aria-label={tx("生图工作台", "Image Studio")}
       data-testid="image-studio"
+      data-navigation-busy={Boolean(busy)}
+      data-navigation-unsaved={Boolean(promptPreview)}
+      aria-busy={canvasMutationBusy}
+      inert={canvasMutationBusy}
     >
       <header className="image-studio__header">
         <div className="image-studio__title">
@@ -1167,6 +1475,16 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
             {tx("导入图片", "Import")}
           </button>
           <button
+            className="btn btn--secondary"
+            type="button"
+            data-testid="image-canvas-import"
+            disabled={busy !== null}
+            onClick={() => bundleInputRef.current?.click()}
+          >
+            <FolderOpen aria-hidden="true" size={15} />
+            {tx("导入画布", "Import canvas")}
+          </button>
+          <button
             className="btn btn--primary"
             type="button"
             data-testid="image-canvas-new"
@@ -1237,65 +1555,294 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
           </div>
           {assetsExpanded ? (
             <>
+              <div className="image-library__heading">
+                <strong>{tx("素材库", "Library")}</strong>
+                <button
+                  type="button"
+                  className="image-library__collapse icon-button"
+                  aria-expanded={assetsExpanded}
+                  aria-controls="image-studio-library"
+                  aria-label={tx("收起素材库", "Collapse library")}
+                  title={tx("收起素材库", "Collapse library")}
+                  onClick={toggleAssets}
+                >
+                  <X aria-hidden="true" size={15} />
+                </button>
+              </div>
+              <div
+                className="image-library__tabs"
+                role="tablist"
+                aria-label={tx("素材视图", "Library view")}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={libraryView === "assets"}
+                  className={libraryView === "assets" ? "is-active" : ""}
+                  data-testid="image-library-assets-tab"
+                  onClick={() => setLibraryView("assets")}
+                >
+                  <Images aria-hidden="true" size={13} />
+                  {tx("图片", "Images")}
+                  <span>{workspace.assets.length}</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={libraryView === "canvases"}
+                  className={libraryView === "canvases" ? "is-active" : ""}
+                  data-testid="image-library-canvases-tab"
+                  onClick={() => {
+                    setLibraryView("canvases");
+                    setError(null);
+                    void refreshCanvasProjects();
+                  }}
+                >
+                  <Layers3 aria-hidden="true" size={13} />
+                  {tx("我的画布", "My canvases")}
+                  <span>{canvasProjects.length}</span>
+                </button>
+              </div>
               <label className="image-library__search">
-                <span className="visually-hidden">{tx("搜索素材", "Search assets")}</span>
+                <span className="visually-hidden">
+                  {libraryView === "assets"
+                    ? tx("搜索素材", "Search assets")
+                    : tx("搜索画布", "Search canvases")}
+                </span>
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder={tx("搜索名称或提示词", "Search name or prompt")}
+                  placeholder={
+                    libraryView === "assets"
+                      ? tx("搜索名称或提示词", "Search name or prompt")
+                      : tx("搜索画布名称", "Search canvases")
+                  }
                 />
               </label>
-              <div className="image-library__selection">
-                <span>
-                  {selectedAssets.length
-                    ? tx(
-                        `已选 ${selectedAssets.length} 帧`,
-                        `${selectedAssets.length} frames selected`,
-                      )
-                    : tx("按顺序选择动图帧", "Select frames in order")}
-                </span>
-                {selectedAssets.length ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    title={tx("清空选择", "Clear selection")}
-                    aria-label={tx("清空选择", "Clear selection")}
-                    onClick={() =>
-                      updateWorkspace((current) => ({ ...current, selectedAssetIds: [] }))
-                    }
-                  >
-                    <X aria-hidden="true" size={14} />
-                  </button>
-                ) : null}
-              </div>
-              <div className="image-library__grid">
-                {filteredAssets.map((asset) => (
-                  <AssetThumbnail
-                    key={asset.id}
-                    asset={asset}
-                    selectedOrder={
-                      workspace.selectedAssetIds.includes(asset.id)
-                        ? workspace.selectedAssetIds.indexOf(asset.id)
-                        : null
-                    }
-                    onToggle={() => toggleSelectedAsset(asset.id)}
-                    onAdd={() => addAssetToCanvas(asset)}
-                    onDelete={() => void removeAsset(asset)}
-                    disabled={busy !== null}
-                  />
-                ))}
-                {!filteredAssets.length ? (
-                  <button
-                    type="button"
-                    className="image-library__empty"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <ImageIcon aria-hidden="true" size={22} />
-                    <strong>{tx("添加图片素材", "Add image assets")}</strong>
-                    <small>{tx("本地导入，不依赖原文件", "Local import, no source path")}</small>
-                  </button>
-                ) : null}
-              </div>
+              {libraryView === "assets" ? (
+                <>
+                  <div className="image-library__selection">
+                    <span>
+                      {selectedAssets.length
+                        ? tx(
+                            `已选 ${selectedAssets.length} 帧`,
+                            `${selectedAssets.length} frames selected`,
+                          )
+                        : tx("按顺序选择动图帧", "Select frames in order")}
+                    </span>
+                    {selectedAssets.length ? (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        title={tx("清空选择", "Clear selection")}
+                        aria-label={tx("清空选择", "Clear selection")}
+                        onClick={() =>
+                          updateWorkspace((current) => ({ ...current, selectedAssetIds: [] }))
+                        }
+                      >
+                        <X aria-hidden="true" size={14} />
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="image-library__grid">
+                    {filteredAssets.map((asset) => (
+                      <AssetThumbnail
+                        key={asset.id}
+                        asset={asset}
+                        selectedOrder={
+                          workspace.selectedAssetIds.includes(asset.id)
+                            ? workspace.selectedAssetIds.indexOf(asset.id)
+                            : null
+                        }
+                        onToggle={() => toggleSelectedAsset(asset.id)}
+                        onAdd={() => addAssetToCanvas(asset)}
+                        onDownload={() => void downloadAsset(asset)}
+                        onDelete={() => void removeAsset(asset)}
+                        downloadBusy={busy === `download-${asset.id}`}
+                        disabled={busy !== null}
+                      />
+                    ))}
+                    {!filteredAssets.length ? (
+                      <button
+                        type="button"
+                        className="image-library__empty"
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <ImageIcon aria-hidden="true" size={22} />
+                        <strong>{tx("添加图片素材", "Add image assets")}</strong>
+                        <small>
+                          {tx("本地导入，不依赖原文件", "Local import, no source path")}
+                        </small>
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <div className="image-canvas-library" data-testid="image-canvas-library">
+                  <div className="image-canvas-library__toolbar">
+                    <span>
+                      {tx(
+                        `${canvasProjects.length} 个本地工程`,
+                        `${canvasProjects.length} local projects`,
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title={tx("打开画布文件夹", "Open canvas folder")}
+                      aria-label={tx("打开画布文件夹", "Open canvas folder")}
+                      disabled={busy !== null}
+                      onClick={() => void revealCanvasFolder()}
+                    >
+                      <FolderOpen aria-hidden="true" size={14} />
+                    </button>
+                  </div>
+                  <div className="image-canvas-library__list">
+                    {filteredCanvasProjects.map((project) => {
+                      const isOpen = workspace.documents.some((item) => item.id === project.id);
+                      const isRenaming = renamingCanvasId === project.id;
+                      return (
+                        <article
+                          key={project.id}
+                          className={`image-canvas-project${project.available ? "" : " image-canvas-project--unavailable"}`}
+                          data-testid="image-canvas-project"
+                          data-canvas-id={project.id}
+                        >
+                          <div className="image-canvas-project__main">
+                            <Layers3 aria-hidden="true" size={15} />
+                            {isRenaming ? (
+                              <input
+                                ref={renameInputRef}
+                                value={renameDraft}
+                                maxLength={120}
+                                aria-label={tx("画布名称", "Canvas name")}
+                                onChange={(event) => setRenameDraft(event.target.value)}
+                                onBlur={() => void commitCanvasRename(project)}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void commitCanvasRename(project);
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelCanvasRename(project.id);
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="image-canvas-project__open"
+                                disabled={!project.available || busy !== null}
+                                title={project.available ? project.name : (project.error ?? "")}
+                                onClick={() => {
+                                  if (isOpen) {
+                                    updateWorkspace((current) => ({
+                                      ...current,
+                                      activeDocumentId: project.id,
+                                    }));
+                                  } else {
+                                    void runCanvasMutation("canvas-open", () =>
+                                      window.mingshen.openImageStudioCanvas(project.id),
+                                    );
+                                  }
+                                }}
+                              >
+                                <strong>{project.name}</strong>
+                                <small>
+                                  {project.available
+                                    ? `${project.width}×${project.height} · ${tx(`${project.layerCount} 层`, `${project.layerCount} layers`)} · ${new Date(project.updatedAt).toLocaleDateString(en ? "en-US" : "zh-CN")}`
+                                    : tx("项目文件无法读取", "Project file unavailable")}
+                                </small>
+                              </button>
+                            )}
+                          </div>
+                          {isOpen ? (
+                            <span className="image-canvas-project__open-state">
+                              {tx("已打开", "Open")}
+                            </span>
+                          ) : null}
+                          {!project.available && project.error ? (
+                            <p role="status" className="image-canvas-project__error">
+                              {project.error}
+                            </p>
+                          ) : null}
+                          <div className="image-canvas-project__actions">
+                            {isRenaming ? (
+                              <button
+                                type="button"
+                                className="icon-button"
+                                title={tx("取消重命名", "Cancel rename")}
+                                aria-label={tx("取消重命名", "Cancel rename")}
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => cancelCanvasRename(project.id)}
+                              >
+                                <X aria-hidden="true" size={13} />
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  title={tx("重命名", "Rename")}
+                                  aria-label={tx(
+                                    `重命名 ${project.name}`,
+                                    `Rename ${project.name}`,
+                                  )}
+                                  disabled={!project.available || busy !== null}
+                                  onClick={() => beginCanvasRename(project)}
+                                >
+                                  <Pencil aria-hidden="true" size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  title={tx("复制画布", "Duplicate canvas")}
+                                  aria-label={tx(
+                                    `复制 ${project.name}`,
+                                    `Duplicate ${project.name}`,
+                                  )}
+                                  disabled={!project.available || busy !== null}
+                                  onClick={() => void duplicateCanvasProject(project)}
+                                >
+                                  <Copy aria-hidden="true" size={13} />
+                                </button>
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              className="icon-button image-canvas-project__delete"
+                              title={tx("删除本地工程", "Delete local project")}
+                              aria-label={tx(`删除 ${project.name}`, `Delete ${project.name}`)}
+                              disabled={busy !== null}
+                              onClick={() => void deleteCanvasProject(project)}
+                            >
+                              <Trash2 aria-hidden="true" size={13} />
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                    {!filteredCanvasProjects.length ? (
+                      <div className="image-canvas-library__empty">
+                        <Layers3 aria-hidden="true" size={21} />
+                        <strong>{tx("还没有本地画布", "No local canvases yet")}</strong>
+                        <button type="button" className="btn btn--secondary" onClick={createCanvas}>
+                          <Plus aria-hidden="true" size={14} />
+                          {tx("新建画布", "New canvas")}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--ghost"
+                          onClick={() => bundleInputRef.current?.click()}
+                        >
+                          <ArrowUpFromLine aria-hidden="true" size={14} />
+                          {tx("导入画布", "Import canvas")}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
             </>
           ) : null}
         </aside>
@@ -1308,20 +1855,37 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
               aria-label={tx("画布", "Canvases")}
             >
               {workspace.documents.map((document) => (
-                <button
+                <div
+                  className="image-workspace__tab"
+                  data-testid="image-canvas-tab"
+                  data-canvas-id={document.id}
                   key={document.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={document.id === currentDocument?.id}
-                  className={document.id === currentDocument?.id ? "is-active" : ""}
-                  onClick={() => {
-                    setSelectedLayerId(null);
-                    updateWorkspace((current) => ({ ...current, activeDocumentId: document.id }));
-                  }}
                 >
-                  <Layers3 aria-hidden="true" size={14} />
-                  <span>{document.name}</span>
-                </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={document.id === currentDocument?.id}
+                    className={document.id === currentDocument?.id ? "is-active" : ""}
+                    title={document.name}
+                    onClick={() => {
+                      setSelectedLayerId(null);
+                      updateWorkspace((current) => ({ ...current, activeDocumentId: document.id }));
+                    }}
+                  >
+                    <Layers3 aria-hidden="true" size={14} />
+                    <span>{document.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="image-workspace__tab-close"
+                    title={tx("关闭画布", "Close canvas")}
+                    aria-label={tx(`关闭画布 ${document.name}`, `Close canvas ${document.name}`)}
+                    disabled={busy !== null}
+                    onClick={() => void closeCanvas(document.id)}
+                  >
+                    <X aria-hidden="true" size={12} />
+                  </button>
+                </div>
               ))}
             </div>
             <div className="image-workspace__tools">
@@ -1472,6 +2036,188 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
           aria-label={tx("图片设置", "Image settings")}
           hidden={!inspectorExpanded}
         >
+          <section
+            className="image-inspector__section image-generation-settings"
+            data-testid="image-generation-settings"
+          >
+            <div className="image-inspector__heading">
+              <span>
+                <Sparkles aria-hidden="true" size={15} />
+                <strong>{tx("生成参数", "Generation settings")}</strong>
+              </span>
+            </div>
+            <fieldset className="image-generation-settings__block">
+              <legend className="image-setting-label">{tx("质量", "Quality")}</legend>
+              <div className="image-choice-grid image-choice-grid--quality">
+                {imageQualityOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={workspace.generation.quality === option.value}
+                    className={workspace.generation.quality === option.value ? "is-selected" : ""}
+                    onClick={() => updateGeneration({ quality: option.value })}
+                  >
+                    {en ? option.en : option.zh}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <div className="image-generation-settings__block">
+              <div className="image-generation-settings__row">
+                <span className="image-setting-label">{tx("尺寸", "Size")}</span>
+                <label className="image-setting-toggle">
+                  <span>{tx("16 倍数对齐", "Align to 16")}</span>
+                  <input
+                    type="checkbox"
+                    checked={workspace.generation.alignTo16}
+                    onChange={(event) => {
+                      const alignTo16 = event.target.checked;
+                      updateGeneration((current) => ({
+                        ...current,
+                        alignTo16,
+                        width: alignTo16 ? alignImageStudioDimension(current.width) : current.width,
+                        height: alignTo16
+                          ? alignImageStudioDimension(current.height)
+                          : current.height,
+                      }));
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="image-dimension-fields">
+                <label className="image-dimension-field">
+                  <span>W</span>
+                  <input
+                    type="number"
+                    min={IMAGE_STUDIO_MIN_DIMENSION}
+                    max={IMAGE_STUDIO_MAX_DIMENSION}
+                    step={workspace.generation.alignTo16 ? 16 : 1}
+                    value={workspace.generation.width}
+                    disabled={workspace.generation.resolution === "auto"}
+                    onChange={(event) => updateDimension("width", event.target.value)}
+                  />
+                </label>
+                <span className="image-dimension-fields__link" aria-hidden="true">
+                  ↔
+                </span>
+                <label className="image-dimension-field">
+                  <span>H</span>
+                  <input
+                    type="number"
+                    min={IMAGE_STUDIO_MIN_DIMENSION}
+                    max={IMAGE_STUDIO_MAX_DIMENSION}
+                    step={workspace.generation.alignTo16 ? 16 : 1}
+                    value={workspace.generation.height}
+                    disabled={workspace.generation.resolution === "auto"}
+                    onChange={(event) => updateDimension("height", event.target.value)}
+                  />
+                </label>
+              </div>
+            </div>
+            <fieldset className="image-generation-settings__block">
+              <legend className="image-setting-label">{tx("分辨率", "Resolution")}</legend>
+              <div className="image-choice-grid image-choice-grid--resolution">
+                {imageResolutionOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={workspace.generation.resolution === option.value}
+                    className={
+                      workspace.generation.resolution === option.value ? "is-selected" : ""
+                    }
+                    onClick={() => chooseResolution(option.value)}
+                  >
+                    {en && option.value === "auto" ? "Auto" : option.label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <fieldset className="image-generation-settings__block">
+              <legend className="image-setting-label">{tx("画面比例", "Aspect ratio")}</legend>
+              <div className="image-ratio-grid">
+                {imageAspectRatios.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={workspace.generation.aspectRatio === option.value}
+                    className={
+                      workspace.generation.aspectRatio === option.value ? "is-selected" : ""
+                    }
+                    disabled={workspace.generation.resolution === "auto"}
+                    onClick={() => chooseAspectRatio(option.value)}
+                  >
+                    {option.ratio ? (
+                      <span
+                        className="image-ratio-grid__shape"
+                        style={{ aspectRatio: option.ratio }}
+                        aria-hidden="true"
+                      />
+                    ) : null}
+                    <span>{option.value === "auto" ? (en ? "Auto" : "自动") : option.value}</span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <label className="image-setting-toggle image-setting-toggle--wide">
+              <span>
+                <strong>{tx("透明背景", "Transparent background")}</strong>
+                <small>{tx("仅在所选模型支持时生效", "Only available on supported models")}</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={workspace.generation.transparentBackground}
+                onChange={(event) =>
+                  updateGeneration({ transparentBackground: event.target.checked })
+                }
+              />
+            </label>
+            <fieldset className="image-generation-settings__block">
+              <legend className="image-setting-label">{tx("图片数量", "Image count")}</legend>
+              <div className="image-choice-grid image-choice-grid--count">
+                {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-label={en ? `${count} ${count === 1 ? "image" : "images"}` : `${count} 张`}
+                    aria-pressed={workspace.generation.imageCount === count}
+                    className={workspace.generation.imageCount === count ? "is-selected" : ""}
+                    onClick={() => updateGeneration({ imageCount: count })}
+                  >
+                    {en ? count : `${count} 张`}
+                  </button>
+                ))}
+                <label className="image-generation-settings__custom-count">
+                  <span>{tx("自定义", "Custom")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={imageCountDraft}
+                    aria-label={tx("自定义图片数量", "Custom image count")}
+                    onChange={(event) => {
+                      setImageCountDraft(event.target.value);
+                    }}
+                    onBlur={() => {
+                      const count = Number(imageCountDraft);
+                      const normalized = Number.isFinite(count)
+                        ? clamp(Math.round(count), 1, 10)
+                        : workspaceRef.current.generation.imageCount;
+                      setImageCountDraft(String(normalized));
+                      updateGeneration({ imageCount: normalized });
+                    }}
+                  />
+                </label>
+              </div>
+            </fieldset>
+            <p className="image-generation-settings__note">
+              {tx(
+                "质量档位、透明背景与自定义尺寸取决于图片模型支持；不支持时会显示供应商错误，不会静默降级。",
+                "Quality, transparency and custom dimensions depend on the image model. Unsupported settings surface the provider error instead of silently falling back.",
+              )}
+            </p>
+          </section>
+
           <section className="image-inspector__section">
             <div className="image-inspector__heading">
               <span>
@@ -1653,11 +2399,12 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
                 <button
                   className="icon-button"
                   type="button"
-                  title={tx("删除画布", "Delete canvas")}
-                  aria-label={tx("删除画布", "Delete canvas")}
-                  onClick={() => void removeCanvas()}
+                  title={tx("关闭画布", "Close canvas")}
+                  aria-label={tx("关闭画布", "Close canvas")}
+                  disabled={busy !== null}
+                  onClick={() => void closeCanvas(currentDocument.id)}
                 >
-                  <Trash2 aria-hidden="true" size={14} />
+                  <X aria-hidden="true" size={14} />
                 </button>
               ) : null}
             </div>
@@ -1912,6 +2659,37 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
         </aside>
       </div>
 
+      {generationWarnings.length && !error ? (
+        <div
+          className="image-studio__error image-studio__warning"
+          role="status"
+          aria-live="polite"
+          data-testid="image-generation-warning"
+        >
+          <AlertTriangle aria-hidden="true" size={16} />
+          <span>
+            {tx(
+              "图片已按实际尺寸保存到素材库。",
+              "Images were saved to the library at their actual dimensions.",
+            )}
+            {generationWarnings.map((warning) => (
+              <span key={warning.imageIndex} className="image-studio__warning-detail">
+                {tx(
+                  `第 ${warning.imageIndex} 张：供应商返回 ${warning.actualWidth}×${warning.actualHeight}，与请求的 ${warning.requestedWidth}×${warning.requestedHeight} 不一致。`,
+                  `Image ${warning.imageIndex}: the provider returned ${warning.actualWidth}×${warning.actualHeight} instead of the requested ${warning.requestedWidth}×${warning.requestedHeight}.`,
+                )}
+              </span>
+            ))}
+          </span>
+          <button
+            type="button"
+            aria-label={tx("关闭警告", "Dismiss warning")}
+            onClick={() => setGenerationWarnings([])}
+          >
+            <X aria-hidden="true" size={14} />
+          </button>
+        </div>
+      ) : null}
       {error ? (
         <div className="image-studio__error" role="alert">
           <span>{error}</span>

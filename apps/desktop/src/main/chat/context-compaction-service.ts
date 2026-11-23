@@ -15,13 +15,21 @@ import { recordRuntimeError } from "../diagnostics/runtime-log";
 import { prepareMessageAttachments } from "../documents/attachment-content";
 import { readPromptFile } from "../prompts/loader";
 import { auxiliaryReasoning, sameModel } from "../providers/auxiliary-model";
-import { ModelOutputLimitError, ModelRequestError } from "../providers/model-request-error";
 import {
+  ModelInputBudgetError,
+  ModelOutputLimitError,
+  ModelRequestError,
+} from "../providers/model-request-error";
+import {
+  type BeforeModelRequestHook,
   estimateModelInputTokens,
   estimateTextTokens,
+  type ModelRequestContext,
   type PreparedModelRequest,
+  type RequestUserContext,
   type StreamToolDefinition,
   streamModelTurn,
+  withModelRequestContext,
 } from "../providers/model-stream";
 import { stableToolDefinitions } from "../providers/prompt-caching";
 import type { ProviderService } from "../providers/provider-service";
@@ -68,6 +76,7 @@ interface ContextInput {
   provider: ProviderView;
   model: ModelConfig;
   systemPrompt: string;
+  baseSystemPrompt?: string;
   tools: StreamToolDefinition[];
   runId: string;
   signal: AbortSignal;
@@ -75,7 +84,9 @@ interface ContextInput {
   manual?: boolean;
   estimateOverhead?: number;
   estimateRatio?: number;
+  requestContext?: RequestUserContext;
   transformMessages?: (messages: SessionMessage[]) => SessionMessage[];
+  beforeEachRequest?: BeforeModelRequestHook;
 }
 
 function summaryMessage(sessionId: string, checkpoint: CompactionSummarySegment): SessionMessage {
@@ -304,7 +315,8 @@ export class ContextCompactionService {
     if (
       !cached ||
       (!input.manual &&
-        (cached.request.systemPrompt !== input.systemPrompt ||
+        ((cached.request.baseSystemPrompt ?? cached.request.systemPrompt) !==
+          (input.baseSystemPrompt ?? input.systemPrompt) ||
           JSON.stringify(stableToolDefinitions(cached.request.tools)) !==
             JSON.stringify(stableToolDefinitions(input.tools))))
     )
@@ -358,6 +370,8 @@ export class ContextCompactionService {
       ...cached.request,
       provider,
       model,
+      systemPrompt: cached.request.baseSystemPrompt ?? cached.request.systemPrompt,
+      baseSystemPrompt: cached.request.baseSystemPrompt ?? cached.request.systemPrompt,
       toolChoice: "none",
       messages: [
         ...replayMessages,
@@ -992,19 +1006,45 @@ export class ContextCompactionService {
           const summarize = async (
             request: Pick<
               PreparedModelRequest,
-              "systemPrompt" | "tools" | "reasoningLevel" | "messages" | "temperature" | "topP"
+              | "systemPrompt"
+              | "baseSystemPrompt"
+              | "tools"
+              | "reasoningLevel"
+              | "messages"
+              | "temperature"
+              | "topP"
             > & { toolChoice?: "none" },
           ): Promise<string> => {
             if (++summaryRequests > 128)
               throw new Error("历史记录过大，已停止本次压缩；原始记录已保留。");
             let result = "";
             const signal = AbortSignal.any([input.signal, AbortSignal.timeout(300_000)]);
+            let loadedRequestContext: ModelRequestContext = "";
+            if (input.beforeEachRequest) {
+              try {
+                loadedRequestContext = (await input.beforeEachRequest(provider, model)) ?? "";
+                input.signal.throwIfAborted();
+              } catch (cause) {
+                input.signal.throwIfAborted();
+                recordRuntimeError("plugin.beforeModelRequest", cause, {
+                  sessionId: input.session.id,
+                  providerId: provider.id,
+                  modelId: model.id,
+                  operation: "BeforeModelRequest",
+                });
+                throw new Error(
+                  `BeforeModelRequest failed; the compaction request was not sent. ${cause instanceof Error ? cause.message : String(cause)}`,
+                  { cause },
+                );
+              }
+            }
+            let requestForEstimate = withModelRequestContext(request, loadedRequestContext);
             const remainingOutput = () =>
               Math.floor(
                 Math.min(
                   outputTokens,
                   model.contextWindow -
-                    estimateModelInputTokens({ ...request, provider, model }) -
+                    estimateModelInputTokens({ ...requestForEstimate, provider, model }) -
                     256,
                 ),
               );
@@ -1015,11 +1055,16 @@ export class ContextCompactionService {
                 systemPrompt: `${basePrompt}${summaryRequirements(
                   Math.min(summaryTokens, Math.max(64, Math.floor(requestOutputTokens * 0.75))),
                 )}`,
+                baseSystemPrompt: request.baseSystemPrompt ?? request.systemPrompt,
               };
+              requestForEstimate = withModelRequestContext(request, loadedRequestContext);
               requestOutputTokens = remainingOutput();
             }
             if (requestOutputTokens < 64)
-              throw new Error("压缩模型无法容纳摘要，请选择更大上下文的模型。");
+              throw new ModelInputBudgetError(
+                estimateModelInputTokens({ ...requestForEstimate, provider, model }),
+                model.contextWindow,
+              );
             for await (const event of streamModelTurn({
               ...request,
               provider,
@@ -1027,6 +1072,12 @@ export class ContextCompactionService {
               apiKey,
               maxOutputTokens: requestOutputTokens,
               signal,
+              firstRequestContext: loadedRequestContext,
+              ...(requestForEstimate.requestContext
+                ? { requestContext: requestForEstimate.requestContext }
+                : {}),
+              baseSystemPrompt: request.baseSystemPrompt ?? request.systemPrompt,
+              ...(input.beforeEachRequest ? { beforeEachRequest: input.beforeEachRequest } : {}),
               onRequestUsage: usageRecorder(this.repository, input.session.id, "compaction"),
               retry: {
                 ...normalizeModelRetrySettings(this.repository.getSetting(MODEL_RETRY_SETTING)),
@@ -1109,6 +1160,8 @@ export class ContextCompactionService {
               if (cause instanceof ModelOutputLimitError) {
                 recoveringOutputLimit();
                 splitAfterReplayLimit = true;
+              } else if (cause instanceof ModelInputBudgetError) {
+                // The current per-request context may make a cached prefix too large.
               } else {
                 if (
                   !(cause instanceof ModelRequestError) ||

@@ -79,12 +79,22 @@ describe("compaction request snapshots", () => {
   it("clones snapshots and returns, excludes transport credentials, and clears on deletion", () => {
     const cache = new CompactionRequestCache();
     const current = request("session");
-    const input = { ...current, apiKey: "never-copy-this-credential" };
+    const input = {
+      ...current,
+      apiKey: "never-copy-this-credential",
+      requestContext: {
+        userPrefix: "transient-prefix-must-not-persist",
+        userSuffix: "transient-suffix-must-not-persist",
+      },
+    };
     cache.capture("session", input, current.messages, "config");
     current.systemPrompt = "Changed after capture";
     const matching = cache.matching("session", current.messages, "config");
     expect(matching?.request.systemPrompt).toBe("Fixed instructions");
+    expect(matching?.request.requestContext).toBeUndefined();
     expect(JSON.stringify(matching)).not.toContain("never-copy-this-credential");
+    expect(JSON.stringify(matching)).not.toContain("transient-prefix-must-not-persist");
+    expect(JSON.stringify(matching)).not.toContain("transient-suffix-must-not-persist");
     if (!matching) throw new Error("Missing snapshot");
     matching.request.systemPrompt = "Changed return";
     expect(cache.matching("session", current.messages, "config")?.request.systemPrompt).toBe(

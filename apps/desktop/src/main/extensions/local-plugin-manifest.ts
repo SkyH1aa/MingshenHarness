@@ -14,6 +14,16 @@ export const PLUGIN_ROOT_TOKENS = [
 
 export type PluginDeclarationKey = "hooks" | "mcpServers";
 
+export function pluginMcpServerId(extensionId: string, serverName: string): string {
+  const normalizedName = serverName
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 42);
+  return `plugin-${extensionId.slice(0, 8)}-${normalizedName}`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

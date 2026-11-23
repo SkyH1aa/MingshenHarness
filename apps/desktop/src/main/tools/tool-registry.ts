@@ -66,6 +66,7 @@ const MAX_FILE_BYTES = 2_000_000;
 const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 const MAX_TOOL_OUTPUT = 80_000;
 const DEFAULT_COMMAND_TIMEOUT = 120_000;
+const WEB_REQUEST_TIMEOUT_MS = 90_000;
 const MAX_LIST_ENTRIES = 600;
 const WINDOWS_POWERSHELL = process.env.SystemRoot
   ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -1005,6 +1006,56 @@ function truncate(value: string, limit = MAX_TOOL_OUTPUT): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createWebRequestBudget(parentSignal: AbortSignal) {
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => {
+    const error = new Error("Web request exceeded the 90-second timeout.");
+    error.name = "TimeoutError";
+    timeoutController.abort(error);
+  }, WEB_REQUEST_TIMEOUT_MS);
+
+  return {
+    signal: AbortSignal.any([parentSignal, timeoutController.signal]),
+    timedOut: timeoutController.signal,
+    dispose: () => clearTimeout(timeout),
+  };
+}
+
+function awaitWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function webRequestFailure(
+  error: unknown,
+  action: "网页读取" | "网页搜索",
+  parentSignal: AbortSignal,
+  timedOutSignal: AbortSignal,
+): string {
+  if (parentSignal.aborted) return `${action}已取消。`;
+  if (timedOutSignal.aborted) return `${action}超时（90 秒上限）。`;
+  return `${action}失败：${errorText(error)}`;
 }
 
 function resolveToolPath(input: string | undefined, workspacePath: string | null): string {
@@ -2943,22 +2994,31 @@ export class ToolRegistry {
         };
       }
     }
+    const budget = createWebRequestBudget(context.signal);
     try {
-      const response = await publicFetch(url, {
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(20_000)]),
-        headers: {
-          "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
-          Accept: "text/html,application/xhtml+xml,text/plain,application/json",
-        },
-      });
-      const body = await response.text();
+      const response = await awaitWithSignal(
+        publicFetch(url, {
+          signal: budget.signal,
+          headers: {
+            "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
+            Accept: "text/html,application/xhtml+xml,text/plain,application/json",
+          },
+        }),
+        budget.signal,
+      );
+      const body = await awaitWithSignal(response.text(), budget.signal);
       const content = readableHtml(body).slice(0, args.max_chars ?? 80_000);
       return {
         output: `URL: ${url.toString()}\nStatus: ${response.status}\n\n${content || "(empty response)"}`,
         isError: !response.ok,
       };
     } catch (error) {
-      return { output: `网页读取失败：${errorText(error)}`, isError: true };
+      return {
+        output: webRequestFailure(error, "网页读取", context.signal, budget.timedOut),
+        isError: true,
+      };
+    } finally {
+      budget.dispose();
     }
   }
 
@@ -2968,58 +3028,76 @@ export class ToolRegistry {
   ): Promise<ToolExecutionResult> {
     const args = webSearchSchema.parse(rawArguments);
     const limit = args.max_results ?? 8;
+    const budget = createWebRequestBudget(context.signal);
+    const fetchWithBudget = (url: string | URL, init: RequestInit = {}) =>
+      awaitWithSignal(publicFetch(url, { ...init, signal: budget.signal }), budget.signal);
+
     try {
       const searchBody = new URLSearchParams({ q: args.query }).toString();
-      const ddg = await publicFetch("https://html.duckduckgo.com/html/", {
-        method: "POST",
-        body: searchBody,
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(20_000)]),
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Content-Length": String(Buffer.byteLength(searchBody)),
-          "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
-        },
-      });
-      const html = await ddg.text();
       const results: Array<{ title: string; url: string; snippet: string }> = [];
-      const pattern =
-        /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/div>)?/gi;
-      for (const match of html.matchAll(pattern)) {
-        const rawUrl = match[1] ?? "";
-        const target = rawUrl.startsWith("//duckduckgo.com/l/?uddg=")
-          ? decodeURIComponent(rawUrl.split("uddg=")[1]?.split("&")[0] ?? "")
-          : rawUrl;
-        results.push({
-          title: decodeHtml(match[2] ?? ""),
-          url: target,
-          snippet: decodeHtml(match[3] ?? match[4] ?? ""),
-        });
-        if (results.length >= limit) {
-          break;
-        }
-      }
-      if (results.length === 0) {
-        const rss = await publicFetch(
-          `https://www.bing.com/search?format=rss&q=${encodeURIComponent(args.query)}`,
-          {
-            signal: AbortSignal.any([context.signal, AbortSignal.timeout(20_000)]),
-            headers: {
-              Accept: "application/rss+xml,application/xml,text/xml",
-              "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
-            },
+      let duckDuckGoFailure: unknown;
+
+      try {
+        const ddg = await fetchWithBudget("https://html.duckduckgo.com/html/", {
+          method: "POST",
+          body: searchBody,
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": String(Buffer.byteLength(searchBody)),
+            "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
           },
-        );
-        const xml = await rss.text();
-        for (const item of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
-          const body = item[1] ?? "";
+        });
+        if (!ddg.ok) throw new Error(`DuckDuckGo returned HTTP ${ddg.status}.`);
+        const html = await awaitWithSignal(ddg.text(), budget.signal);
+        const pattern =
+          /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/div>)?/gi;
+        for (const match of html.matchAll(pattern)) {
+          const rawUrl = match[1] ?? "";
+          const target = rawUrl.startsWith("//duckduckgo.com/l/?uddg=")
+            ? decodeURIComponent(rawUrl.split("uddg=")[1]?.split("&")[0] ?? "")
+            : rawUrl;
           results.push({
-            title: decodeHtml(/<title>([\s\S]*?)<\/title>/i.exec(body)?.[1] ?? ""),
-            url: /<link>([\s\S]*?)<\/link>/i.exec(body)?.[1]?.trim() ?? "",
-            snippet: decodeHtml(/<description>([\s\S]*?)<\/description>/i.exec(body)?.[1] ?? ""),
+            title: decodeHtml(match[2] ?? ""),
+            url: target,
+            snippet: decodeHtml(match[3] ?? match[4] ?? ""),
           });
-          if (results.length >= limit) {
-            break;
+          if (results.length >= limit) break;
+        }
+      } catch (error) {
+        if (context.signal.aborted || budget.timedOut.aborted) throw error;
+        duckDuckGoFailure = error;
+      }
+
+      if (results.length === 0) {
+        try {
+          const rss = await fetchWithBudget(
+            `https://www.bing.com/search?format=rss&q=${encodeURIComponent(args.query)}`,
+            {
+              headers: {
+                Accept: "application/rss+xml,application/xml,text/xml",
+                "User-Agent": `Mingshen-Harness/${APP_VERSION}`,
+              },
+            },
+          );
+          if (!rss.ok) throw new Error(`Bing returned HTTP ${rss.status}.`);
+          const xml = await awaitWithSignal(rss.text(), budget.signal);
+          for (const item of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+            const body = item[1] ?? "";
+            results.push({
+              title: decodeHtml(/<title>([\s\S]*?)<\/title>/i.exec(body)?.[1] ?? ""),
+              url: /<link>([\s\S]*?)<\/link>/i.exec(body)?.[1]?.trim() ?? "",
+              snippet: decodeHtml(/<description>([\s\S]*?)<\/description>/i.exec(body)?.[1] ?? ""),
+            });
+            if (results.length >= limit) break;
           }
+        } catch (error) {
+          if (context.signal.aborted || budget.timedOut.aborted) throw error;
+          if (duckDuckGoFailure) {
+            throw new Error(
+              `DuckDuckGo failed: ${errorText(duckDuckGoFailure)}; Bing failed: ${errorText(error)}`,
+            );
+          }
+          throw error;
         }
       }
       return {
@@ -3035,7 +3113,12 @@ export class ToolRegistry {
         isError: false,
       };
     } catch (error) {
-      return { output: `网页搜索失败：${errorText(error)}`, isError: true };
+      return {
+        output: webRequestFailure(error, "网页搜索", context.signal, budget.timedOut),
+        isError: true,
+      };
+    } finally {
+      budget.dispose();
     }
   }
 

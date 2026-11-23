@@ -10,7 +10,10 @@ export function flushComposerDrafts(
   events: Pick<IpcMain, "on" | "removeListener">,
   timeoutMs = 30_000,
   purpose: ComposerDraftFlushPurpose = "shutdown",
+  sessionId?: string,
 ): Promise<void> {
+  if (sessionId !== undefined && (!sessionId || sessionId.length > 128))
+    return Promise.reject(new Error("Invalid session ID."));
   if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return Promise.resolve();
   const contents = window.webContents;
   const requestId = randomUUID();
@@ -42,7 +45,9 @@ export function flushComposerDrafts(
     contents.once("destroyed", interrupted);
     contents.once("render-process-gone", interrupted);
     try {
-      contents.send(IPC_CHANNELS.composerDraftFlushRequest, requestId, purpose);
+      if (sessionId === undefined)
+        contents.send(IPC_CHANNELS.composerDraftFlushRequest, requestId, purpose);
+      else contents.send(IPC_CHANNELS.composerDraftFlushRequest, requestId, purpose, sessionId);
     } catch {
       finish(flushError);
     }

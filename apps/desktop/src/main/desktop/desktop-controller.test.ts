@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { APP_VERSION, POLICY_VERSION } from "../../shared/release";
 import type { Repository } from "../storage/repository";
 import { DesktopController } from "./desktop-controller";
+import { readPolicyAfterReveal, StartupRevealGate } from "./startup-reveal-gate";
 
 const mock = vi.hoisted(() => ({
   quit: vi.fn(),
@@ -34,6 +35,68 @@ vi.mock("electron", () => ({
 }));
 afterEach(() => vi.useRealTimers());
 describe("Desktop consent and tray lifecycle", () => {
+  it("does not count a covered startup animation toward the required policy reading time", async () => {
+    vi.useFakeTimers();
+    const settings = new Map<string, unknown>();
+    const repository = {
+      getSetting: (key: string) => settings.get(key),
+      setSetting: (key: string, value: unknown) => settings.set(key, value),
+      listSessions: () => [],
+    } as unknown as Repository;
+    const window = Object.assign(new EventEmitter(), {
+      webContents: { send: mock.send },
+      isMaximized: () => false,
+    });
+    const controller = new DesktopController(
+      repository,
+      window as unknown as BrowserWindow,
+      resolve(process.cwd(), "..", "..", "docs"),
+      "icon.png",
+    );
+    const gate = new StartupRevealGate();
+    const policy = readPolicyAfterReveal({
+      waitForReveal: true,
+      gate,
+      isCurrent: () => true,
+      read: () => controller.policy("terms"),
+    });
+    const consent = { terms: true, privacy: true, disclaimer: true };
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(controller.accept(consent)).rejects.toThrow("five seconds");
+    gate.reveal();
+    await policy;
+    await vi.advanceTimersByTimeAsync(4_999);
+    await expect(controller.accept(consent)).rejects.toThrow("five seconds");
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(controller.accept(consent)).resolves.toBeUndefined();
+  });
+
+  it("does not start the policy clock when its window changes during the file read", async () => {
+    vi.useFakeTimers();
+    const repository = {
+      getSetting: () => null,
+      listSessions: () => [],
+    } as unknown as Repository;
+    const window = Object.assign(new EventEmitter(), {
+      webContents: { send: mock.send },
+      isMaximized: () => false,
+    });
+    const controller = new DesktopController(
+      repository,
+      window as unknown as BrowserWindow,
+      resolve(process.cwd(), "..", "..", "docs"),
+      "icon.png",
+    );
+    let current = true;
+    const read = controller.policy("terms", undefined, () => current);
+    current = false;
+    await expect(read).rejects.toThrow("no longer available");
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(
+      controller.accept({ terms: true, privacy: true, disclaimer: true }),
+    ).rejects.toThrow("five seconds");
+  });
+
   it("toggles a focused main window to tray and restores a hidden or background window", () => {
     const window = Object.assign(new EventEmitter(), {
       webContents: { send: mock.send },

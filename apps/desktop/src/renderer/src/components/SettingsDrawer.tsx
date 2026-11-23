@@ -14,6 +14,7 @@ import {
   Layers3,
   LockKeyhole,
   Logs,
+  Monitor,
   Moon,
   Palette,
   Save,
@@ -44,6 +45,7 @@ import { AgentSettings } from "./AgentSettings";
 import { BrandMark } from "./BrandMark";
 import { BrowserConnectionsSettings } from "./BrowserConnectionsSettings";
 import { ContextSettings } from "./ContextSettings";
+import { DesktopExperienceSettings } from "./DesktopExperienceSettings";
 import { useDialog } from "./DialogProvider";
 import { ExtensionSettings } from "./ExtensionSettings";
 import { GitHubPluginSettings } from "./GitHubPluginSettings";
@@ -64,6 +66,7 @@ import { UpdateControls } from "./UpdateControls";
 
 type SettingsSection =
   | "appearance"
+  | "desktop"
   | "providers"
   | "context"
   | "agents"
@@ -81,8 +84,10 @@ type SettingsSection =
   | "about";
 
 interface SettingsDrawerProps {
+  navigationRequestId?: number;
   initialSection?:
     | "appearance"
+    | "desktop"
     | "providers"
     | "permissions"
     | "context"
@@ -109,6 +114,7 @@ const SETTINGS_ITEMS: Array<{
   icon: typeof Palette;
 }> = [
   { id: "appearance", label: tr("\u5916\u89C2\u4E0E\u8BED\u8A00"), icon: Palette },
+  { id: "desktop", label: tr("桌面体验"), icon: Monitor },
   { id: "providers", label: tr("\u4F9B\u5E94\u5546\u4E0E\u6A21\u578B"), icon: Server },
   { id: "context", label: tr("上下文与压缩"), icon: Layers3 },
   { id: "agents", label: tr("Agent \u914D\u7F6E"), icon: Bot },
@@ -128,6 +134,7 @@ const SETTINGS_ITEMS: Array<{
 
 export function SettingsDrawer({
   initialSection = "appearance",
+  navigationRequestId = 0,
   providers,
   agentProfiles,
   extensions,
@@ -145,6 +152,7 @@ export function SettingsDrawer({
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [projectMemoryDirty, setProjectMemoryDirty] = useState(false);
+  const [desktopPreferencesPending, setDesktopPreferencesPending] = useState(false);
   const [sessionManagementBusy, setSessionManagementBusy] = useState(false);
   const sessionManagementBusyRef = useRef(false);
   const navigationPendingRef = useRef(false);
@@ -152,7 +160,7 @@ export function SettingsDrawer({
   const locale = useLocale();
   const [search, setSearch] = useState("");
   const groups = [
-    { label: locale === "en" ? "General" : "通用", ids: ["appearance"] },
+    { label: locale === "en" ? "General" : "通用", ids: ["appearance", "desktop"] },
     {
       label: locale === "en" ? "Models & Agents" : "模型与 Agent",
       ids: ["providers", "context", "agents"],
@@ -176,19 +184,52 @@ export function SettingsDrawer({
   ];
   const canLeaveProject = useCallback(async () => {
     if (sessionManagementBusyRef.current) return false;
-    if (section !== "project" || !projectMemoryDirty) return true;
+    const leavingDesktop = section === "desktop" && desktopPreferencesPending;
+    if (!leavingDesktop && (section !== "project" || !projectMemoryDirty)) return true;
     if (navigationPendingRef.current) return false;
     navigationPendingRef.current = true;
     try {
       return await confirm({
-        title: tr("放弃未保存的项目修改？"),
-        description: tr("尚未保存的记忆配置或记忆内容将被丢弃。"),
-        confirmLabel: tr("放弃修改"),
+        title: leavingDesktop
+          ? locale === "en"
+            ? "Leave unsaved companion settings?"
+            : "离开未保存的桌宠设置？"
+          : tr("放弃未保存的项目修改？"),
+        description: leavingDesktop
+          ? locale === "en"
+            ? "Changes waiting to be saved or retried may be lost. Stay here to retry."
+            : "等待保存或重试的修改可能丢失，可留在此页重试。"
+          : tr("尚未保存的记忆配置或记忆内容将被丢弃。"),
+        confirmLabel: leavingDesktop
+          ? locale === "en"
+            ? "Leave settings"
+            : "离开设置"
+          : tr("放弃修改"),
       });
     } finally {
       navigationPendingRef.current = false;
     }
-  }, [confirm, projectMemoryDirty, section]);
+  }, [confirm, desktopPreferencesPending, locale, projectMemoryDirty, section]);
+  const canLeaveProjectRef = useRef(canLeaveProject);
+  canLeaveProjectRef.current = canLeaveProject;
+  const lastNavigationRequestRef = useRef({ initialSection, navigationRequestId });
+  useEffect(() => {
+    const last = lastNavigationRequestRef.current;
+    if (last.initialSection === initialSection && last.navigationRequestId === navigationRequestId)
+      return;
+    lastNavigationRequestRef.current = { initialSection, navigationRequestId };
+    let active = true;
+    void canLeaveProjectRef.current().then((allowed) => {
+      if (!active || !allowed) return;
+      setSearch("");
+      setSection(initialSection);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialSection, navigationRequestId]);
+  const sectionLabel = (item: (typeof SETTINGS_ITEMS)[number]) =>
+    item.id === "desktop" && locale === "en" ? "Desktop experience" : tr(item.label);
   const onSessionManagementBusy = useCallback(
     (value: boolean) => {
       sessionManagementBusyRef.current = value;
@@ -266,7 +307,7 @@ export function SettingsDrawer({
               const items = SETTINGS_ITEMS.filter(
                 (item) =>
                   group.ids.includes(item.id) &&
-                  `${tr(item.label)} ${item.id} ${group.label} ${item.id === "runtime" ? "重试 retry reconnect" : ""} ${item.id === "extensions" ? "Token Saver 节省 用量 精简" : ""} ${item.id === "data" ? "会话 文件夹 批量 删除 归档 恢复 conversations folder bulk delete archive restore" : ""}`
+                  `${sectionLabel(item)} ${item.id} ${item.id === "desktop" ? "desktop experience 桌面体验" : ""} ${group.label} ${item.id === "runtime" ? "重试 retry reconnect" : ""} ${item.id === "extensions" ? "Token Saver 节省 用量 精简" : ""} ${item.id === "data" ? "会话 文件夹 批量 删除 归档 恢复 conversations folder bulk delete archive restore" : ""}`
                     .toLowerCase()
                     .includes(search.trim().toLowerCase()),
               );
@@ -293,7 +334,7 @@ export function SettingsDrawer({
                         }}
                       >
                         <Icon aria-hidden="true" size={15} />
-                        {tr(item.label)}
+                        {sectionLabel(item)}
                       </button>
                     );
                   })}
@@ -302,7 +343,7 @@ export function SettingsDrawer({
             })}
             {search &&
             !SETTINGS_ITEMS.some((item) =>
-              `${tr(item.label)} ${item.id} ${groups.find((group) => group.ids.includes(item.id))?.label} ${item.id === "runtime" ? "重试 retry reconnect" : ""} ${item.id === "extensions" ? "Token Saver 节省 用量 精简" : ""} ${item.id === "data" ? "会话 文件夹 批量 删除 归档 恢复 conversations folder bulk delete archive restore" : ""}`
+              `${sectionLabel(item)} ${item.id} ${item.id === "desktop" ? "desktop experience 桌面体验" : ""} ${groups.find((group) => group.ids.includes(item.id))?.label} ${item.id === "runtime" ? "重试 retry reconnect" : ""} ${item.id === "extensions" ? "Token Saver 节省 用量 精简" : ""} ${item.id === "data" ? "会话 文件夹 批量 删除 归档 恢复 conversations folder bulk delete archive restore" : ""}`
                 .toLowerCase()
                 .includes(search.trim().toLowerCase()),
             ) ? (
@@ -323,7 +364,11 @@ export function SettingsDrawer({
 
         <div className="settings-content">
           <header className="settings-content__header">
-            <h2>{tr(SETTINGS_ITEMS.find((item) => item.id === section)?.label ?? "")}</h2>
+            <h2>
+              {section === "desktop" && locale === "en"
+                ? "Desktop experience"
+                : tr(SETTINGS_ITEMS.find((item) => item.id === section)?.label ?? "")}
+            </h2>
             <button
               className="icon-button"
               type="button"
@@ -339,6 +384,9 @@ export function SettingsDrawer({
           <div className="settings-content__body">
             {section === "appearance" ? (
               <AppearanceSettings theme={theme} onThemeChange={onThemeChange} />
+            ) : null}
+            {section === "desktop" ? (
+              <DesktopExperienceSettings onPendingChange={setDesktopPreferencesPending} />
             ) : null}
             {section === "providers" ? (
               <ProviderSetup providers={providers} onChanged={onChanged} compact />

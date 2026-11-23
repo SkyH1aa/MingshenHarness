@@ -435,7 +435,6 @@ function buildConnectionTestRequest(
         prompt: "Generate one small test image.",
         n: 1,
         size: "1024x1024",
-        response_format: "b64_json",
       },
     };
   }

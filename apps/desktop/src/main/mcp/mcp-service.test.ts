@@ -229,6 +229,139 @@ describe("McpService", () => {
     }
   });
 
+  it("filters plugin MCP names by exact ownership and current run activation", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const service = new McpService(repository, new SecretStore(database), "1.3.5");
+    const extension = repository.insertExtension({
+      id: "12345678-1234-4234-8234-123456789abc",
+      type: "plugin",
+      name: "On-demand plugin",
+      description: "An MCP server that must be activated for the current run.",
+      sourcePath: join(tmpdir(), "on-demand-plugin-source"),
+      installedPath: join(tmpdir(), "on-demand-plugin-installed"),
+      manifestJson: JSON.stringify({
+        mcpServers: { worker: { url: "https://example.invalid/mcp" } },
+      }),
+      contentHash: "on-demand-plugin-content-hash",
+    });
+    try {
+      await service.importPluginServers(extension.id);
+      const pluginServer = service
+        .list()
+        .find((server) => server.name === "On-demand plugin · worker");
+      expect(pluginServer).toBeDefined();
+      if (!pluginServer) throw new Error("plugin MCP fixture was not imported");
+
+      const userServer = await service.save({
+        id: "plugin-user-custom-server",
+        name: "User MCP whose id begins with plugin-",
+        description: "This is not owned by a plugin.",
+        transport: "http",
+        enabled: true,
+        url: "https://example.invalid/user-mcp",
+      });
+
+      expect(service.pluginMcpServerIds()).toEqual(new Set([pluginServer.id]));
+      expect(service.enabledServerNames(new Set())).toContain(userServer.name);
+      expect(service.enabledServerNames(new Set())).not.toContain(pluginServer.name);
+      expect(service.enabledServerNames(new Set([pluginServer.id]))).toContain(pluginServer.name);
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
+
+  it("fails closed when two plugins resolve to the same MCP server id", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const service = new McpService(repository, new SecretStore(database), "1.3.5");
+    const common = {
+      type: "plugin" as const,
+      name: "Collision plugin",
+      description: "Test ambiguous deterministic MCP ownership.",
+      sourcePath: join(tmpdir(), "collision-plugin-source"),
+      installedPath: join(tmpdir(), "collision-plugin-installed"),
+      manifestJson: JSON.stringify({
+        mcpServers: { reports: { url: "https://example.invalid/mcp" } },
+      }),
+      contentHash: "collision-plugin-content-hash",
+    };
+    const first = repository.insertExtension({
+      ...common,
+      id: "12345678-1234-4234-8234-111111111111",
+    });
+    const second = repository.insertExtension({
+      ...common,
+      id: "12345678-1234-4234-8234-222222222222",
+      contentHash: "collision-plugin-content-hash-second",
+    });
+    try {
+      await service.importPluginServers(first.id);
+      await service.importPluginServers(second.id);
+      const ambiguous = service.list().find((server) => server.id === "plugin-12345678-reports");
+      expect(ambiguous).toMatchObject({ enabled: false });
+      expect(service.enabledServerNames()).not.toContain(ambiguous?.name);
+
+      await service.removePluginServers(second.id);
+      expect(service.list().find((server) => server.id === "plugin-12345678-reports")).toEqual(
+        expect.objectContaining({ enabled: false }),
+      );
+      expect(service.enabledServerNames()).not.toContain(ambiguous?.name);
+
+      repository.removeExtension(second.id);
+      await service.removePluginServers(first.id);
+      expect(service.list().map((server) => server.id)).not.toContain("plugin-12345678-reports");
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
+
+  it("does not delete another plugin's MCP server when extension id prefixes collide", async () => {
+    const database = openDatabase(":memory:");
+    const repository = new Repository(database);
+    const service = new McpService(repository, new SecretStore(database), "1.3.5");
+    const common = {
+      type: "plugin" as const,
+      description: "Distinct MCP server names share an eight-character plugin ID prefix.",
+      sourcePath: join(tmpdir(), "prefix-collision-source"),
+      installedPath: join(tmpdir(), "prefix-collision-installed"),
+      contentHash: "prefix-collision-content-hash",
+    };
+    const first = repository.insertExtension({
+      ...common,
+      id: "12345678-1234-4234-8234-333333333333",
+      name: "First plugin",
+      manifestJson: JSON.stringify({
+        mcpServers: { first: { url: "https://example.invalid/first" } },
+      }),
+    });
+    const second = repository.insertExtension({
+      ...common,
+      id: "12345678-1234-4234-8234-444444444444",
+      name: "Second plugin",
+      contentHash: "prefix-collision-content-hash-second",
+      manifestJson: JSON.stringify({
+        mcpServers: { second: { url: "https://example.invalid/second" } },
+      }),
+    });
+    try {
+      await service.importPluginServers(first.id);
+      await service.importPluginServers(second.id);
+      expect(service.list().map((server) => server.id)).toEqual(
+        expect.arrayContaining(["plugin-12345678-first", "plugin-12345678-second"]),
+      );
+
+      await service.removePluginServers(second.id);
+      expect(service.list().map((server) => server.id)).toContain("plugin-12345678-first");
+      expect(service.list().map((server) => server.id)).not.toContain("plugin-12345678-second");
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
+
   it("hides plugin-provided MCP servers while their extension is disabled", async () => {
     const database = openDatabase(":memory:");
     const repository = new Repository(database);

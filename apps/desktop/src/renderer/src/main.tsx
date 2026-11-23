@@ -17,6 +17,8 @@ import "./agent-modes.css";
 import "./quick-chat.css";
 import "./image-studio.css";
 import "./studio-navigation.css";
+import "./desktop-experience-settings.css";
+import "./simple-workbench.css";
 
 const root = document.getElementById("root");
 const quickChatSurface =

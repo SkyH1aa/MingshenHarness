@@ -5,6 +5,7 @@ import { useLocale } from "../i18n";
 interface AgentModeSwitcherProps {
   value: AgentMode;
   running?: boolean;
+  managingSessions?: boolean;
   onChange: (mode: AgentMode) => void;
 }
 
@@ -32,7 +33,12 @@ const MODES = [
   },
 ] as const;
 
-export function AgentModeSwitcher({ value, running = false, onChange }: AgentModeSwitcherProps) {
+export function AgentModeSwitcher({
+  value,
+  running = false,
+  managingSessions = false,
+  onChange,
+}: AgentModeSwitcherProps) {
   const en = useLocale() === "en";
   return (
     <nav
@@ -43,7 +49,7 @@ export function AgentModeSwitcher({ value, running = false, onChange }: AgentMod
       {MODES.map((mode) => {
         const Icon = mode.icon;
         const selected = value === mode.value;
-        const locked = running && !selected;
+        const locked = (running || managingSessions) && !selected;
         return (
           <button
             type="button"
@@ -52,13 +58,17 @@ export function AgentModeSwitcher({ value, running = false, onChange }: AgentMod
             aria-pressed={selected}
             aria-label={en ? mode.en : mode.zh}
             title={
-              locked
+              locked && managingSessions
                 ? en
-                  ? "Stop the current task before switching Agent modes."
-                  : "请先停止当前任务，再切换 Agent 模式。"
-                : en
-                  ? mode.en
-                  : mode.zh
+                  ? "Wait for conversation management to finish before switching modes."
+                  : "请等待会话管理完成后再切换模式。"
+                : locked
+                  ? en
+                    ? "Stop the current task before switching Agent modes."
+                    : "请先停止当前任务，再切换 Agent 模式。"
+                  : en
+                    ? mode.en
+                    : mode.zh
             }
             data-agent-mode={mode.value}
             data-testid={`agent-mode-${mode.value}`}

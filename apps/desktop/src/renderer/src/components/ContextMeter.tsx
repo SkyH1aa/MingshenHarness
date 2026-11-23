@@ -12,6 +12,7 @@ export function ContextMeter({
   model,
   provider,
   running,
+  disabled = false,
   canCompact,
   openRequest = 0,
   onCompact,
@@ -23,6 +24,7 @@ export function ContextMeter({
   model: ModelConfig | undefined;
   provider: ProviderView | undefined;
   running: boolean;
+  disabled?: boolean;
   canCompact: boolean;
   openRequest?: number;
   onCompact: () => void;
@@ -70,6 +72,9 @@ export function ContextMeter({
       document.removeEventListener("keydown", key);
     };
   }, [open]);
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
   return (
     <>
       <button
@@ -80,6 +85,7 @@ export function ContextMeter({
         aria-label={tr("查看上下文详情")}
         aria-haspopup="dialog"
         aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen(!open)}
       >
         CTX {percent === null ? "—" : percent === 0 && used ? "<1%" : `${percent}%`}

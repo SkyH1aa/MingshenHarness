@@ -58,6 +58,36 @@ function deferred() {
 }
 
 describe("composer draft persistence", () => {
+  it("does not load or decode an unknown session when it is targeted for flush", async () => {
+    const { store, api, readAttachment } = fixture();
+    await store.flushIfPresent("not-opened");
+    await store.flushAll();
+    expect(api.getComposerDraft).not.toHaveBeenCalled();
+    expect(api.saveComposerDraft).not.toHaveBeenCalled();
+    expect(readAttachment).not.toHaveBeenCalled();
+  });
+
+  it("waits for an existing pending draft and reports its revision conflict", async () => {
+    const { store, api } = fixture();
+    await store.load("target");
+    const blocked = deferred();
+    api.saveComposerDraft.mockImplementationOnce(async () => {
+      await blocked.promise;
+      throw new Error(COMPOSER_DRAFT_CONFLICT_MESSAGE);
+    });
+    store.update("target", (value) => ({ ...value, text: "local edits" }));
+    const pending = store.flushIfPresent("target");
+    const result = expect(pending).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_MESSAGE);
+    blocked.resolve();
+    await result;
+    expect(store.state("target")).toMatchObject({
+      conflict: true,
+      value: { text: "local edits" },
+    });
+    await expect(store.flushIfPresent("target")).rejects.toThrow(COMPOSER_DRAFT_CONFLICT_MESSAGE);
+    expect(api.getComposerDraft).toHaveBeenCalledTimes(1);
+  });
+
   it("does not restore a consumed draft from a delayed load snapshot", async () => {
     const { store, api } = fixture();
     const blocked = deferred();
@@ -805,6 +835,42 @@ describe("composer draft persistence", () => {
     await store.flushAll();
     expect(store.hasPending()).toBe(false);
     await store.accepted("a", "late-send-response");
+    expect(api.getComposerDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("finishes a flush when deletion arrives during an in-flight rejected save", async () => {
+    const { store, api } = fixture();
+    await store.load("a");
+    const blocked = deferred();
+    api.saveComposerDraft.mockImplementationOnce(async () => {
+      await blocked.promise;
+      throw new Error("session was removed");
+    });
+    store.update("a", (value) => ({ ...value, text: "pending deletion" }));
+    const flushing = store.flushAll();
+    await Promise.resolve();
+    store.forget(["a"]);
+    blocked.resolve();
+    await expect(flushing).resolves.toBeUndefined();
+    await expect(store.flushAll()).resolves.toBeUndefined();
+    expect(store.hasPending()).toBe(false);
+    expect(api.getComposerDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recreate a forgotten entry when a delayed load rejects during flush", async () => {
+    const { store, api } = fixture();
+    const blocked = deferred();
+    api.getComposerDraft.mockImplementationOnce(async () => {
+      await blocked.promise;
+      throw new Error("session was removed");
+    });
+    store.state("a");
+    const flushing = store.flushAll();
+    store.forget(["a"]);
+    blocked.resolve();
+    await expect(flushing).resolves.toBeUndefined();
+    await expect(store.flushAll()).resolves.toBeUndefined();
+    expect(store.hasPending()).toBe(false);
     expect(api.getComposerDraft).toHaveBeenCalledTimes(1);
   });
 

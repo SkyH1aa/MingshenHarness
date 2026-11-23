@@ -452,4 +452,52 @@ describe("Quick chat ten minute sliding session", () => {
     expect(quick.permitsIpc(IPC_CHANNELS.sessionCreateInChatGroup, [null])).toBe(false);
     expect(quick.permitsIpc(IPC_CHANNELS.sessionCreateInChatGroup, ["group-id"])).toBe(false);
   });
+
+  it("retains only the current archived chat's draft permissions until a new activation", async () => {
+    const quick = controller();
+    const active = (await quick.activate()).session;
+    if (!active) throw new Error("Missing quick chat session.");
+    sessionService.update({ sessionId: active.id, archived: true });
+    const archived = repository.getSession(active.id);
+    if (!archived) throw new Error("Missing archived session.");
+
+    expect(quick.acceptsSession(active.id)).toBe(false);
+    expect(quick.acceptsDraftSession(active.id)).toBe(true);
+    expect(quick.acceptsDraftSession("other")).toBe(false);
+    expect(quick.permitsRuntimeEvent({ type: "session_updated", session: archived })).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.composerDraftGet, [active.id])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.composerDraftSave, [{ sessionId: active.id }])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.composerDraftClear, [active.id, "revision"])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.composerDraftGet, ["other"])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.composerDraftSave, [{ sessionId: active.id }, 1])).toBe(
+      false,
+    );
+    expect(quick.permitsIpc(IPC_CHANNELS.chatSend, [{ sessionId: active.id }])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.sessionMessages, [active.id])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.sessionUpdate, [{ sessionId: active.id }])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.workspaceRead, ["C:\\secret", "file.txt"])).toBe(false);
+    expect((await quick.state()).session).toMatchObject({ id: active.id, archived: true });
+
+    const replacement = await quick.activate();
+    expect(replacement.session?.id).not.toBe(active.id);
+    expect(quick.acceptsDraftSession(active.id)).toBe(false);
+    expect(repository.getSession(active.id)?.archived).toBe(true);
+  });
+
+  it("rechecks the session after a delayed context lookup before reporting a snapshot", async () => {
+    const quick = controller();
+    const active = (await quick.activate()).session;
+    if (!active) throw new Error("Missing quick chat session.");
+    let resolveContext: (value: null) => void = () => undefined;
+    const delayed = controller({
+      context: () =>
+        new Promise<null>((resolve) => {
+          resolveContext = resolve;
+        }),
+    });
+    const pending = delayed.state();
+    sessionService.update({ sessionId: active.id, archived: true });
+    resolveContext(null);
+    expect((await pending).session).toMatchObject({ id: active.id, archived: true });
+  });
 });

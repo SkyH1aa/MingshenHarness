@@ -18,6 +18,7 @@ import {
   expandPluginRootTokens,
   loadLocalPluginJsonDeclaration,
   PLUGIN_ROOT_TOKENS,
+  pluginMcpServerId,
 } from "../extensions/local-plugin-manifest";
 import type { StreamToolDefinition } from "../providers/model-stream";
 import { redactSecrets } from "../security/redact";
@@ -365,15 +366,27 @@ export class McpService {
   }
 
   private isPluginServerAvailable(serverId: string): boolean {
-    if (!serverId.startsWith("plugin-")) return true;
-    return this.repository
+    const owners = this.repository
       .listExtensions()
-      .some(
+      .filter(
         (extension) =>
           extension.type === "plugin" &&
-          extension.enabled &&
-          serverId.startsWith(`plugin-${extension.id.slice(0, 8)}-`),
+          extension.mcpServerNames.some(
+            (serverName) => pluginMcpServerId(extension.id, serverName) === serverId,
+          ),
       );
+    return owners.length === 0 || (owners.length === 1 && Boolean(owners[0]?.enabled));
+  }
+
+  pluginMcpServerIds(): ReadonlySet<string> {
+    return new Set(
+      this.repository
+        .listExtensions()
+        .filter((extension) => extension.type === "plugin")
+        .flatMap((extension) =>
+          extension.mcpServerNames.map((serverName) => pluginMcpServerId(extension.id, serverName)),
+        ),
+    );
   }
 
   private diagnosticSecrets(serverId: string): string[] {
@@ -409,7 +422,7 @@ export class McpService {
     const desiredIds = new Set<string>();
     const saves: PluginMcpSaveInput[] = [];
     for (const [name, raw] of desired) {
-      const id = `plugin-${extension.id.slice(0, 8)}-${normalizeMcpName(name)}`;
+      const id = pluginMcpServerId(extension.id, name);
       if (desiredIds.has(id)) {
         throw new Error(`Plugin MCP declarations collapse to the same server id: ${name}`);
       }
@@ -477,8 +490,23 @@ export class McpService {
     for (const input of saves) await this.save(input);
 
     const prefix = `plugin-${extension.id.slice(0, 8)}-`;
-    for (const server of this.list().filter((item) => item.id.startsWith(prefix))) {
-      if (!desiredIds.has(server.id)) await this.remove(server.id);
+    const otherPluginServerIds = new Set(
+      this.repository
+        .listExtensions()
+        .filter((item) => item.type === "plugin" && item.id !== extension.id)
+        .flatMap((item) =>
+          item.mcpServerNames.map((serverName) => pluginMcpServerId(item.id, serverName)),
+        ),
+    );
+    const ownedNamePrefix = `${extension.name} · `;
+    for (const server of this.list()) {
+      if (
+        server.id.startsWith(prefix) &&
+        server.name.startsWith(ownedNamePrefix) &&
+        !desiredIds.has(server.id) &&
+        !otherPluginServerIds.has(server.id)
+      )
+        await this.remove(server.id);
     }
   }
 
@@ -539,9 +567,19 @@ export class McpService {
   }
 
   async removePluginServers(extensionId: string): Promise<void> {
-    const prefix = `plugin-${extensionId.slice(0, 8)}-`;
-    for (const server of this.list().filter((item) => item.id.startsWith(prefix))) {
-      await this.remove(server.id);
+    const extension = this.repository.getExtension(extensionId);
+    if (extension?.type !== "plugin") return;
+    const otherPluginServerIds = new Set(
+      this.repository
+        .listExtensions()
+        .filter((candidate) => candidate.type === "plugin" && candidate.id !== extensionId)
+        .flatMap((candidate) =>
+          candidate.mcpServerNames.map((serverName) => pluginMcpServerId(candidate.id, serverName)),
+        ),
+    );
+    for (const serverName of extension.mcpServerNames) {
+      const serverId = pluginMcpServerId(extension.id, serverName);
+      if (!otherPluginServerIds.has(serverId)) await this.remove(serverId);
     }
   }
 
@@ -919,8 +957,10 @@ export class McpService {
     remoteOnly = false,
     workspacePath?: string | null,
     allowedProcesses?: Set<string>,
+    allowedPluginServers?: ReadonlySet<string>,
   ): Promise<McpToolDefinition[]> {
     const results: McpToolDefinition[] = [];
+    const pluginServerIds = this.pluginMcpServerIds();
     const owner = workspacePath
       ? createHash("sha256")
           .update(resolve(workspacePath).toLocaleLowerCase("en-US"))
@@ -931,6 +971,9 @@ export class McpService {
       (item) =>
         item.enabled &&
         item.configured &&
+        (!pluginServerIds.has(item.id) ||
+          allowedPluginServers === undefined ||
+          allowedPluginServers.has(item.id)) &&
         (item.transport !== "stdio" ||
           allowedProcesses === undefined ||
           allowedProcesses.has(item.id)) &&
@@ -1051,17 +1094,31 @@ export class McpService {
     remoteOnly = false,
     workspacePath?: string | null,
     allowedProcesses?: Set<string>,
+    allowedPluginServers?: ReadonlySet<string>,
   ): Promise<McpToolDefinition | null> {
     return (
-      (await this.toolDefinitions(remoteOnly, workspacePath, allowedProcesses)).find(
-        (tool) => tool.name === name,
-      ) ?? null
+      (
+        await this.toolDefinitions(
+          remoteOnly,
+          workspacePath,
+          allowedProcesses,
+          allowedPluginServers,
+        )
+      ).find((tool) => tool.name === name) ?? null
     );
   }
 
-  enabledServerNames(): string[] {
+  enabledServerNames(allowedPluginServers?: ReadonlySet<string>): string[] {
+    const pluginServerIds = this.pluginMcpServerIds();
     return this.list()
-      .filter((server) => server.enabled && server.configured)
+      .filter(
+        (server) =>
+          server.enabled &&
+          server.configured &&
+          (!pluginServerIds.has(server.id) ||
+            allowedPluginServers === undefined ||
+            allowedPluginServers.has(server.id)),
+      )
       .map((server) => server.name);
   }
 

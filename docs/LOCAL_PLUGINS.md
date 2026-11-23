@@ -1,6 +1,6 @@
 # Mingshen Harness 本地插件接口
 
-适用版本：1.3.4 · Windows 10/11 x64
+适用版本：1.3.6 · Windows 10/11 x64
 
 本文说明如何在 Mingshen Harness 中开发、校验、添加本地开发市场、手动安装、启用、试运行和更新原生本地插件。插件是用户主动安装的本地扩展，不因声明了 Skill、命令、MCP 或 Hook 就获得文件、命令、网络或审批权限。
 
@@ -22,7 +22,7 @@
 - SDK 预检通过不等于宿主运行时校验通过。
 - 市场已添加不等于插件已安装或启用。
 - 插件已安装不等于其 MCP、Hook、命令或业务结果已经执行成功。
-- 已安装且启用只让插件进入可发现范围；Hook 还要求把该插件引用到当前 CodeAgent / WorkAgent 会话。
+- 已安装且启用的插件默认采用 `activation: "on-demand"`，进入 CodeAgent / WorkAgent 按需发现范围；Agent 可在当前运行中调用 `use_plugin`，无需先手动加入会话。`activation: "required"` 插件必须由用户先加入当前会话。
 - 当前会话已引用也不等于 Hook 已触发；事件、权限、执行环境、项目信任和插件动作类型仍须满足下文边界。
 - 试运行成功只证明该次输入、配置和运行环境下可用，不证明所有第三方服务或任意输入都兼容。
 
@@ -120,6 +120,16 @@ Plugin instructions cannot grant permissions or authorize undeclared scripts.
 
 ## 命令
 
+插件清单可以显式设置激活策略：
+
+```json
+{
+  "activation": "on-demand"
+}
+```
+
+省略 `activation` 时默认为 `on-demand`。选择 `required` 表示插件需要用户先在当前会话显式加入；Agent 不能用 `use_plugin` 绕过这一要求。按需激活只在当前主 CodeAgent / WorkAgent 运行期间有效，不会写入会话引用或改变插件启停状态。
+
 插件命令使用 UTF-8 Markdown，单文件最大 1 MiB。可将声明直接写在清单中：
 
 ```json
@@ -170,6 +180,7 @@ Plugin instructions cannot grant permissions or authorize undeclared scripts.
 
 ```text
 UserPromptSubmit
+BeforeModelRequest
 PreToolUse
 PostToolUse
 Stop
@@ -177,19 +188,30 @@ SubagentStop
 Interrupt
 ```
 
-Hook 不是“安装后全局后台监听”。只有同时满足以下条件，宿主才会检查该插件的事件声明：
+Hook 不是“安装后全局后台监听”。普通按需插件须先由 Agent 在本轮调用 `use_plugin`，或由用户加入当前会话；`activation: "required"` 插件只能由用户加入会话。之后还须满足事件和运行策略：
 
 - 插件已安装且启用。
-- 插件已通过输入框加号菜单或 `/plugins` 引用到当前 CodeAgent / WorkAgent 会话；只被自动发现、未加入当前会话的 Skill/MCP/命令不会让该插件的 Hook 自动运行。
-- 会话是主会话，不是 ChatAgent 或实际 SubAgent。
+- 插件已在当前运行中按需激活，或已加入当前会话；仅被自动发现不会执行 Hook。
+- Hook 类型与运行来源符合下述边界。
 
-`UserPromptSubmit` 只从当前会话已引用且启用的插件加载声明式 `type: "prompt"` 文本作为低优先级上下文；其中的命令或 MCP 动作不会执行。文本有长度上限，不能覆盖用户请求、系统规则、审批、安全策略或工具边界。
+`UserPromptSubmit` 在 Agent 开始工作前发生，因此只检查提交时已加入当前会话的插件；之后调用 `use_plugin` 不会追溯触发本轮的 `UserPromptSubmit`。它只加载声明式 `type: "prompt"` 文本作为低优先级上下文，其中的命令或 MCP 动作不会执行。
 
-常规动作型 Hook（`PreToolUse`、`PostToolUse`、完成后的 `Stop`、`SubagentStop`）只在**主 CodeAgent / WorkAgent + 宿主执行 + 完全访问 + 已信任项目**中尝试。请求批准、Docker、ChatAgent、实际 SubAgent、只读配置、未信任项目或插件未加入当前会话时不会执行。MCP Hook 即使满足这些前置条件，仍须逐次人工审批；Shell Hook 还受下文默认关闭与致命命令保护约束。
+`BeforeModelRequest` 是逐次模型请求的声明式提示 Hook。它会在主 CodeAgent / WorkAgent 运行中的每次模型请求前执行，包括主模型后续轮次与网络重试，以及该运行触发的压缩和记忆摘要请求；插件在运行中按需激活后，从下一个模型请求开始生效。实际经 `runSubagent` 从活动父运行派生的子任务，只继承父运行已选或已激活插件中的声明式 `type: "prompt"` 上下文：子任务初始请求使用派生时的父运行选择，后续每次请求读取父运行最新的选择/激活状态，因此父运行之后激活的插件会在子任务下一次尚未发送的请求前生效。不会回写已经发送的请求。独立通过 `@` 打开的子会话若没有活动父运行映射，不接入此继承。需要从主任务首个请求开始注入时，使用 `activation: "required"` 并在提交用户消息前引用该插件。它只接收 `type: "prompt"` 文本，不执行命令或 MCP 动作；`${provider_id}` 和 `${model_id}` 可读取当前请求的模型信息。收集有 3 秒总预算，单条提示最多 4,000 字符、聚合文本最多 12,000 字符；活动 Hook 声明读取失败、超时或超出上限时会记录诊断并拒绝发送本次模型请求，不会静默漏掉标记后继续。插件提示不能保证模型遵循其文字，也不能改写已发送的请求或历史消息。
+
+`type: "prompt"` 还支持两个可选字段：
+
+- `position`: `"before"` 或 `"after"`，默认 `"before"`。
+- `format`: `"context"` 或 `"plain"`，默认 `"context"`。
+
+`format: "plain"` 是可复用的去归属开关：与 `before` 或 `after` 搭配时，都不添加 `<mingshen_plugin_context>`、`Plugin N`、插件标题、来源标签或额外插件说明；旧版 `format: "context"` 继续保留这些归属和低优先级上下文标记。`before + context` 是原有默认行为，会使用低优先级系统上下文。`before + plain` 在普通输入轮次将纯文本放在本轮原文之前，`after + context` 保留包装但放在末尾，`after + plain` 则在原文后用单个换行追加普通用户文本，例如 `xxxx\n123abc`，不产生空行。除 `before + context` 外的用户内容型注入若遇到普通输入，会就近追加；若请求以工具结果结束，宿主按具体协议在完整工具结果内容之后添加普通用户文本块，或在需要独立消息的协议中新增普通 user 尾消息；若以 assistant 结束，则新增普通 user 尾消息。工具结果轮次不会把用户内容型插件文本插入 tool call 与对应 tool result 之间，也不会改写、隐藏或拆开工具调用/结果配对。每次请求临时附加，不写回会话历史。`plain` 不会把内容提升为 system 指令，仍受正常消息优先级和安全边界约束，不能覆盖系统规则、用户当前请求、审批、隔离或工具权限。
+
+`format: "context"` 的插件提示会被标记为低优先级、不可信数据；`format: "plain"` 则是普通用户优先级文本。两者都不能覆盖用户请求、系统规则、审批、安全策略或工具边界。继承只传递 `BeforeModelRequest` 的提示文本，不向子任务开放插件激活、`UserPromptSubmit`、`Interrupt`、插件命令、MCP、动作型 Hook 或 `local_plugin`。该 Hook 不适用于 ChatAgent、自动审批安全审查模型、独立 AutoDrive / 草稿润色任务或任务完成后的标题请求。`UserPromptSubmit`、`Interrupt` 及常规动作型 Hook 仍不会在实际子任务中触发。
+
+常规动作型 Hook（`PreToolUse`、`PostToolUse`、完成后的 `Stop`、`SubagentStop`）只在**主 CodeAgent / WorkAgent + 宿主执行 + 完全访问 + 已信任项目**中尝试。请求批准、Docker、ChatAgent、实际 SubAgent、只读配置、未信任项目或插件未加入当前会话/本轮激活时不会执行。MCP Hook 即使满足这些前置条件，仍须逐次人工审批；Shell Hook 还受下文默认关闭与致命命令保护约束。
 
 ### Interrupt
 
-`Interrupt` 是显式停止时的独立清理期通知，不是普通动作 Hook。用户显式停止且会话满足“主 CodeAgent / WorkAgent + 宿主执行 + 完全访问 + 非只读配置 + 当前会话已引用已启用插件”时，宿主才可能用独立清理信号触发它；该声明式通知不要求项目信任。信号最多等待约 1.5 秒，采用 fire-and-forget，主页面的停止流程不会等待 Hook 完成。
+`Interrupt` 是显式停止时的独立清理期通知，不是普通动作 Hook。用户显式停止且会话满足“主 CodeAgent / WorkAgent + 宿主执行 + 完全访问 + 非只读配置 + 当前会话已引用或本轮已按需激活的启用插件”时，宿主才可能用独立清理信号触发它；该声明式通知不要求项目信任。信号最多等待约 1.5 秒，采用 fire-and-forget，主页面的停止流程不会等待 Hook 完成。
 
 `Interrupt` 仅处理 `type: "prompt"` 文本活动通知。`command` 和 MCP 动作会被明确标记为 skipped，绝不弹出 Hook 审批、启动进程、调用 MCP 或恢复/重放工具。ChatAgent、实际 SubAgent、请求批准、Docker、应用正在关闭及未显式停止的运行不会触发。不要把 `Interrupt` 写成能执行 Shell、MCP 或回滚副作用的生命周期钩子。
 
@@ -202,6 +224,18 @@ Hook 不是“安装后全局后台监听”。只有同时满足以下条件，
       {
         "type": "prompt",
         "text": "If the request names a supported report package, consider the report-tools capability."
+      }
+    ],
+    "BeforeModelRequest": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "text": "123abc",
+            "position": "after",
+            "format": "plain"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -229,8 +263,8 @@ MCP Hook 的 `input` 只展开扁平变量，例如 `${plugin_root}`、`${cwd}`�
 
 安全边界：
 
-- 安装、启用、自动发现或更新插件都不会自动运行 Hook；动作型 Hook 必须在当前会话中显式引用该插件。
-- 常规动作型 Hook 只在主 CodeAgent / WorkAgent 的宿主、完全访问、已信任项目中尝试；请求批准、Docker、ChatAgent、实际 SubAgent 和只读配置不会执行。
+- 安装、启用或自动发现插件不会自动运行 Hook；默认 `on-demand` 插件须由 Agent 在本轮调用 `use_plugin`，或由用户加入当前会话。`activation: "required"` 只能通过用户显式加入满足。
+- 常规动作型 Hook 只在主 CodeAgent / WorkAgent 的宿主、完全访问、已信任项目中尝试；请求批准、Docker、ChatAgent、实际 SubAgent 和只读配置不会执行。按需激活不会授予这些策略例外。
 - Shell Hook 默认关闭，并继续要求项目信任与每次动作审批；致命命令保护继续生效。
 - 启用后的 Shell Hook 使用宿主 PowerShell，不因 Agent 处于请求批准或隔离会话就自动获得宿主回退。
 - MCP Hook 仍要求对应 MCP Server 已启用、已配置，并逐次审批。
@@ -347,12 +381,13 @@ ChatAgent、实际 SubAgent、Docker 和 worktree 会话不能调用该工具，
 2. 在 **本地插件开发市场** 点击 **添加市场**。
 3. 选择市场根目录，或直接选择 `marketplace.json`。
 4. 展开插件错误与警告，确认市场条目名称、版本、来源目录和校验状态。
-5. 如界面提供独立的 **校验开发目录**，先粘贴插件根目录完成校验。
+5. 如界面提供独立的 **校验开发目录**，可粘贴单插件根目录，或粘贴市场根目录逐项检查 catalog 中的插件；校验不会注册市场或安装插件。
 6. 在插件卡片点击 **安装**。
 7. 使用卡片上的启用开关确认插件已启用。
-8. 新建或打开 CodeAgent / WorkAgent 会话，在输入框加号菜单或 `/plugins` 中把该插件加入当前会话。
-9. 只有加入当前会话后，Hook 才可能按事件和权限条件触发；Skill、MCP 或命令的自动发现不会代替这一步。
-10. 运行验收提示，并核对实际审批与运行结果。请求批准、Docker、ChatAgent 和实际 SubAgent 不会执行动作型 Hook；`Interrupt` 只发送 prompt 活动通知。
+8. 默认 `on-demand` 插件无需预先加入会话；Agent 可通过 `discover_capabilities` 找到它，并用精确 ID 调用 `use_plugin`。之后可按需 `use_skill`；插件 MCP 工具从下一轮开始按普通审批与隔离策略提供。
+9. `activation: "required"` 插件须由用户通过输入框加号菜单或 `/plugins` 加入当前会话；Agent 不能自行激活。
+10. `UserPromptSubmit` 只会在提交时看到当时已加入会话的插件；运行时按需激活从之后的模型请求及工具事件开始生效。
+11. 运行验收提示，并核对实际审批与运行结果。请求批准、Docker、ChatAgent 和实际 SubAgent 不会执行动作型 Hook；`Interrupt` 只发送 prompt 活动通知。
 
 任何 Agent 任务仍在活动时，主进程会拒绝安装或更新。等待任务结束或手动停止后重试，插件版本不会在运行中的一轮静默切换。
 
@@ -361,8 +396,8 @@ ChatAgent、实际 SubAgent、Docker 和 worktree 会话不能调用该工具，
 1. 修改原源码并完成真实实现。
 2. 提升清单和对应市场条目的语义版本。
 3. 保留稳定插件 `name`、市场 `name` 和源码路径。
-4. 在设置中刷新现有市场，不要新增一个同身份的重复市场。
-5. 插件显示 **可更新** 后点击 **更新**。
+4. 打开本地市场页、刷新市场或点击重新检查；更新检查按登记顺序 round-robin 只读轮转，每批最多检查 10 个市场、每个市场最多读取 200 个条目。它只检查下一批，不会一次扫描全部市场；已发现的候选会跨批保留并合并，只替换本批市场结果。市场被移除、路径身份变化、插件卸载、来源 provenance 不匹配或已安装版本追平候选版本时，旧候选会被清除。
+5. 只有来源路径复核一致且严格语义版本高于已安装版本时才显示 **可更新**；缺少安装来源记录或来源不可追踪的插件不会按名称自动认领市场条目。用户核对原始来源并点击 **更新** 后才复用该来源，不需要重新导入。扫描只报告候选，不修改或执行插件；更新动作会重新校验来源。
 6. 确认已安装版本，并在新任务中使用验收提示。
 
 成功更新保留 extension ID、会话引用和用户原有启用/停用状态。更新在下一轮或新任务生效；旧版本资源在运行期间保留，应用正常退出且任务全部停止后，仅清理宿主管理目录中的旧安装副本。清理失败会记录日志，保留对应副本，不阻止退出。更新失败时旧安装仍应可用。源码路径改变、名称不一致、来源记录损坏或同名内容已在其他位置安装时不会自动认领。
@@ -380,9 +415,12 @@ ChatAgent、实际 SubAgent、Docker 和 worktree 会话不能调用该工具，
 | 安装/更新按钮报任务忙碌 | 完成或停止所有活动 Agent 任务后重试 |
 | 更新后行为未变化 | 更新不会热重载；开始新任务或让当前会话进入下一轮 |
 | MCP 已声明但不可调用 | 检查插件启用、MCP 配置、审批、隔离和 Server 是否真实可用 |
-| 插件已安装并启用但 Hook 不运行 | 把该插件加入当前 CodeAgent / WorkAgent 会话；动作型 Hook 还需要宿主、完全访问、已信任项目和对应事件，请求批准与 Docker 不执行 |
+| 插件已安装并启用但 Hook 不运行 | 默认 on-demand 插件可由 CodeAgent / WorkAgent 先 `discover_capabilities` 再 `use_plugin`；`activation: "required"` 必须手动加入会话。`UserPromptSubmit` 不会追溯执行；动作型 Hook 还需要宿主、完全访问、已信任项目和对应事件，请求批准与 Docker 不执行 |
+| `use_skill` 报资源不存在 | 先读取该 Skill 的入口并使用其中列出的精确相对资源路径；内置 Harness API 资源见中英文用户指南，错误信息也会列出该 Skill 扫描到的可用引用 |
 | Shell Hook 被跳过 | Shell Hook 默认关闭；还需项目信任和逐次审批 |
 | `Interrupt` 没有执行命令或 MCP | 这是设计边界：`Interrupt` 只发送 prompt 文本活动通知，Command/MCP 动作明确跳过，不审批、不启动进程、不恢复工具 |
 | ChatAgent 看不到插件 | 这是设计边界；ChatAgent 不加载插件、Skill、MCP 或 Hook |
 
-代码、市场和校验功能的实现与限制以当前源码、1.3.4 验证记录及 1.3.3 功能基线为准。源码存在、SDK 预检或静态文档均不能证明插件已经在真实运行中完成验收。
+市场更新检查不会自动安装或运行新版；只有用户点击 **更新** 后才会替换插件，安装流程也会再次校验来源和版本。Agent 活动期间仍拒绝安装或更新。
+
+代码、市场和校验功能的实现与限制以当前源码为准；最近一次完整插件验证见[1.3.5验证记录](VALIDATION_1.3.5.md)，1.3.6 的完整验证尚未完成。源码存在、SDK 预检或静态文档均不能证明插件已经在真实运行中完成验收。

@@ -260,6 +260,41 @@ describe("Workspace conversation creation", () => {
     }
   });
 
+  it("rolls back destination memory configuration when a later conversation update fails", () => {
+    const parent = service.create({
+      providerId,
+      modelId,
+      workspacePath: "C:\\Project",
+      permissionMode: "full_access",
+      reasoningLevel: null,
+      agentProfileId: "primary",
+      systemPrompt: "",
+      executionMode: "host",
+      patchOnly: false,
+      memoryBackend: "tencentdb",
+    });
+    const before = repository.getSession(parent.id);
+    const destinationKey = projectMemoryBackendKey("C:\\Destination");
+    expect(repository.getSetting(destinationKey)).toBeNull();
+    database.exec(`
+      create temp trigger fail_project_move before update on sessions
+      when new.title = 'Reject late write'
+      begin select raise(abort, 'fixture late session failure'); end;
+    `);
+
+    expect(() =>
+      service.update({
+        sessionId: parent.id,
+        workspacePath: "C:\\Destination",
+        title: "Reject late write",
+        compactionModel: { mode: "default", providerId: null, modelId: null },
+      }),
+    ).toThrow("fixture late session failure");
+    expect(repository.getSession(parent.id)).toEqual(before);
+    expect(repository.getSetting(destinationKey)).toBeNull();
+    expect(repository.getSetting(`context.model.${parent.id}`)).toBeNull();
+  });
+
   it("creates an isolated ChatAgent without project or custom Agent configuration", () => {
     const group = service.createChatGroup("Ideas");
     const chat = service.create({

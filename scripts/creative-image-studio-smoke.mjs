@@ -14,7 +14,7 @@ const temporary = await mkdtemp(join(tmpdir(), "mingshen-creative-image-"));
 const project = join(temporary, "project-a");
 const otherProject = join(temporary, "project-b");
 const profile = join(temporary, "profile");
-const evidence = resolve(".impeccable/review", `v134-creative-image-${Date.now()}`);
+const evidence = resolve(".impeccable/review", `v136-creative-image-${Date.now()}`);
 const passed = [], requests = [], exceptions = [], serviceErrors = [], screenshots = [], geometry = [];
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 let child, main, renderer, session, secondSession, provider, textModel, imageModel;
@@ -50,8 +50,8 @@ const server = createServer(async (request, response) => {
     const record = { url: request.url, kind, model: body.model, hasImage, toolCount: (body.tools ?? []).length, settled: false };
     requests.push(record);
     if (kind === "image") {
-      assert.equal(body.response_format, "b64_json");
       assert.equal(body.n, 1);
+      assert.ok(!Object.hasOwn(body, "response_format"), "The current image API omits legacy response_format");
       assert.match(body.prompt, /Polished fixture/);
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ data: [{ b64_json: generatedPng.toString("base64"), revised_prompt: "Generated local fixture" }] }));
@@ -98,7 +98,11 @@ async function connect(number, kind) {
   for (let attempt = 0; attempt < 200 && !target; attempt++) {
     try {
       target = (await fetch(`http://127.0.0.1:${number}/json`).then((value) => value.json())).find(
-        (item) => item.webSocketDebuggerUrl && (kind !== "renderer" || item.type === "page"),
+        (item) =>
+          item.webSocketDebuggerUrl &&
+          (kind === "main"
+            ? item.type === "node"
+            : item.type === "page" && /\/renderer\/index\.html(?:[?#]|$)/.test(item.url)),
       );
     } catch {}
     if (!target) await sleep(100);
@@ -159,7 +163,7 @@ async function installReleaseFixture() {
         const url=new URL(String(target));
         if(url.protocol!=="https:"||!/^\\/rest\\/v1\\/rpc\\/mingshen_get_latest_release(?:_v2)?$/.test(url.pathname)||options?.method!=="POST")throw new Error("Unexpected release fixture request: "+url.href);
         globalThis.__studioReleaseRequests.push(url.pathname);
-        return Response.json([{version:"1.3.5",download_page_url:"https://example.com/releases",notes:"Local release fixture",published_at:"2026-11-20T00:00:00.000Z",package_format:"page"}]);
+        return Response.json([{version:"1.3.7",download_page_url:"https://example.com/releases",notes:"Local release fixture",published_at:"2026-11-23T00:00:00.000Z",package_format:"page"}]);
       };
       return true;
     }`,
@@ -548,7 +552,7 @@ try {
   await renderer.evaluate('document.querySelectorAll(".policy-consents input").forEach(el=>el.click());true');
   for (const label of ["同意并继续", "开始使用"]) await until(`(()=>{const el=[...document.querySelectorAll(".policy-dialog button")].find(el=>!el.disabled&&el.textContent.trim()===${JSON.stringify(label)});if(!el)return false;el.click();return true})()`);
   await until('!document.querySelector(".policy-dialog")');
-  await until('(async()=>{const status=await window.mingshen.getUpdateStatus();return status?.state==="available"&&status.release?.version==="1.3.5"})()');
+  await until('(async()=>{const status=await window.mingshen.getUpdateStatus();return status?.state==="available"&&status.release?.version==="1.3.7"})()');
   await until('Boolean(document.querySelector("#update-title"))');
   await click('.close-dialog[aria-labelledby="update-title"] .close-dialog__actions button');
   await until('!document.querySelector("#update-title")');
@@ -924,9 +928,14 @@ try {
   await until(`document.querySelector("[data-testid=image-prompt]")?.value===${JSON.stringify(polishedText)}`);
   await click("[data-testid=image-generate]");
   await until('(()=>{const image=document.querySelector(".image-canvas-layer img");return document.querySelectorAll("[data-testid=image-asset]").length===1&&image?.complete&&image.naturalWidth>0})()', 60_000);
+  await until('Boolean(document.querySelector("[data-testid=image-generation-warning]"))');
+  assert.match(await renderer.evaluate('document.querySelector("[data-testid=image-generation-warning]").textContent'), /供应商返回 128×96/);
+  await click('[data-testid="image-inspector-toggle"]');
+  await until('document.querySelector("#image-studio-inspector")?.hidden===false');
+  await until('Boolean(document.querySelector("[data-testid=image-polish]:not(:disabled)"))');
   assert.ok(requests.some((request) => request.kind === "image"));
   assert.ok(requests.filter((request) => request.kind === "polish").length >= 2);
-  passed.push("Polish returns a tool-free preview that can be discarded or explicitly applied; actual local Images generation returns and displays decoded Base64 PNG.");
+  passed.push("Polish returns a tool-free preview that can be discarded or explicitly applied; a valid provider image saves and displays at its returned dimensions with a visible mismatch warning.");
 
   holdPolish = true;
   let polishCount = requests.filter((request) => request.kind === "polish").length;
@@ -946,7 +955,8 @@ try {
   await fill("[data-testid=image-prompt]", polishedText);
   passed.push("A stale polish preview cannot replace a newer prompt; after unmount, the cancelled or settled request leaves no preview in the new surface.");
 
-  await click("[data-testid=image-asset] .image-asset__select");
+  await renderer.evaluate('(()=>{const button=document.querySelector("[data-testid=image-asset] .image-asset__select");if(button?.getAttribute("aria-pressed")!=="true")button?.click();return true})()');
+  await until('document.querySelector("[data-testid=image-asset] .image-asset__select")?.getAttribute("aria-pressed")==="true"');
   await click("[data-testid=image-reverse]");
   await until('Boolean(document.querySelector("[data-testid=image-prompt-preview]"))');
   assert.equal(await renderer.evaluate('document.querySelector("[data-testid=image-prompt]").value'), polishedText);
@@ -955,7 +965,7 @@ try {
   assert.ok(requests.some((request) => request.kind === "reverse" && request.hasImage && request.toolCount === 0));
   await setFiles("[data-testid=image-import-input]", [imageFile]);
   await until('document.querySelectorAll("[data-testid=image-asset]").length===2');
-  await click('[data-testid=image-asset]:nth-child(2) .image-asset__select');
+  await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset] .image-asset__select").forEach(button=>{if(button.getAttribute("aria-pressed")!=="true")button.click()});true');
   await until('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===2');
   passed.push("Vision reverse uses an actual selected image and a tool-free request, previews the result, and local image import adds a second independent frame.");
 
@@ -1005,6 +1015,68 @@ try {
   await until(`(()=>{const selected=document.querySelector('.image-workspace__tabs [role=tab][aria-selected=true]'),image=document.querySelector('.image-canvas-layer img');return document.querySelectorAll('.image-workspace__tabs [role=tab]').length===${tabCount + 1}&&selected?.textContent.includes('导入')&&image?.complete&&image.naturalWidth===128&&image.naturalHeight===96})()`);
   await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.documents.length===${tabCount + 1}&&workspace.documents.some(doc=>doc.id===workspace.activeDocumentId&&doc.name.includes('导入')&&doc.layers.length>0)})()`);
   passed.push("PNG and multi-frame GIF exports decode to nonblank media; a self-contained JSON canvas bundle imports with its image layer intact.");
+
+  const lifecycleCanvas = await api("getImageStudioWorkspace");
+  const lifecycleCanvasId = lifecycleCanvas.activeDocumentId;
+  assert.ok(lifecycleCanvasId);
+  await renderer.evaluate('(()=>{const library=document.querySelector("#image-studio-library");if(library?.hidden)document.querySelector("[data-testid=image-library-toggle]")?.click();return true})()');
+  await until('!document.querySelector("#image-studio-library")?.hidden');
+  await click('[data-testid="image-library-canvases-tab"]');
+  const sourceRow = `.image-canvas-project[data-canvas-id="${lifecycleCanvasId}"]`;
+  await until(`Boolean(document.querySelector(${JSON.stringify(sourceRow)}))`);
+  await click(`${sourceRow} button[title="重命名"]`);
+  await fill(`${sourceRow} input`, "Lifecycle fixture");
+  await renderer.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await renderer.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await until(`document.querySelector(${JSON.stringify(`${sourceRow} .image-canvas-project__open strong`)})?.textContent==="Lifecycle fixture"`);
+  const searchSelector = ".image-library__search input";
+  await fill(searchSelector, "Lifecycle fixture");
+  await until(`document.querySelectorAll("[data-testid=image-canvas-project]").length===1`);
+  await fill(searchSelector, "");
+
+  const sourceTabClose = `[data-testid="image-canvas-tab"][data-canvas-id="${lifecycleCanvasId}"] .image-workspace__tab-close`;
+  await main.evaluate(`(()=>{
+    const handlers=process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers;
+    const channel="image-studio:canvas-close", original=handlers.get(channel);
+    if(typeof original!=="function")throw new Error("Canvas close IPC handler is unavailable");
+    globalThis.__studioCanvasCloseHandler=original;
+    let release;
+    globalThis.__studioCanvasCloseGate=new Promise(resolve=>{release=resolve});
+    globalThis.__releaseStudioCanvasClose=release;
+    handlers.set(channel,async(...args)=>{await globalThis.__studioCanvasCloseGate;return original(...args)});
+    return true;
+  })()`);
+  await click(sourceTabClose);
+  await until('document.querySelector("[data-testid=image-studio]")?.inert===true');
+  assert.deepEqual(
+    await renderer.evaluate('({inert:document.querySelector("[data-testid=image-studio]").inert,busy:document.querySelector("[data-testid=image-studio]").getAttribute("aria-busy")})'),
+    { inert: true, busy: "true" },
+    "Canvas editing must pause while a file-backed mutation is pending",
+  );
+  await main.evaluate('globalThis.__releaseStudioCanvasClose?.();true');
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return !workspace.documents.some(doc=>doc.id===${JSON.stringify(lifecycleCanvasId)})})()`);
+  assert.ok((await api("listImageStudioCanvases")).some((item) => item.id === lifecycleCanvasId));
+  await click(`${sourceRow} .image-canvas-project__open`);
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.activeDocumentId===${JSON.stringify(lifecycleCanvasId)}&&workspace.documents.some(doc=>doc.id===workspace.activeDocumentId)})()`);
+
+  await click(`${sourceRow} button[title="复制画布"]`);
+  await until(`(async()=>{const projects=await window.mingshen.listImageStudioCanvases();return projects.some(item=>item.id!==${JSON.stringify(lifecycleCanvasId)}&&item.name.includes("副本"))})()`);
+  const duplicateProject = (await api("listImageStudioCanvases")).find(
+    (item) => item.id !== lifecycleCanvasId && item.name.includes("副本"),
+  );
+  assert.ok(duplicateProject?.available);
+  const duplicateCanvas = (await api("getImageStudioWorkspace")).documents.find(
+    (document) => document.id === duplicateProject.id,
+  );
+  assert.ok(duplicateCanvas?.layers.length);
+  const duplicateRow = `.image-canvas-project[data-canvas-id="${duplicateProject.id}"]`;
+  await click(`${duplicateRow} .image-canvas-project__delete`);
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click('[role="alertdialog"] .mingshen-dialog__actions button.btn--danger-solid');
+  await until(`(async()=>{const projects=await window.mingshen.listImageStudioCanvases();return !projects.some(item=>item.id===${JSON.stringify(duplicateProject.id)})})()`);
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.activeDocumentId===${JSON.stringify(lifecycleCanvasId)}})()`);
+  await click('[data-testid="image-library-assets-tab"]');
+  passed.push("The local canvas library searches and renames imported projects, closes tabs without deleting files, reopens them, duplicates layer references, and confirms permanent project deletion.");
 
   await main.evaluate(`(()=>{
     const handlers=process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers;
@@ -1087,6 +1159,7 @@ try {
 } finally {
   releasePolish();
   await main?.evaluate(`(()=>{const original=globalThis.__studioDesktopStateHandler;if(original){process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers.set("desktop:state",original);delete globalThis.__studioDesktopStateHandler}return true})()`).catch(() => {});
+  await main?.evaluate(`(()=>{const original=globalThis.__studioCanvasCloseHandler;if(original){globalThis.__releaseStudioCanvasClose?.();process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers.set("image-studio:canvas-close",original);delete globalThis.__studioCanvasCloseHandler;delete globalThis.__studioCanvasCloseGate;delete globalThis.__releaseStudioCanvasClose}return true})()`).catch(() => {});
   if (child) {
     const owned = child;
     const ended = owned.exitCode !== null ? Promise.resolve() : new Promise((done) => owned.once("exit", done));

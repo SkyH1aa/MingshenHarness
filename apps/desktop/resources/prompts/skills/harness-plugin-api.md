@@ -68,21 +68,48 @@ Use `${MINGSHEN_PLUGIN_ROOT}` for the installed plugin root in MCP arguments and
 commands. The compatibility tokens `${CLAUDE_PLUGIN_ROOT}` and
 `${ZCODE_PLUGIN_ROOT}` are recognized but should not be used in new native source.
 
-Supported hook events are `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
-`SubagentStop`, and `Interrupt`. Installing or enabling a plugin does not run hooks
-globally: the plugin must also be referenced in the current primary CodeAgent/WorkAgent
-conversation. Action hooks then require host execution, Full Access and a trusted
-project; Request Approval, Docker, ChatAgent, actual SubAgents and read-only profiles
-do not execute them. Shell hooks additionally require the explicit application setting
-and approval for each action. MCP hooks still require an enabled/configured server and
-per-action approval.
+Supported hook events are `UserPromptSubmit`, `BeforeModelRequest`, `PreToolUse`,
+`PostToolUse`, `Stop`, `SubagentStop`, and `Interrupt`. Installing or enabling a plugin
+does not run hooks globally. Omitted manifest `activation` defaults to `on-demand`; a
+primary Code/Work Agent can discover it and call `use_plugin` to activate it for the
+current run. `activation:"required"` plugins must be selected by the user in the current
+session before the relevant turn is submitted. Activation never persists or changes
+install/enable state.
 
-`UserPromptSubmit` contributes only bounded declarative prompt context; its Command/MCP
-actions are ignored. `Interrupt` is an explicit-stop cleanup notification with an
-independent fire-and-forget signal capped at about 1.5 seconds. It supports only prompt
-activity text, while Command/MCP actions are skipped without approval, process launch
-or tool recovery. Never describe a declared hook as executed until the host returns an
-execution result.
+`UserPromptSubmit` contributes bounded declarative prompt context only for plugins
+already selected when the user submits the turn; a later `use_plugin` cannot trigger it
+retroactively. After activation, `BeforeModelRequest` runs before each subsequent model
+request in the active primary Code/Work run, including network retry requests, run-owned
+context compaction, and session-owned memory analysis or summaries. It only appends
+bounded `type:"prompt"` text to that request. A prompt can set
+`position:"before"|"after"` (default `"before"`) and
+`format:"context"|"plain"` (default `"context"`). The compatible default wraps text as
+low-priority plugin context; `position:"after", format:"plain"` appends only the text as
+ordinary user-visible content at the request end, without `<mingshen_plugin_context>`,
+`Plugin N`, attribution or extra explanation. It remains user-priority text rather than
+a system instruction. Command/MCP actions are ignored. Actual child tasks derived through `runSubagent` from
+an active parent run inherit only this declarative context from the parent's selected
+or activated plugins, starting with the child's initial request. Later parent-run
+activations are read for each subsequent child request; already-sent requests are not
+changed. This does not expose plugin activation, `UserPromptSubmit`, `Interrupt`, plugin
+commands, MCP, action hooks, or `local_plugin` to the child. An independent child
+conversation opened directly with `@` and no active parent-run mapping does not inherit
+it. It cannot change an already-sent request or rewrite history. It does not run for
+ChatAgent, automatic-approval reviews, independent AutoDrive/draft-polish jobs or
+post-run title generation. Hook load, file,
+timeout, or validation errors are logged and fail closed: the affected model request is
+not sent, and the failure is returned to its owning generation, compaction, or memory
+operation rather than silently continuing without the hook context. Cancellation
+propagates. Action hooks require host
+execution, Full Access and a trusted project; Request Approval, Docker, ChatAgent, actual
+SubAgents and read-only profiles do not execute them. Shell hooks additionally require
+the explicit application setting and approval for each action. MCP hooks still require
+an enabled/configured server and per-action approval.
+
+`Interrupt` is an explicit-stop cleanup notification with an independent fire-and-forget
+signal capped at about 1.5 seconds. It supports only prompt activity text, while
+Command/MCP actions are skipped without approval, process launch or tool recovery. Never
+describe a declared hook as executed until the host returns an execution result.
 
 ## Local development market
 
@@ -110,6 +137,12 @@ updating one plugin.
 
 The editable source, catalog entry, and host-managed installed copy are three different
 locations. Updating source does not hot-reload an installed plugin.
+
+Read-only update checks rotate through at most 10 registered markets per check and 200
+entries per market. Only a strictly newer semantic version with a rechecked matching
+source can offer an update. An installed plugin with no source record or an untraceable
+source is not automatically claimed by a same-name market entry. The user must confirm
+the source and choose the update action; checks never install or execute a new version.
 
 Marketplace registration, install, update, enable/disable, and source removal are UI
 actions in **Settings → Skills 与插件 → 本地插件开发市场**. Install and update require
@@ -149,3 +182,13 @@ registration, installation, enablement, or runtime execution.
 
 Load [interface-template.md](harness-plugin-api/references/interface-template.md) with
 `resource:"references/interface-template.md"` when creating the plugin's adapter Skill.
+
+Other API references available on demand:
+
+- `references/plugin-api.md` for discovery, activation, validation, install and update boundaries;
+- `references/manifest.md` for the native plugin manifest and path rules;
+- `references/manifest-schema.md` for a complete manifest example and validation checklist;
+- `references/hooks.md` for event behavior, including per-model-request injection;
+- `references/local-plugin-development.md` for the end-to-end local workflow and troubleshooting.
+
+Use the exact resource path from this list. Do not guess filenames such as `references/plugin.json.md`.

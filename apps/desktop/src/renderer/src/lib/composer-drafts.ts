@@ -309,11 +309,21 @@ export class ComposerDraftStore {
   }
 
   async flush(sessionId: string): Promise<void> {
-    await this.load(sessionId);
     const entry = this.entry(sessionId);
-    if (entry.acceptance || entry.acceptanceRevisions.length)
-      await this.processAcceptances(sessionId, entry);
-    await this.save(sessionId);
+    try {
+      await this.load(sessionId);
+      if (entry.removed) return;
+      if (entry.acceptance || entry.acceptanceRevisions.length)
+        await this.processAcceptances(sessionId, entry);
+      if (entry.removed) return;
+      await this.save(sessionId);
+    } catch (cause) {
+      if (!entry.removed) throw cause;
+    }
+  }
+
+  flushIfPresent(sessionId: string): Promise<void> {
+    return this.entries.has(sessionId) ? this.flush(sessionId) : Promise.resolve();
   }
 
   async flushAll(): Promise<void> {

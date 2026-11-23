@@ -138,13 +138,14 @@ export function mergeGeneratedResult(
   current: ImageStudioWorkspace,
   result: ImageStudioGenerateResult,
 ): ImageStudioWorkspace {
+  const generatedAssetIds = new Set(result.generatedAssets.map((asset) => asset.id));
   return {
     ...current,
     assets: result.workspace.assets,
     documents: current.documents.map((document) => {
       const generated = result.workspace.documents
         .find((item) => item.id === document.id)
-        ?.layers.filter((layer) => layer.assetId === result.asset.id);
+        ?.layers.filter((layer) => generatedAssetIds.has(layer.assetId));
       if (!generated?.length) return document;
       const ids = new Set(document.layers.map((layer) => layer.id));
       const layers = generated

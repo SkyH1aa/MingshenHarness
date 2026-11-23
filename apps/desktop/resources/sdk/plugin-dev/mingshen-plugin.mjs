@@ -23,6 +23,8 @@ const MAX_FILES = 20_000;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_DECLARATION_BYTES = 1024 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
+const MAX_BEFORE_MODEL_PROMPT_CHARS = 4_000;
+const MAX_BEFORE_MODEL_PROMPT_CONTEXT_CHARS = 12_000;
 const MARKETPLACE_LOCK_TIMEOUT_MS = 15_000;
 const MARKETPLACE_LOCK_STALE_MS = 60_000;
 const PLUGIN_NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -30,12 +32,15 @@ const COMMAND_NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const HOOK_EVENTS = new Set([
   "UserPromptSubmit",
+  "BeforeModelRequest",
   "PreToolUse",
   "PostToolUse",
   "Stop",
   "SubagentStop",
   "Interrupt",
 ]);
+const BEFORE_MODEL_PROMPT_POSITIONS = new Set(["before", "after"]);
+const BEFORE_MODEL_PROMPT_FORMATS = new Set(["context", "plain"]);
 const ROOT_TOKENS = [
   "${MINGSHEN_PLUGIN_ROOT}",
   "${CLAUDE_PLUGIN_ROOT}",
@@ -59,6 +64,95 @@ function containsUnresolvedPlaceholder(value) {
   if (value && typeof value === "object")
     return Object.values(value).some(containsUnresolvedPlaceholder);
   return false;
+}
+
+function validateBeforeModelRequestPrompts(value) {
+  const errors = [];
+  const seen = new WeakSet();
+  let aggregateChars = 0;
+  const walk = (candidate, path, depth) => {
+    if (!candidate || typeof candidate !== "object") return;
+    if (depth > 12) {
+      errors.push(
+        issue(
+          "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+          "BeforeModelRequest prompt declaration is nested too deeply.",
+          path,
+        ),
+      );
+      return;
+    }
+    if (seen.has(candidate)) return;
+    seen.add(candidate);
+    if (Array.isArray(candidate)) {
+      for (const [index, entry] of candidate.entries())
+        walk(entry, `${path}[${index}]`, depth + 1);
+      return;
+    }
+    if (candidate.type === "prompt") {
+      if (typeof candidate.text !== "string" || !candidate.text.replaceAll("\0", "").trim()) {
+        errors.push(
+          issue(
+            "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+            'BeforeModelRequest type:"prompt" requires a non-empty string text field.',
+            `${path}.text`,
+          ),
+        );
+        return;
+      }
+      if (
+        candidate.position !== undefined &&
+        !BEFORE_MODEL_PROMPT_POSITIONS.has(candidate.position)
+      ) {
+        errors.push(
+          issue(
+            "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+            'BeforeModelRequest position must be "before" or "after" when specified.',
+            `${path}.position`,
+          ),
+        );
+      }
+      if (
+        candidate.format !== undefined &&
+        !BEFORE_MODEL_PROMPT_FORMATS.has(candidate.format)
+      ) {
+        errors.push(
+          issue(
+            "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+            'BeforeModelRequest format must be "context" or "plain" when specified.',
+            `${path}.format`,
+          ),
+        );
+      }
+      const text = candidate.text.replaceAll("\0", "").trim();
+      if (text.length > MAX_BEFORE_MODEL_PROMPT_CHARS) {
+        errors.push(
+          issue(
+            "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+            `BeforeModelRequest prompt exceeds the ${MAX_BEFORE_MODEL_PROMPT_CHARS}-character limit.`,
+            `${path}.text`,
+          ),
+        );
+      }
+      aggregateChars += text.length;
+      if (aggregateChars > MAX_BEFORE_MODEL_PROMPT_CONTEXT_CHARS) {
+        errors.push(
+          issue(
+            "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+            `BeforeModelRequest context exceeds the ${MAX_BEFORE_MODEL_PROMPT_CONTEXT_CHARS}-character limit.`,
+            path,
+          ),
+        );
+      }
+      return;
+    }
+    // Command/MCP inputs may contain prompt-like fields; typed non-prompt hooks are not prompt declarations.
+    if (candidate.type !== undefined) return;
+    for (const [key, entry] of Object.entries(candidate))
+      walk(entry, `${path}.${key}`, depth + 1);
+  };
+  walk(value, "hooks.BeforeModelRequest", 0);
+  return errors;
 }
 
 function pathInside(root, target) {
@@ -691,6 +785,8 @@ export async function validatePlugin(pluginRoot) {
         issue("HOOK_EVENT_INVALID", `Unsupported hook event: ${event}.`, "hooks"),
       );
   }
+  if (hooksRecord.BeforeModelRequest !== undefined)
+    errors.push(...validateBeforeModelRequestPrompts(hooksRecord.BeforeModelRequest));
   const checkedCommands = await validateCommands(root, manifest.commands);
   errors.push(...checkedCommands.errors);
   warnings.push(...checkedCommands.warnings);

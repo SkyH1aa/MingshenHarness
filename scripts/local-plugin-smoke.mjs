@@ -55,6 +55,7 @@ let skillIdV1;
 let skillIdV2;
 let mcpToolV1;
 let mcpToolV2;
+let subagentHookEvidence;
 
 const finish = (response, text = "", output) => {
   if (response.destroyed || response.writableEnded) return;
@@ -108,6 +109,45 @@ const server = createServer(async (request, response) => {
     requests.push(body);
     if (scenario?.hold) {
       held = response;
+      return;
+    }
+    if ((scenario?.failuresRemaining ?? 0) > 0) {
+      scenario.failuresRemaining -= 1;
+      response.writeHead(503, {
+        "Content-Type": "application/json",
+        "Retry-After-Ms": "0",
+      });
+      response.end(
+        JSON.stringify({
+          error: {
+            message: "LOCAL_PLUGIN_RETRYABLE_FAILURE",
+            type: "server_error",
+          },
+        }),
+      );
+      return;
+    }
+    if (scenario?.subagent) {
+      const plan = scenario.subagent;
+      const isChild = serialized.includes(`子任务：${plan.childTaskMarker}`);
+      const steps = isChild ? plan.childSteps : plan.parentSteps;
+      const indexKey = isChild ? "childNext" : "parentNext";
+      const step = steps[plan[indexKey]++];
+      if (step) {
+        finish(response, "", [
+          {
+            type: "function_call",
+            name: step.name,
+            arguments: JSON.stringify(step.args ?? {}),
+            call_id: `local-plugin-subagent-${requests.length}-${step.name}`,
+          },
+        ]);
+      } else {
+        finish(
+          response,
+          isChild ? plan.childCompletionText : plan.parentCompletionText,
+        );
+      }
       return;
     }
     const step = scenario?.steps[scenario.next++];
@@ -213,7 +253,14 @@ async function connectRenderer(timeout = 60_000) {
   while (Date.now() < deadline) {
     try {
       const target = (await debuggerTargets(rendererDebugPort)).find(
-        (entry) => entry.type === "page" && entry.webSocketDebuggerUrl,
+        (entry) => {
+          if (entry.type !== "page" || !entry.webSocketDebuggerUrl) return false;
+          try {
+            return new URL(entry.url).pathname.toLowerCase().endsWith("/index.html");
+          } catch {
+            return false;
+          }
+        },
       );
       if (target) return connectTarget(target, "renderer");
     } catch (error) {
@@ -636,6 +683,36 @@ $ARGUMENTS
           ],
         },
       ],
+      BeforeModelRequest: [
+        {
+          hooks: [
+            {
+              type: "prompt",
+              text: `LOCAL_PLUGIN_EACH_REQUEST_${marker} provider=\${provider_id} model=\${model_id} turn=\${turn_id}`,
+              position: "before",
+              format: "context",
+            },
+            {
+              type: "prompt",
+              text: `LOCAL_PLUGIN_BEFORE_PLAIN_${marker}`,
+              position: "before",
+              format: "plain",
+            },
+            {
+              type: "prompt",
+              text: `LOCAL_PLUGIN_AFTER_CONTEXT_${marker}`,
+              position: "after",
+              format: "context",
+            },
+            {
+              type: "prompt",
+              text: `LOCAL_PLUGIN_AFTER_PLAIN_${marker}`,
+              position: "after",
+              format: "plain",
+            },
+          ],
+        },
+      ],
       PostToolUse: [
         {
           matcher: "use_skill",
@@ -869,7 +946,7 @@ function approvalWatcher(options = {}) {
 }
 
 async function run(session, steps, options = {}) {
-  scenario = { steps, next: 0 };
+  scenario = options.scenario ?? { steps, next: 0 };
   const previous = await api("getSessionMessages", session.id);
   const start = requests.length;
   const watcher = options.approval
@@ -1104,6 +1181,60 @@ function mcpToolFrom(request) {
   return tool.name;
 }
 
+function responseContentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => (typeof block?.text === "string" ? block.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function latestResponseUserText(request) {
+  const items = Array.isArray(request?.input) ? request.input : [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.role === "user") return responseContentText(item.content);
+  }
+  return "";
+}
+
+function assertBeforeModelRequestCombinations(request, marker, label) {
+  const instructions = String(request?.instructions ?? "");
+  const beforeContext = `LOCAL_PLUGIN_EACH_REQUEST_${marker}`;
+  const beforePlain = `LOCAL_PLUGIN_BEFORE_PLAIN_${marker}`;
+  const afterContext = `LOCAL_PLUGIN_AFTER_CONTEXT_${marker}`;
+  const afterPlain = `LOCAL_PLUGIN_AFTER_PLAIN_${marker}`;
+  const userText = latestResponseUserText(request);
+
+  assert.ok(
+    instructions.includes(beforeContext),
+    `${label}: before/context must remain in system instructions`,
+  );
+  assert.ok(
+    !instructions.includes(beforePlain) &&
+      !instructions.includes(afterContext) &&
+      !instructions.includes(afterPlain),
+    `${label}: plain and suffix hooks must not be elevated into system instructions`,
+  );
+  assert.ok(
+    userText.startsWith(beforePlain),
+    `${label}: before/plain must prefix the latest user content without a wrapper`,
+  );
+  assert.ok(
+    userText.endsWith(afterPlain),
+    `${label}: after/plain must terminate the latest user content without a wrapper`,
+  );
+  const contextIndex = userText.indexOf(afterContext);
+  const contextClose = userText.indexOf("</mingshen_plugin_context>", contextIndex);
+  assert.ok(contextIndex >= 0, `${label}: after/context must be present in user content`);
+  assert.ok(contextClose > contextIndex, `${label}: after/context must retain its source wrapper`);
+  assert.ok(
+    userText.slice(contextClose).startsWith(`</mingshen_plugin_context>\n\n${afterPlain}`),
+    `${label}: suffix hooks must preserve declaration order after context before plain`,
+  );
+}
+
 async function readMcpLog() {
   return await readFile(mcpLog, "utf8").catch(() => "");
 }
@@ -1118,6 +1249,11 @@ async function pathExists(path) {
 try {
   await mkdir(project, { recursive: true });
   await mkdir(evidence, { recursive: true });
+  await writeFile(
+    join(project, "subagent-proof.txt"),
+    "LOCAL_PLUGIN_CHILD_READ_TOOL_PROOF_V010\n",
+    "utf8",
+  );
   await createPlugin({
     pluginRoot,
     name: pluginName,
@@ -1133,7 +1269,7 @@ try {
   assert.equal(sdkValidation.mcpServers.length, 1);
   assert.deepEqual(
     sdkValidation.hookEvents.sort(),
-    ["PostToolUse", "UserPromptSubmit"],
+    ["BeforeModelRequest", "PostToolUse", "UserPromptSubmit"],
   );
   await upsertMarketplace(marketRoot, marketName, [pluginRoot]);
 
@@ -2681,6 +2817,13 @@ try {
     runtimeV1.results.every((result) => !result.isError),
     JSON.stringify(runtimeV1.results),
   );
+  runtimeV1.requests.forEach((request, index) =>
+    assertBeforeModelRequestCombinations(
+      request,
+      "V010",
+      `runtimeV1 tool-round request ${index + 1}`,
+    ),
+  );
   assert.ok(
     runtimeV1.results.some((result) =>
       result.output.includes("LOCAL_PLUGIN_SKILL_BODY_V010"),
@@ -2711,6 +2854,136 @@ try {
   const mcpLogV1 = await readMcpLog();
   assert.ok(mcpLogV1.includes("LOCAL_PLUGIN_HOOK_MCP_V010"));
   assert.ok(mcpLogV1.includes("LOCAL_PLUGIN_MCP_DIRECT_V010"));
+
+  await api("setModelRetrySettings", { maxRetries: 1 });
+  let retryRun;
+  try {
+    retryRun = await run(codeSession, [], {
+      text: "LOCAL_PLUGIN_RETRY_REQUEST_V010",
+      scenario: {
+        steps: [],
+        next: 0,
+        failuresRemaining: 1,
+      },
+    });
+  } finally {
+    await api("setModelRetrySettings", { maxRetries: 0 });
+  }
+  assert.equal(
+    retryRun.requests.length,
+    2,
+    "The fixture must observe one failed attempt and one successful retry",
+  );
+  retryRun.requests.forEach((request, index) => {
+    assertBeforeModelRequestCombinations(
+      request,
+      "V010",
+      `retry attempt ${index + 1}`,
+    );
+    assert.ok(
+      latestResponseUserText(request).includes("LOCAL_PLUGIN_RETRY_REQUEST_V010"),
+      `Retry attempt ${index + 1} must retain the original user request between the plain prefix and suffix`,
+    );
+  });
+  passed.push(
+    "A transient model failure refreshes all four BeforeModelRequest combinations on both the failed attempt and retry while preserving the original user input",
+  );
+
+  const childTaskMarker = "LOCAL_PLUGIN_CHILD_SUBAGENT_TASK_V010";
+  const childCompletionText = "LOCAL_PLUGIN_CHILD_SUBAGENT_RESULT_V010";
+  const mcpLogBeforeSubagent = await readMcpLog();
+  const subagentScenario = {
+    subagent: {
+      childTaskMarker,
+      childSteps: [
+        {
+          name: "read_file",
+          args: { path: join(project, "subagent-proof.txt") },
+        },
+      ],
+      parentSteps: [
+        {
+          name: "spawn_subagent",
+          args: {
+            task: childTaskMarker,
+            context: "Read subagent-proof.txt and return its exact marker.",
+            label: "Plugin Hook propagation smoke",
+            agent: "general",
+          },
+        },
+        { name: "wait_subagents", args: {} },
+      ],
+      childNext: 0,
+      parentNext: 0,
+      childCompletionText,
+      parentCompletionText: "LOCAL_PLUGIN_PARENT_SUBAGENT_RESULT_V010",
+    },
+  };
+  const subagentRun = await run(codeSession, [], {
+    text: "LOCAL_PLUGIN_PARENT_SUBAGENT_DISPATCH_V010",
+    scenario: subagentScenario,
+  });
+  const isChildSubagentRequest = (request) =>
+    JSON.stringify(request).includes(`子任务：${childTaskMarker}`);
+  const childRequests = subagentRun.requests.filter(isChildSubagentRequest);
+  const parentRequests = subagentRun.requests.filter(
+    (request) => !isChildSubagentRequest(request),
+  );
+  assert.ok(childRequests.length >= 2, "The child must perform a tool round and a final round");
+  assert.ok(
+    parentRequests.length >= 3,
+    "The parent must dispatch, wait and submit a final model request",
+  );
+  childRequests.forEach((request, index) =>
+    assertBeforeModelRequestCombinations(
+      request,
+      "V010",
+      `child subagent request ${index + 1}`,
+    ),
+  );
+  parentRequests.forEach((request, index) =>
+    assertBeforeModelRequestCombinations(
+      request,
+      "V010",
+      `parent subagent request ${index + 1}`,
+    ),
+  );
+  assert.ok(
+    (childRequests[0]?.tools ?? []).some((tool) => tool.name === "read_file"),
+    "The child must receive its permitted read tool for the tool-loop fixture",
+  );
+  assert.ok(
+    JSON.stringify(childRequests[1] ?? {}).includes("LOCAL_PLUGIN_CHILD_READ_TOOL_PROOF_V010"),
+    "The follow-up child request must include the read_file result",
+  );
+  assert.ok(
+    childRequests.every(
+      (request) => !(request.tools ?? []).some((tool) => tool.name === mcpToolV1),
+    ),
+    "The child tool catalog must not expose the installed plugin MCP tool",
+  );
+  assert.ok(
+    subagentRun.results.some((result) => result.output.includes(childCompletionText)),
+    "The parent must collect the completed child result",
+  );
+  assert.equal(
+    await readMcpLog(),
+    mcpLogBeforeSubagent,
+    "The child run must not execute the plugin MCP action hook",
+  );
+  subagentHookEvidence = {
+    parentRequests: parentRequests.length,
+    childRequests: childRequests.length,
+    childReadToolLoop: true,
+    pluginMcpToolExposedToChild: false,
+    pluginMcpActionLogChanged: false,
+    allFourPromptCombinations: true,
+    suffixOrderPreserved: true,
+    childCompleted: true,
+  };
+  passed.push(
+    "A selected plugin inherits all four BeforeModelRequest combinations with ordered user suffix content on every parent and child model request while the child completes a read-only tool loop without plugin MCP/action access",
+  );
   passed.push(
     "CodeAgent discovers and loads the exact installed Skill, uses read-only local_plugin, calls plugin MCP and executes an approved PostToolUse MCP Hook",
   );
@@ -2929,6 +3202,13 @@ try {
     runtimeV2.results.every((result) => !result.isError),
     JSON.stringify(runtimeV2.results),
   );
+  runtimeV2.requests.forEach((request, index) =>
+    assertBeforeModelRequestCombinations(
+      request,
+      "V020",
+      `runtimeV2 tool-round request ${index + 1}`,
+    ),
+  );
   assert.ok(
     runtimeV2.results.some((result) =>
       result.output.includes("LOCAL_PLUGIN_SKILL_BODY_V020"),
@@ -3094,6 +3374,7 @@ try {
     screenshots,
     layoutMeasurements,
     modelRequestCount: requests.length,
+    subagentHook: subagentHookEvidence,
     approvals,
     approvalRecords,
     expectedDenials,
@@ -3172,6 +3453,7 @@ try {
         protectedReadAudit,
         pinnedCapabilities: pinnedCapabilityEvidence,
         requestCount: requests.length,
+        subagentHook: subagentHookEvidence,
         errors,
         failure: String(error.stack ?? error),
       },

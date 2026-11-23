@@ -58,6 +58,7 @@ import type {
   SessionPageInput,
 } from "../../shared/session-catalog";
 import { forkHostContext, hostContextKey } from "../chat/host-context";
+import { warmStartupIndexes } from "./startup-index-warmup";
 
 type Row = Record<string, unknown>;
 type StoredComposerDraft = Omit<
@@ -268,6 +269,10 @@ function parseMcpTools(value: unknown): McpToolSummary[] {
 
 export class Repository {
   constructor(private readonly database: DatabaseSync) {}
+
+  warmStartupIndexes(): void {
+    warmStartupIndexes(this.database);
+  }
 
   listSettings(prefix: string): Array<{ key: string; value: unknown }> {
     return (

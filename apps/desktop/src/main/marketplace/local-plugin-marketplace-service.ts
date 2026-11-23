@@ -3,11 +3,15 @@ import { lstat, readFile, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ExtensionView } from "../../shared/domain";
 import type {
+  LocalPluginCatalogValidation,
   LocalPluginCleanupResult,
+  LocalPluginDirectoryInspection,
   LocalPluginInstallResult,
   LocalPluginMarketPlugin,
   LocalPluginMarketSource,
   LocalPluginMarketView,
+  LocalPluginUpdateCandidate,
+  LocalPluginUpdateCheckResult,
   LocalPluginValidation,
   LocalPluginValidationIssue,
 } from "../../shared/local-plugins";
@@ -18,6 +22,7 @@ const MARKETS_SETTING = "localPluginMarkets" + ".v1";
 const PROVENANCE_SETTING = "localPluginProvenance.v1";
 const MAX_CATALOG_BYTES = 1024 * 1024;
 const MAX_CATALOG_PLUGINS = 200;
+const MAX_UPDATE_CHECK_MARKETS = 10;
 const MARKET_NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const SEMANTIC_VERSION =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -58,6 +63,12 @@ interface StoredPluginProvenance {
   contentHash: string;
   oldInstalledPaths: string[];
   updatedAt: string;
+}
+
+interface CachedMarketUpdates {
+  rootPath: string;
+  catalogPath: string;
+  updates: LocalPluginUpdateCandidate[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -156,7 +167,58 @@ function manifestName(manifest: Record<string, unknown> | null): string {
   return asString(manifest?.name);
 }
 
+function compareSemanticVersions(left: string, right: string): number | null {
+  const parse = (version: string) => {
+    const match =
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
+        version,
+      );
+    if (!match) return null;
+    const prerelease = match[4] ? match[4].split(".") : null;
+    if (
+      prerelease?.some(
+        (part) => !part || (/^\d+$/u.test(part) && part.length > 1 && part.startsWith("0")),
+      )
+    ) {
+      return null;
+    }
+    return {
+      core: [match[1] ?? "", match[2] ?? "", match[3] ?? ""],
+      prerelease,
+    };
+  };
+  const compareNumeric = (a: string, b: string) =>
+    a.length === b.length ? (a === b ? 0 : a > b ? 1 : -1) : a.length > b.length ? 1 : -1;
+  const a = parse(left);
+  const b = parse(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    const comparison = compareNumeric(a.core[index] ?? "0", b.core[index] ?? "0");
+    if (comparison) return comparison;
+  }
+  if (!a.prerelease && !b.prerelease) return 0;
+  if (!a.prerelease) return 1;
+  if (!b.prerelease) return -1;
+  const count = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < count; index += 1) {
+    const aPart = a.prerelease[index];
+    const bPart = b.prerelease[index];
+    if (aPart === undefined) return -1;
+    if (bPart === undefined) return 1;
+    if (aPart === bPart) continue;
+    const aNumeric = /^(0|[1-9]\d*)$/u.test(aPart);
+    const bNumeric = /^(0|[1-9]\d*)$/u.test(bPart);
+    if (aNumeric && bNumeric) return compareNumeric(aPart, bPart);
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    return aPart > bPart ? 1 : -1;
+  }
+  return 0;
+}
+
 export class LocalPluginMarketplaceService {
+  private nextUpdateMarketIndex = 0;
+  private readonly cachedUpdates = new Map<string, CachedMarketUpdates>();
+
   constructor(
     private readonly repository: Repository,
     private readonly extensionService: ExtensionService,
@@ -165,6 +227,185 @@ export class LocalPluginMarketplaceService {
 
   listSources(): LocalPluginMarketSource[] {
     return this.loadMarkets().sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async checkForUpdates(): Promise<LocalPluginUpdateCheckResult> {
+    const markets = this.listSources();
+    const start = markets.length ? this.nextUpdateMarketIndex % markets.length : 0;
+    const scanCount = Math.min(markets.length, MAX_UPDATE_CHECK_MARKETS);
+    const scannedMarkets = Array.from(
+      { length: scanCount },
+      (_, index) => markets[(start + index) % markets.length],
+    ).filter((market): market is LocalPluginMarketSource => Boolean(market));
+    this.nextUpdateMarketIndex = markets.length ? (start + scanCount) % markets.length : 0;
+    const result: LocalPluginUpdateCheckResult = {
+      checkedMarkets: 0,
+      skippedMarkets: Math.max(0, markets.length - scannedMarkets.length),
+      updates: [],
+      warnings: [],
+    };
+    if (result.skippedMarkets) {
+      result.warnings.push(
+        `本次轮换检查最多 ${MAX_UPDATE_CHECK_MARKETS} 个本地市场；其余 ${result.skippedMarkets} 个市场将在后续检查中轮到。`,
+      );
+    }
+
+    const provenanceEntries = this.loadProvenance();
+    for (const market of scannedMarkets) {
+      const marketUpdates: LocalPluginUpdateCandidate[] = [];
+      try {
+        const rootMetadata = await lstat(market.rootPath);
+        const canonicalRoot = await realpath(market.rootPath);
+        if (
+          !rootMetadata.isDirectory() ||
+          rootMetadata.isSymbolicLink() ||
+          canonicalRoot !== resolve(market.rootPath)
+        ) {
+          throw new Error("已登记的市场根路径发生变化，已跳过更新检测。");
+        }
+        const parsed = await this.parseCatalog(market.catalogPath);
+        if (
+          parsed.rootPath !== canonicalRoot ||
+          parsed.catalogPath !== resolve(market.catalogPath) ||
+          this.marketId(parsed.rootPath) !== market.id
+        ) {
+          throw new Error("已登记的市场根或清单解析到了其他位置，已跳过更新检测。");
+        }
+        result.checkedMarkets += 1;
+        for (const entry of parsed.plugins) {
+          const provenance = this.findInstalledProvenance(provenanceEntries, market.id, entry.name);
+          if (!provenance) continue;
+          const installed = this.repository.getExtension(provenance.extensionId);
+          const installedManifest = this.repository.getExtensionManifest(provenance.extensionId);
+          const installedVersion =
+            manifestVersion(installedManifest) || provenance.installedVersion;
+          if (installed?.type !== "plugin" || manifestName(installedManifest) !== entry.name) {
+            result.warnings.push(
+              `${market.displayName} / ${entry.name}：安装来源记录与插件不匹配，已跳过。`,
+            );
+            continue;
+          }
+
+          const sourcePath = resolve(parsed.rootPath, entry.source);
+          if (!isInside(parsed.rootPath, sourcePath)) continue;
+          const sourceStat = await lstat(sourcePath).catch(() => null);
+          if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) continue;
+          const canonicalSource = await realpath(sourcePath);
+          if (!isInside(parsed.rootPath, canonicalSource)) continue;
+          const recordedSource = await realpath(provenance.sourcePath).catch(() => null);
+          if (!recordedSource || recordedSource !== canonicalSource) {
+            result.warnings.push(
+              `${market.displayName} / ${entry.name}：插件来源路径已变化，已跳过自动更新检测。`,
+            );
+            continue;
+          }
+
+          const manifestPath = await this.findPluginManifestPath(canonicalSource);
+          if (!manifestPath) continue;
+          const manifest = asRecord(JSON.parse(await readFile(manifestPath, "utf8")));
+          const availableVersion = asString(manifest.version);
+          if (manifestName(manifest) !== entry.name || availableVersion !== entry.version) {
+            result.warnings.push(
+              `${market.displayName} / ${entry.name}：市场条目与插件清单不一致，已跳过更新检测。`,
+            );
+            continue;
+          }
+          if (compareSemanticVersions(availableVersion, installedVersion) !== 1) continue;
+          marketUpdates.push({
+            marketId: market.id,
+            marketName: market.displayName || market.name,
+            pluginName: entry.name,
+            extensionId: installed.id,
+            installedVersion,
+            availableVersion,
+          });
+        }
+        this.cachedUpdates.set(market.id, {
+          rootPath: market.rootPath,
+          catalogPath: market.catalogPath,
+          updates: marketUpdates,
+        });
+      } catch (error) {
+        this.cachedUpdates.delete(market.id);
+        result.skippedMarkets += 1;
+        result.warnings.push(
+          `${market.displayName || market.name}：无法检查（${error instanceof Error ? error.message : String(error)}）。`,
+        );
+      }
+    }
+    result.updates = await this.collectCachedUpdates();
+    return result;
+  }
+
+  private async collectCachedUpdates(): Promise<LocalPluginUpdateCandidate[]> {
+    const markets = this.listSources();
+    const currentMarkets = new Map(markets.map((market) => [market.id, market]));
+    const provenanceEntries = this.loadProvenance();
+    const updates: LocalPluginUpdateCandidate[] = [];
+    for (const [marketId, cached] of this.cachedUpdates) {
+      const market = currentMarkets.get(marketId);
+      if (
+        !market ||
+        market.rootPath !== cached.rootPath ||
+        market.catalogPath !== cached.catalogPath
+      ) {
+        this.cachedUpdates.delete(marketId);
+        continue;
+      }
+      try {
+        const [canonicalRoot, canonicalCatalog] = await Promise.all([
+          realpath(market.rootPath),
+          realpath(market.catalogPath),
+        ]);
+        if (
+          canonicalRoot !== resolve(market.rootPath) ||
+          canonicalCatalog !== resolve(market.catalogPath) ||
+          !isInside(canonicalRoot, canonicalCatalog)
+        ) {
+          this.cachedUpdates.delete(marketId);
+          continue;
+        }
+      } catch {
+        this.cachedUpdates.delete(marketId);
+        continue;
+      }
+
+      const stillAvailable: LocalPluginUpdateCandidate[] = [];
+      for (const candidate of cached.updates) {
+        const provenance = this.findInstalledProvenance(
+          provenanceEntries,
+          marketId,
+          candidate.pluginName,
+        );
+        const extension = provenance ? this.repository.getExtension(provenance.extensionId) : null;
+        const manifest = provenance
+          ? this.repository.getExtensionManifest(provenance.extensionId)
+          : null;
+        const installedVersion = manifestVersion(manifest) || provenance?.installedVersion || "";
+        if (
+          !provenance ||
+          provenance.extensionId !== candidate.extensionId ||
+          extension?.type !== "plugin" ||
+          manifestName(manifest) !== candidate.pluginName ||
+          compareSemanticVersions(candidate.availableVersion, installedVersion) !== 1
+        ) {
+          continue;
+        }
+        stillAvailable.push({
+          ...candidate,
+          installedVersion,
+          marketName: market.displayName || market.name,
+        });
+      }
+      cached.updates = stillAvailable;
+      updates.push(...stillAvailable);
+    }
+    return updates.sort((left, right) =>
+      `${left.marketName}:${left.pluginName}`.localeCompare(
+        `${right.marketName}:${right.pluginName}`,
+        "en",
+      ),
+    );
   }
 
   async getMarket(marketId: string): Promise<LocalPluginMarketView> {
@@ -211,10 +452,142 @@ export class LocalPluginMarketplaceService {
     const markets = this.loadMarkets();
     if (!markets.some((market) => market.id === marketId)) throw new Error("本地插件市场不存在。");
     this.writeMarkets(markets.filter((market) => market.id !== marketId));
+    this.cachedUpdates.delete(marketId);
   }
 
   validatePlugin(rootPath: string, signal?: AbortSignal): Promise<LocalPluginValidation> {
     return this.extensionService.inspectPluginDirectory(rootPath, signal);
+  }
+
+  async inspectDirectory(rootPath: string): Promise<LocalPluginDirectoryInspection> {
+    const catalogPath = await this.catalogPathForInspection(rootPath);
+    if (!catalogPath) {
+      return {
+        kind: "plugin",
+        validation: await this.extensionService.inspectPluginDirectory(rootPath),
+      };
+    }
+
+    let parsed: ParsedCatalog;
+    try {
+      parsed = await this.parseCatalog(rootPath);
+    } catch (error) {
+      const requested = resolve(rootPath.trim());
+      const rootPathForError = await stat(requested)
+        .then((metadata) => (metadata.isDirectory() ? requested : dirname(catalogPath)))
+        .catch(() => dirname(catalogPath));
+      return {
+        kind: "marketplace",
+        validation: {
+          ok: false,
+          rootPath: rootPathForError,
+          catalogPath,
+          name: "",
+          displayName: "",
+          plugins: [],
+          errors: [
+            issue(
+              "marketplace-catalog-invalid",
+              error instanceof Error ? error.message : String(error),
+              catalogPath,
+            ),
+          ],
+          warnings: [],
+        },
+      };
+    }
+
+    const errors: LocalPluginValidationIssue[] = [];
+    const warnings: LocalPluginValidationIssue[] = [];
+    const plugins: LocalPluginCatalogValidation["plugins"] = [];
+    for (const entry of parsed.plugins) {
+      const sourcePath = resolve(parsed.rootPath, entry.source);
+      let validation: LocalPluginValidation;
+      try {
+        if (!isInside(parsed.rootPath, sourcePath))
+          throw new Error("Plugin source escapes the marketplace root.");
+        const sourceStat = await lstat(sourcePath);
+        if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory())
+          throw new Error("Plugin source must be a real directory inside the marketplace.");
+        const canonicalSource = await realpath(sourcePath);
+        if (!isInside(parsed.rootPath, canonicalSource))
+          throw new Error("Plugin source resolves outside the marketplace root.");
+        validation = await this.extensionService.inspectPluginDirectory(canonicalSource);
+      } catch (error) {
+        validation = invalidValidation(
+          sourcePath,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+
+      const pluginErrors = [...validation.errors];
+      if (validation.name !== entry.name) {
+        pluginErrors.push(
+          issue(
+            "manifest-name-mismatch",
+            `市场条目 name=${entry.name}，manifest name=${validation.name || "(missing)"}。`,
+          ),
+        );
+      }
+      if (validation.version !== entry.version) {
+        pluginErrors.push(
+          issue(
+            "manifest-version-mismatch",
+            `市场条目 version=${entry.version}，manifest version=${validation.version || "(missing)"}。`,
+          ),
+        );
+      }
+      validation = { ...validation, ok: pluginErrors.length === 0, errors: pluginErrors };
+      if (
+        entry.description &&
+        validation.description &&
+        entry.description !== validation.description
+      ) {
+        warnings.push(
+          issue(
+            "marketplace-description-mismatch",
+            `插件 ${entry.name} 的市场描述与 manifest 描述不同。`,
+            entry.source,
+          ),
+        );
+      }
+      if (!validation.ok) {
+        errors.push(
+          issue(
+            "marketplace-plugin-invalid",
+            `插件 ${entry.name} 校验失败（${pluginErrors.length} 项）；展开该条目查看详情。`,
+            entry.source,
+          ),
+        );
+      }
+      warnings.push(
+        ...validation.warnings.map((warning) => ({
+          ...warning,
+          path: warning.path ?? entry.source,
+        })),
+      );
+      plugins.push({
+        name: entry.name,
+        source: entry.source,
+        sourcePath,
+        version: entry.version,
+        validation,
+      });
+    }
+
+    return {
+      kind: "marketplace",
+      validation: {
+        ok: errors.length === 0,
+        rootPath: parsed.rootPath,
+        catalogPath: parsed.catalogPath,
+        name: parsed.name,
+        displayName: parsed.displayName,
+        plugins,
+        errors,
+        warnings,
+      },
+    };
   }
 
   async installPlugin(marketId: string, pluginName: string): Promise<LocalPluginInstallResult> {
@@ -290,7 +663,11 @@ export class LocalPluginMarketplaceService {
     if (!provenance) {
       throw new Error("该市场插件没有安装来源记录，不能按同名自动更新。");
     }
-    if (resolve(provenance.sourcePath) !== resolve(plugin.sourcePath)) {
+    const [recordedSource, currentSource] = await Promise.all([
+      realpath(provenance.sourcePath).catch(() => null),
+      realpath(plugin.sourcePath).catch(() => null),
+    ]);
+    if (!recordedSource || !currentSource || recordedSource !== currentSource) {
       throw new Error("插件源路径已变化，拒绝更新已有安装；请先确认来源或重新安装。");
     }
     const previous = this.repository.getExtension(provenance.extensionId);
@@ -299,6 +676,10 @@ export class LocalPluginMarketplaceService {
       : null;
     if (previous?.type !== "plugin" || manifestName(previousManifest) !== plugin.name) {
       throw new Error("安装来源记录与现有插件不一致，拒绝更新。");
+    }
+    const previousVersion = manifestVersion(previousManifest) || provenance.installedVersion;
+    if (compareSemanticVersions(plugin.version, previousVersion) !== 1) {
+      throw new Error("市场插件版本不是已安装版本的更新版本，已拒绝替换。");
     }
     if (previous.contentHash === plugin.validation.contentHash) {
       return {
@@ -494,6 +875,44 @@ export class LocalPluginMarketplaceService {
     };
   }
 
+  private async findPluginManifestPath(pluginRoot: string): Promise<string | null> {
+    const candidates = [
+      ".mingshen-plugin/plugin.json",
+      ".codex-plugin/plugin.json",
+      ".zcode-plugin/plugin.json",
+      "plugin.json",
+    ];
+    for (const candidate of candidates) {
+      const path = join(pluginRoot, ...candidate.split("/"));
+      const metadata = await lstat(path).catch(() => null);
+      if (!metadata) continue;
+      if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > 1024 * 1024) {
+        return null;
+      }
+      const canonicalPath = await realpath(path);
+      if (!isInside(pluginRoot, canonicalPath)) return null;
+      return canonicalPath;
+    }
+    return null;
+  }
+
+  private async catalogPathForInspection(rootOrCatalogPath: string): Promise<string | null> {
+    const input = rootOrCatalogPath.trim();
+    if (!input) return null;
+    const requested = resolve(input);
+    const requestedStat = await lstat(requested).catch(() => null);
+    if (!requestedStat) return null;
+    if (basename(requested).toLocaleLowerCase("en-US") === "marketplace.json") return requested;
+    if (!requestedStat.isDirectory() || requestedStat.isSymbolicLink()) return null;
+
+    for (const candidate of CATALOG_CANDIDATES) {
+      const path = join(requested, ...candidate.split("/"));
+      const metadata = await lstat(path).catch(() => null);
+      if (metadata) return path;
+    }
+    return null;
+  }
+
   private async scanMarket(
     market: LocalPluginMarketSource,
     parsedCatalog?: ParsedCatalog,
@@ -575,7 +994,14 @@ export class LocalPluginMarketplaceService {
         extensionId: installed ? (extension?.id ?? null) : null,
         enabled: installed ? Boolean(extension?.enabled) : false,
         updateAvailable:
-          installed && validation.version !== (installedProvenance?.installedVersion ?? ""),
+          installed &&
+          Boolean(installedProvenance) &&
+          compareSemanticVersions(
+            validation.version,
+            manifestVersion(this.repository.getExtensionManifest(extension?.id ?? "")) ||
+              installedProvenance?.installedVersion ||
+              "",
+          ) === 1,
         validation,
       });
     }

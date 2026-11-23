@@ -100,6 +100,83 @@ try {
   assert.equal(validV1.skills.length, 1);
   assert.deepEqual(validV1.commands, ["commands/review.md"]);
 
+  const baseManifest = { ...manifest, commands: "commands" };
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(
+      {
+        ...baseManifest,
+        hooks: {
+          BeforeModelRequest: [
+            {
+              hooks: [
+                {
+                  type: "prompt",
+                  text: "Prefix marker.",
+                  position: "before",
+                  format: "plain",
+                },
+                {
+                  type: "prompt",
+                  text: "Suffix marker.",
+                  position: "after",
+                  format: "plain",
+                },
+                {
+                  type: "prompt",
+                  text: "Wrapped default context.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const validHookOptions = await validatePlugin(pluginRoot);
+  assert.equal(validHookOptions.ok, true);
+  assert.deepEqual(validHookOptions.errors, []);
+
+  for (const invalidPrompt of [
+    { type: "prompt", text: "Invalid position.", position: "middle" },
+    { type: "prompt", text: "Invalid format.", format: "html" },
+    { type: "prompt", text: "Invalid null position.", position: null },
+    { type: "prompt", text: "Invalid null format.", format: null },
+    { type: "prompt", position: "after", format: "plain" },
+    { type: "prompt", text: "x".repeat(4_001) },
+    Array.from({ length: 6 }, () => ({ type: "prompt", text: "x".repeat(2_001) })),
+  ]) {
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify(
+        {
+          ...baseManifest,
+          hooks: {
+            BeforeModelRequest: [{ hooks: [invalidPrompt] }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    const invalidHookOptions = await validatePlugin(pluginRoot);
+    assert.equal(invalidHookOptions.ok, false);
+    assert.ok(
+      invalidHookOptions.errors.some(
+        (entry) => entry.code === "BEFORE_MODEL_REQUEST_PROMPT_INVALID",
+      ),
+    );
+  }
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(baseManifest, null, 2)}\n`,
+    "utf8",
+  );
+
   const marketV1 = await upsertMarketplace(marketRoot, "dev-example", [pluginRoot]);
   assert.equal(marketV1.plugins[0]?.source, "./plugins/example");
   const catalog = JSON.parse(await readFile(marketV1.catalogPath, "utf8"));
@@ -348,6 +425,8 @@ try {
           "TODO placeholders are rejected by SDK preflight",
           "completed plugin validates and reports authoritative:false",
           "Markdown command directories and inline command declarations are checked",
+          "BeforeModelRequest position and format options accept before/after and context/plain",
+          "BeforeModelRequest rejects invalid position/format values and missing text",
           "command references outside the plugin root are rejected",
           "non-UTF-8 and oversized command files are rejected",
           "visible marketplace catalog uses an inside-root relative source",

@@ -190,10 +190,9 @@ describe("image studio results and cache", () => {
       assets: [{ id: "old" }, { id: "new" }],
     });
     const merged = mergeGeneratedResult(current, {
-      asset: asset("new"),
-      dataUrl: "data",
-      revisedPrompt: null,
+      generatedAssets: [asset("new")],
       workspace: server,
+      warnings: [],
     });
     expect(merged).toMatchObject({
       prompt: "new prompt",
@@ -204,7 +203,7 @@ describe("image studio results and cache", () => {
     expect(
       mergeGeneratedResult(
         { ...current, documents: [] },
-        { asset: asset("new"), dataUrl: "data", revisedPrompt: null, workspace: server },
+        { generatedAssets: [asset("new")], workspace: server, warnings: [] },
       ).documents,
     ).toEqual([]);
   });

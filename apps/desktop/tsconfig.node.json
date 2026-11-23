@@ -10,6 +10,7 @@
     "vitest.config.mts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
+    "src/renderer/src/lib/companion-session-navigation.ts",
     "src/shared/**/*.ts"
   ]
 }

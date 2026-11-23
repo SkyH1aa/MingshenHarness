@@ -1,0 +1,218 @@
+.desktop-experience-settings {
+  width: min(760px, 100%);
+}
+
+.desktop-experience-row,
+.desktop-experience-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 62px;
+  padding: 12px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.desktop-experience-row > span:first-child,
+.desktop-experience-control > span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.desktop-experience-row strong,
+.desktop-experience-control strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.desktop-experience-row small,
+.desktop-experience-control small {
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.desktop-experience-row input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.desktop-experience-control {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.desktop-experience-control > span:first-child {
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-experience-control output {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.desktop-experience-control input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.desktop-experience-row--select select,
+.desktop-experience-number input {
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface-raised, var(--surface));
+  font: inherit;
+  font-size: 12px;
+}
+
+.desktop-experience-row--select select:focus-visible,
+.desktop-experience-number input:focus-visible,
+.desktop-experience-row input:focus-visible,
+.desktop-experience-control input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.desktop-experience-number {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.desktop-experience-number input {
+  width: 76px;
+  min-width: 76px;
+  text-align: right;
+}
+
+.desktop-experience-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px 0 8px;
+}
+
+.desktop-experience-actions .secondary-button,
+.desktop-experience-actions .text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.desktop-experience-actions .secondary-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.desktop-experience-actions .secondary-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.desktop-experience-actions .text-button {
+  padding: 7px 2px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+}
+
+.desktop-experience-actions .text-button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.desktop-experience-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.desktop-experience-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.desktop-experience-status--position {
+  justify-content: space-between;
+  padding: 12px 2px 0;
+}
+
+.desktop-experience-status code {
+  color: var(--faint);
+  font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+  font-size: 11px;
+}
+
+.desktop-experience-status--saved {
+  color: var(--accent);
+}
+
+.desktop-experience-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  border-radius: 4px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  font-size: 12px;
+}
+
+.desktop-experience-error span {
+  overflow-wrap: anywhere;
+}
+
+.desktop-experience-error button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+}
+
+@media (max-width: 620px) {
+  .desktop-experience-row,
+  .desktop-experience-row--select {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .desktop-experience-row input[type="checkbox"],
+  .desktop-experience-row--select select,
+  .desktop-experience-number {
+    align-self: flex-end;
+  }
+}

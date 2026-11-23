@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionView } from "../../shared/domain";
+import type { ModelConfig, ProviderView, SessionView } from "../../shared/domain";
 import { ChatService } from "./chat-service";
 
 function fixture(limit = 2) {
@@ -307,6 +307,297 @@ describe("Subagent concurrency", () => {
     );
   });
 
+  it("inherits only prompt context into spawned children and propagates later parent activation", async () => {
+    const child = {
+      id: "child",
+      parentSessionId: "parent",
+      agentMode: "code",
+      status: "idle",
+    };
+    const parent = {
+      id: "parent",
+      agentProfileId: "parent-profile",
+      agentMode: "code",
+      providerId: "provider",
+      modelId: "parent-model",
+      workspacePath: null,
+      permissionMode: "full_access",
+      executionMode: "host",
+      parentSessionId: null,
+      status: "running",
+    } as SessionView;
+    const childProvider = { id: "child-provider" } as ProviderView;
+    const childModel = { id: "child-model", modelId: "worker-model" } as ModelConfig;
+    const selected = new Set<string>();
+    const enabledPlugins = new Set(["selected-plugin", "activated-before", "activated-during"]);
+    const loadBeforeModelRequestContext = vi.fn(
+      async (
+        _session: SessionView,
+        _runId: string,
+        _signal: AbortSignal,
+        extensionIds: readonly string[],
+        _context: { runId: string; providerId: string; modelId: string },
+        _options: { allowSubagentPromptContext?: boolean },
+      ) => ({
+        contexts: extensionIds.map((extensionId) => ({
+          extensionId,
+          extensionName: extensionId,
+          text: `marker:${extensionId}`,
+        })),
+        errors: [],
+      }),
+    );
+    const extensionMcpIds = vi.fn(() => new Set<string>());
+    const repository = {
+      getAgentProfile: (id: string) =>
+        id === "parent-profile" ? { id, permissions: {}, readOnly: false } : null,
+      listAgentProfiles: () => [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "subagent",
+          modelId: null,
+          enabled: true,
+          readOnly: false,
+          permissions: {},
+          toolAllowlist: [],
+        },
+      ],
+      getModel: (id: string) => ({
+        id,
+        providerId: "child-provider",
+        enabled: true,
+      }),
+      getProvider: (id: string) => ({ id }),
+      insertSession: () => child,
+      listSessionExtensionIds: (id: string) => (id === "parent" ? ["selected-plugin"] : []),
+      setSessionExtension: (id: string, extensionId: string) => {
+        if (id === child.id) selected.add(extensionId);
+      },
+      getExtension: (id: string) =>
+        enabledPlugins.has(id) ? { id, enabled: true, type: "plugin" } : null,
+      getSession: (id: string) => (id === child.id ? child : parent),
+      getMessages: () => [{ role: "assistant", parts: [{ type: "text", text: "Done" }] }],
+    };
+    let requestHook: ((provider: ProviderView, model: ModelConfig) => Promise<string>) | undefined;
+    let finishWait!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      finishWait = resolve;
+    });
+    const chat = new ChatService({
+      repository,
+      pluginHookService: {
+        loadBeforeModelRequestContext,
+        run: vi.fn(async () => []),
+      },
+      extensionService: { getAvailablePluginMcpServerIds: extensionMcpIds },
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      activatePluginForRun: (sessionId: string, runId: string, extensionId: string) => void;
+      beforeModelRequestHook: (
+        session: SessionView,
+        runId: string,
+        signal: AbortSignal,
+        provider: ProviderView,
+        model: ModelConfig,
+      ) => (provider: ProviderView, model: ModelConfig) => Promise<string>;
+      runActivatedPlugins: Map<string, Set<string>>;
+      subagentPromptPlugins: Map<string, { parentRunId: string; extensionIds: Set<string> }>;
+      availablePluginMcpServerIds: (sessionId: string, runId?: string) => ReadonlySet<string>;
+      runSubagent: (
+        session: SessionView,
+        signal: AbortSignal,
+        args: object,
+        parentRunId?: string,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    Object.defineProperty(chat, "send", {
+      value: vi.fn(async (_input: { sessionId: string }) => {
+        const childSession = repository.getSession(child.id) as SessionView;
+        requestHook = internal.beforeModelRequestHook(
+          childSession,
+          "child-run",
+          new AbortController().signal,
+          childProvider,
+          childModel,
+        );
+        return { runId: "child-run" };
+      }),
+    });
+    Object.defineProperty(chat, "waitForRun", { value: vi.fn(() => wait) });
+
+    internal.activatePluginForRun("parent", "parent-run", "activated-before");
+    const running = internal.runSubagent(
+      parent,
+      new AbortController().signal,
+      { task: "inspect", agent: "worker" },
+      "parent-run",
+    );
+    await vi.waitFor(() => expect(requestHook).toBeTypeOf("function"));
+    expect(selected).toEqual(new Set(["selected-plugin"]));
+    expect(await requestHook?.(childProvider, childModel)).toContain("marker:selected-plugin");
+    expect(await requestHook?.(childProvider, childModel)).toContain("marker:activated-before");
+
+    internal.activatePluginForRun("parent", "parent-run", "activated-during");
+    expect(await requestHook?.(childProvider, childModel)).toContain("marker:activated-during");
+    expect(loadBeforeModelRequestContext).toHaveBeenCalledTimes(3);
+    for (const call of loadBeforeModelRequestContext.mock.calls) {
+      expect(call[1]).toBe("child-run");
+      expect(call[3]).toContain("selected-plugin");
+      expect(call[4]).toEqual({
+        runId: "child-run",
+        providerId: childProvider.id,
+        modelId: childModel.modelId,
+      });
+      expect(call[5]).toEqual({ allowSubagentPromptContext: true });
+    }
+    expect(internal.runActivatedPlugins.has("child-run")).toBe(false);
+    expect(internal.availablePluginMcpServerIds(child.id, "child-run")).toEqual(new Set());
+    expect(extensionMcpIds).toHaveBeenCalledExactlyOnceWith(child.id, []);
+
+    finishWait();
+    await expect(running).resolves.toMatchObject({ output: "Done", isError: false });
+    expect(internal.subagentPromptPlugins.has(child.id)).toBe(false);
+  });
+
+  it("clears prompt-only inheritance when child send fails or the parent cancels", async () => {
+    const child = {
+      id: "child",
+      parentSessionId: "parent",
+      agentMode: "code",
+      status: "idle",
+    };
+    const repository = {
+      getAgentProfile: () => ({ id: "parent-profile", permissions: {}, readOnly: false }),
+      listAgentProfiles: () => [
+        {
+          id: "worker",
+          name: "Worker",
+          role: "subagent",
+          modelId: null,
+          enabled: true,
+          readOnly: false,
+          permissions: {},
+          toolAllowlist: [],
+        },
+      ],
+      getModel: () => ({ id: "model", providerId: "provider", enabled: true }),
+      getProvider: (id: string) => ({ id }),
+      insertSession: () => child,
+      listSessionExtensionIds: () => ["selected-plugin"],
+      setSessionExtension: vi.fn(),
+      getSession: () => child,
+      updateSession: (_id: string, updates: object) => ({ ...child, ...updates }),
+      getMessages: () => [],
+    };
+    const loadBeforeModelRequestContext = vi.fn(async () => ({
+      contexts: [{ extensionId: "selected-plugin", extensionName: "Selected", text: "marker" }],
+      errors: [],
+    }));
+    const chat = new ChatService({
+      repository,
+      pluginHookService: { loadBeforeModelRequestContext },
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      beforeModelRequestHook: (
+        session: SessionView,
+        runId: string,
+        signal: AbortSignal,
+        provider: ProviderView,
+        model: ModelConfig,
+      ) => () => Promise<string>;
+      subagentPromptPlugins: Map<string, unknown>;
+      runSubagent: (
+        session: SessionView,
+        signal: AbortSignal,
+        args: object,
+        parentRunId?: string,
+      ) => Promise<{ output: string; isError: boolean }>;
+    };
+    const parent = {
+      id: "parent",
+      agentProfileId: "parent-profile",
+      agentMode: "code",
+      providerId: "provider",
+      modelId: "model",
+      workspacePath: null,
+    } as SessionView;
+    const provider = { id: "provider" } as ProviderView;
+    const model = { id: "model", modelId: "model" } as ModelConfig;
+    let captured: (() => Promise<string>) | undefined;
+    const send = vi.fn();
+
+    Object.defineProperty(chat, "send", {
+      value: send,
+    });
+    send.mockImplementationOnce(async () => {
+      captured = internal.beforeModelRequestHook(
+        child as SessionView,
+        "child-run",
+        new AbortController().signal,
+        provider,
+        model,
+      );
+      throw new Error("send failed");
+    });
+    await expect(
+      internal.runSubagent(
+        parent,
+        new AbortController().signal,
+        { task: "inspect", agent: "worker" },
+        "parent-run",
+      ),
+    ).resolves.toMatchObject({ isError: true });
+    expect(internal.subagentPromptPlugins.has(child.id)).toBe(false);
+    expect(await captured?.()).toBe("");
+    expect(loadBeforeModelRequestContext).not.toHaveBeenCalled();
+
+    const parentController = new AbortController();
+    send.mockImplementationOnce(async () => {
+      captured = internal.beforeModelRequestHook(
+        child as SessionView,
+        "child-run-2",
+        parentController.signal,
+        provider,
+        model,
+      );
+      return { runId: "child-run-2" };
+    });
+    Object.defineProperty(chat, "waitForRun", {
+      value: vi.fn(
+        (_runId: string, signal: AbortSignal) =>
+          new Promise<void>((_resolve, reject) => {
+            const abort = () => reject(signal.reason);
+            if (signal.aborted) abort();
+            else signal.addEventListener("abort", abort, { once: true });
+          }),
+      ),
+    });
+    const cancelled = internal.runSubagent(
+      parent,
+      parentController.signal,
+      { task: "inspect", agent: "worker" },
+      "parent-run-2",
+    );
+    await vi.waitFor(() => expect(internal.subagentPromptPlugins.has(child.id)).toBe(true));
+    parentController.abort(new Error("parent stopped"));
+    await expect(cancelled).resolves.toMatchObject({ isError: true });
+    expect(internal.subagentPromptPlugins.has(child.id)).toBe(false);
+    await expect(captured?.()).rejects.toThrow("parent stopped");
+    expect(
+      await internal.beforeModelRequestHook(
+        child as SessionView,
+        "child-run-2-retry",
+        new AbortController().signal,
+        provider,
+        model,
+      )(),
+    ).toBe("");
+    expect(loadBeforeModelRequestContext).not.toHaveBeenCalled();
+  });
+
   it("keeps a subagent active under the parent cancellation signal without a wall-clock deadline", async () => {
     const child = { id: "child", status: "running" };
     const parentController = new AbortController();
@@ -509,6 +800,7 @@ describe("Subagent concurrency", () => {
       signal,
       expect.any(Function),
       {},
+      [],
     );
     expect(emit).not.toHaveBeenCalled();
   });

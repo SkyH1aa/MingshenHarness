@@ -32,6 +32,29 @@ export interface LocalPluginValidation {
   warnings: LocalPluginValidationIssue[];
 }
 
+export interface LocalPluginCatalogValidationEntry {
+  name: string;
+  source: string;
+  sourcePath: string;
+  version: string;
+  validation: LocalPluginValidation;
+}
+
+export interface LocalPluginCatalogValidation {
+  ok: boolean;
+  rootPath: string;
+  catalogPath: string;
+  name: string;
+  displayName: string;
+  plugins: LocalPluginCatalogValidationEntry[];
+  errors: LocalPluginValidationIssue[];
+  warnings: LocalPluginValidationIssue[];
+}
+
+export type LocalPluginDirectoryInspection =
+  | { kind: "plugin"; validation: LocalPluginValidation }
+  | { kind: "marketplace"; validation: LocalPluginCatalogValidation };
+
 export interface LocalPluginMarketSource {
   id: string;
   name: string;
@@ -64,6 +87,22 @@ export interface LocalPluginMarketPlugin {
 export interface LocalPluginMarketView {
   market: LocalPluginMarketSource;
   plugins: LocalPluginMarketPlugin[];
+  warnings: string[];
+}
+
+export interface LocalPluginUpdateCandidate {
+  marketId: string;
+  marketName: string;
+  pluginName: string;
+  extensionId: string;
+  installedVersion: string;
+  availableVersion: string;
+}
+
+export interface LocalPluginUpdateCheckResult {
+  checkedMarkets: number;
+  skippedMarkets: number;
+  updates: LocalPluginUpdateCandidate[];
   warnings: string[];
 }
 

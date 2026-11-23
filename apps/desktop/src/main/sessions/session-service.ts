@@ -412,34 +412,35 @@ export class SessionService {
         throw new Error("所选 Agent 配置不存在、已禁用或不适用于当前模式。");
     }
 
+    const archiveDescendants = input.archived === undefined ? [] : this.descendants(current.id);
     if (
       input.archived === true &&
-      [current, ...this.descendants(current.id)].some((session) =>
+      [current, ...archiveDescendants].some((session) =>
         ["running", "waiting_approval"].includes(session.status),
       )
     )
       throw new Error("请先停止会话及其子任务，再归档。");
-    // Resolve both project configurations before changing any conversation state.
-    if (moving && sourceBackend)
-      commitProjectMemoryBackend(this.repository, current.workspacePath, sourceBackend);
-    if (destinationBackend)
-      commitProjectMemoryBackend(this.repository, workspacePath, destinationBackend);
-    if (input.archived !== undefined) {
-      for (const child of this.descendants(current.id)) {
-        this.repository.updateSession(child.id, { archived: input.archived });
-        if (!input.archived) this.repository.touchSession(child.id);
-      }
-      if (!input.archived) this.repository.touchSession(current.id);
-      if (input.archived) {
-        const ids = new Set([current.id, ...this.descendants(current.id).map((child) => child.id)]);
-        for (const task of this.repository.listScheduledTasks())
-          if (task.enabled && ids.has(task.sessionId))
-            this.repository.setScheduledTaskEnabled(task.id, false);
-      }
-    }
-    if (compactionModel)
-      this.repository.setSetting(`context.model.${input.sessionId}`, compactionModel);
     return this.repository.runInSavepoint(() => {
+      // Resolve both project configurations before changing any conversation state.
+      if (moving && sourceBackend)
+        commitProjectMemoryBackend(this.repository, current.workspacePath, sourceBackend);
+      if (destinationBackend)
+        commitProjectMemoryBackend(this.repository, workspacePath, destinationBackend);
+      if (input.archived !== undefined) {
+        for (const child of archiveDescendants) {
+          this.repository.updateSession(child.id, { archived: input.archived });
+          if (!input.archived) this.repository.touchSession(child.id);
+        }
+        if (!input.archived) this.repository.touchSession(current.id);
+        if (input.archived) {
+          const ids = new Set([current.id, ...archiveDescendants.map((child) => child.id)]);
+          for (const task of this.repository.listScheduledTasks())
+            if (task.enabled && ids.has(task.sessionId))
+              this.repository.setScheduledTaskEnabled(task.id, false);
+        }
+      }
+      if (compactionModel)
+        this.repository.setSetting(`context.model.${input.sessionId}`, compactionModel);
       const session = this.repository.updateSession(input.sessionId, {
         title,
         agentMode: mode,

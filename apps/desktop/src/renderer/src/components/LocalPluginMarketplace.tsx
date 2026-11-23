@@ -13,9 +13,11 @@ import {
 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  LocalPluginDirectoryInspection,
   LocalPluginMarketSource,
   LocalPluginMarketView,
-  LocalPluginValidation,
+  LocalPluginUpdateCheckResult,
+  LocalPluginValidationIssue,
 } from "../../../shared/local-plugins";
 import { tr } from "../i18n/index";
 import { useDialog } from "./DialogProvider";
@@ -47,13 +49,15 @@ function manifestKindLabel(
 }
 
 function ValidationIssues({
-  validation,
+  errors,
+  warnings,
   label,
 }: {
-  validation: LocalPluginValidation;
+  errors: LocalPluginValidationIssue[];
+  warnings: LocalPluginValidationIssue[];
   label?: string | undefined;
 }) {
-  if (!validation.errors.length && !validation.warnings.length) {
+  if (!errors.length && !warnings.length) {
     return (
       <p className="local-plugin-marketplace__valid">
         <ShieldCheck aria-hidden="true" size={13} />
@@ -65,11 +69,10 @@ function ValidationIssues({
     <details className="local-plugin-marketplace__issues">
       <summary>
         <AlertTriangle aria-hidden="true" size={13} />
-        {label ??
-          tr("{0} 个错误 · {1} 个警告", [validation.errors.length, validation.warnings.length])}
+        {label ?? tr("{0} 个错误 · {1} 个警告", [errors.length, warnings.length])}
       </summary>
       <ul>
-        {validation.errors.map((issue) => (
+        {errors.map((issue) => (
           <li
             className="local-plugin-marketplace__issue--error"
             key={`error:${issue.code}:${issue.path ?? ""}:${issue.message}`}
@@ -81,7 +84,7 @@ function ValidationIssues({
             </span>
           </li>
         ))}
-        {validation.warnings.map((issue) => (
+        {warnings.map((issue) => (
           <li
             className="local-plugin-marketplace__issue--warning"
             key={`warning:${issue.code}:${issue.path ?? ""}:${issue.message}`}
@@ -103,13 +106,15 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
   const [sources, setSources] = useState<LocalPluginMarketSource[]>([]);
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
   const [market, setMarket] = useState<LocalPluginMarketView | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<LocalPluginUpdateCheckResult | null>(null);
   const [marketPath, setMarketPath] = useState("");
   const [validationPath, setValidationPath] = useState("");
-  const [validation, setValidation] = useState<LocalPluginValidation | null>(null);
+  const [validation, setValidation] = useState<LocalPluginDirectoryInspection | null>(null);
   const [query, setQuery] = useState("");
   const [loadingSources, setLoadingSources] = useState(true);
   const [loadingMarket, setLoadingMarket] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -119,17 +124,28 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
   const [addOpen, setAddOpen] = useState(false);
   const mounted = useRef(true);
   const marketRequest = useRef(0);
+  const updateCheckRequest = useRef(0);
+  const marketplaceMutation = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       marketRequest.current += 1;
+      updateCheckRequest.current += 1;
     };
+  }, []);
+
+  const invalidateUpdateCheck = useCallback(() => {
+    updateCheckRequest.current += 1;
+    if (!mounted.current) return;
+    setCheckingUpdates(false);
+    setUpdateCheck(null);
   }, []);
 
   const applySources = useCallback(
     (next: LocalPluginMarketSource[], preferredId?: string | null) => {
+      invalidateUpdateCheck();
       setSources(next);
       const preferred: string | null =
         preferredId && next.some((source) => source.id === preferredId)
@@ -143,7 +159,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
         setAddOpen(true);
       }
     },
-    [],
+    [invalidateUpdateCheck],
   );
 
   const loadMarket = useCallback(async (id: string) => {
@@ -163,6 +179,30 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
     }
   }, []);
 
+  const checkUpdates = useCallback(async () => {
+    if (!mounted.current || marketplaceMutation.current > 0) return;
+    const request = ++updateCheckRequest.current;
+    setCheckingUpdates(true);
+    try {
+      const result = await window.mingshen.checkLocalPluginUpdates();
+      if (mounted.current && request === updateCheckRequest.current) setUpdateCheck(result);
+    } catch (cause) {
+      if (mounted.current && request === updateCheckRequest.current) setError(message(cause));
+    } finally {
+      if (mounted.current && request === updateCheckRequest.current) setCheckingUpdates(false);
+    }
+  }, []);
+
+  const beginMarketplaceMutation = useCallback(() => {
+    marketplaceMutation.current += 1;
+    invalidateUpdateCheck();
+  }, [invalidateUpdateCheck]);
+
+  const endMarketplaceMutation = useCallback(() => {
+    marketplaceMutation.current = Math.max(0, marketplaceMutation.current - 1);
+    if (mounted.current && marketplaceMutation.current === 0) void checkUpdates();
+  }, [checkUpdates]);
+
   const loadSources = useCallback(async () => {
     setLoadingSources(true);
     setError("");
@@ -170,12 +210,13 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       const next = await window.mingshen.listLocalPluginMarkets();
       if (!mounted.current) return;
       applySources(next);
+      void checkUpdates();
     } catch (cause) {
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setLoadingSources(false);
     }
-  }, [applySources]);
+  }, [applySources, checkUpdates]);
 
   useEffect(() => {
     void loadSources();
@@ -193,6 +234,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       return;
     }
     setAdding(true);
+    beginMarketplaceMutation();
     setError("");
     setNotice("");
     try {
@@ -209,6 +251,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setAdding(false);
+      endMarketplaceMutation();
     }
   };
 
@@ -238,6 +281,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
   const refreshMarket = async () => {
     if (!selectedMarketId) return;
     setRefreshing(true);
+    beginMarketplaceMutation();
     setError("");
     setNotice("");
     try {
@@ -252,6 +296,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setRefreshing(false);
+      endMarketplaceMutation();
     }
   };
 
@@ -267,6 +312,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
     });
     if (!confirmed || !mounted.current) return;
     setRemoving(true);
+    beginMarketplaceMutation();
     setError("");
     setNotice("");
     try {
@@ -280,6 +326,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setRemoving(false);
+      endMarketplaceMutation();
     }
   };
 
@@ -298,10 +345,13 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       const result = await window.mingshen.validateLocalPlugin(path);
       if (!mounted.current) return;
       setValidation(result);
+      const valid = result.validation.ok;
       setNotice(
-        result.ok
-          ? tr("插件目录校验通过，可加入本地市场后手动安装。")
-          : tr("插件目录存在需要修复的校验错误。"),
+        valid
+          ? result.kind === "marketplace"
+            ? tr("市场根校验通过：{0} 个插件均有效。", [result.validation.plugins.length])
+            : tr("插件目录校验通过，可加入本地市场后手动安装。")
+          : tr("市场或插件目录存在需要修复的校验错误。"),
       );
     } catch (cause) {
       if (mounted.current) setError(message(cause));
@@ -319,23 +369,28 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
     }
     try {
       const next = await window.mingshen.getLocalPluginMarket(marketId);
-      if (mounted.current) setMarket(next);
+      if (mounted.current && selectedMarketId === marketId) setMarket(next);
     } catch (cause) {
       warnings.push(tr("市场状态刷新失败：{0}", [message(cause)]));
     }
     return warnings.join("\n");
   };
 
-  const installPlugin = async (pluginName: string, update: boolean) => {
-    if (!selectedMarketId) return;
+  const installPlugin = async (
+    pluginName: string,
+    update: boolean,
+    targetMarketId = selectedMarketId,
+  ) => {
+    if (!targetMarketId) return;
     setPluginBusy(`${update ? "update" : "install"}:${pluginName}`);
+    beginMarketplaceMutation();
     setError("");
     setNotice("");
     try {
       const result = update
-        ? await window.mingshen.updateLocalPlugin(selectedMarketId, pluginName)
-        : await window.mingshen.installLocalPlugin(selectedMarketId, pluginName);
-      const refreshWarnings = await refreshAfterChange(selectedMarketId);
+        ? await window.mingshen.updateLocalPlugin(targetMarketId, pluginName)
+        : await window.mingshen.installLocalPlugin(targetMarketId, pluginName);
+      const refreshWarnings = await refreshAfterChange(targetMarketId);
       if (!mounted.current) return;
       setNotice(
         result.action === "updated"
@@ -352,12 +407,14 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setPluginBusy(null);
+      endMarketplaceMutation();
     }
   };
 
   const setPluginEnabled = async (extensionId: string, enabled: boolean) => {
     if (!selectedMarketId) return;
     setPluginBusy(`enabled:${extensionId}`);
+    beginMarketplaceMutation();
     setError("");
     setNotice("");
     try {
@@ -370,6 +427,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
       if (mounted.current) setError(message(cause));
     } finally {
       if (mounted.current) setPluginBusy(null);
+      endMarketplaceMutation();
     }
   };
 
@@ -423,6 +481,87 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
         <p className="local-plugin-marketplace__notice" role="status">
           <Check aria-hidden="true" size={13} />
           {notice}
+        </p>
+      ) : null}
+
+      {updateCheck ? (
+        <div
+          className={`local-plugin-marketplace__updates${updateCheck.updates.length ? " has-updates" : ""}`}
+          data-testid="local-plugin-update-summary"
+          role="status"
+        >
+          <div className="local-plugin-marketplace__updates-heading">
+            <span>
+              <RefreshCw
+                className={checkingUpdates ? "spin" : undefined}
+                aria-hidden="true"
+                size={14}
+              />
+              {checkingUpdates
+                ? tr("正在检查已登记的本地市场…")
+                : updateCheck.updates.length
+                  ? tr("检测到 {0} 个本地插件可更新。", [updateCheck.updates.length])
+                  : updateCheck.warnings.length
+                    ? tr("部分本地市场未能检查。")
+                    : tr("本地插件已是最新。")}
+            </span>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => void checkUpdates()}
+              disabled={checkingUpdates || Boolean(pluginBusy)}
+              title={tr("轮换检查下一批市场，最多 10 个")}
+              aria-label={tr("轮换检查下一批市场，最多 10 个")}
+            >
+              <RefreshCw aria-hidden="true" size={13} />
+            </button>
+          </div>
+          {updateCheck.updates.length ? (
+            <ul>
+              {updateCheck.updates.slice(0, 20).map((candidate) => (
+                <li key={`${candidate.marketId}:${candidate.pluginName}`}>
+                  <span>
+                    <strong>{candidate.pluginName}</strong>
+                    <small>
+                      {candidate.marketName} · {candidate.installedVersion} →{" "}
+                      {candidate.availableVersion}
+                    </small>
+                  </span>
+                  <button
+                    className="btn btn--primary"
+                    type="button"
+                    disabled={Boolean(pluginBusy)}
+                    onClick={() =>
+                      void installPlugin(candidate.pluginName, true, candidate.marketId)
+                    }
+                  >
+                    <RefreshCw aria-hidden="true" size={13} />
+                    {tr("更新")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {updateCheck.updates.length > 20 ? (
+            <p>
+              {tr("还有 {0} 个更新，请在对应的市场列表中查看。", [updateCheck.updates.length - 20])}
+            </p>
+          ) : null}
+          {updateCheck.warnings.length ? (
+            <details>
+              <summary>
+                {tr("{0} 个市场未能完整检查", [
+                  updateCheck.skippedMarkets || updateCheck.warnings.length,
+                ])}
+              </summary>
+              <p>{updateCheck.warnings.join(" ")}</p>
+            </details>
+          ) : null}
+        </div>
+      ) : checkingUpdates ? (
+        <p className="local-plugin-marketplace__loading">
+          <LoaderCircle className="spin" aria-hidden="true" size={14} />
+          {tr("正在检查已登记的本地市场…")}
         </p>
       ) : null}
 
@@ -549,7 +688,7 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
             <ShieldCheck aria-hidden="true" size={14} />
             <span>
               {tr(
-                "安装并启用只提供发现能力。若插件 Hook 需要生效，请在当前 CodeAgent/WorkAgent 会话的 + 菜单或 /plugins 中引用该插件。动作型 Hook 还要求宿主执行、完全访问和已信任项目；请求批准、Docker、ChatAgent 与实际 SubAgent 不会执行。",
+                "安装并启用后，默认 on-demand 插件会进入能力发现范围，CodeAgent/WorkAgent 可通过 discover_capabilities → use_plugin 在本轮按需激活；只有 activation=required 必须先在 + 菜单或 /plugins 手动引用。UserPromptSubmit 仅对提交时已引用的插件生效，不会追溯；BeforeModelRequest 与后续动作 Hook 可在按需激活后运行。动作型 Hook 仍要求宿主执行、完全访问和已信任项目；请求批准、Docker、ChatAgent 与实际 SubAgent 不执行。",
               )}
             </span>
           </div>
@@ -624,7 +763,8 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
                         <code title={plugin.sourcePath}>{plugin.source}</code>
                       </div>
                       <ValidationIssues
-                        validation={plugin.validation}
+                        errors={plugin.validation.errors}
+                        warnings={plugin.validation.warnings}
                         label={
                           plugin.validation.ok
                             ? tr("{0} 个警告", [plugin.validation.warnings.length])
@@ -733,8 +873,12 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
         onSubmit={(event) => void validateDirectory(event)}
       >
         <div>
-          <strong>{tr("校验开发目录")}</strong>
-          <p>{tr("安装前检查清单、技能入口、引用路径和声明文件。")}</p>
+          <strong>{tr("校验插件或市场目录")}</strong>
+          <p>
+            {tr(
+              "可选择单个插件目录，或包含 marketplace.json 的市场根目录；后者会逐项检查清单中的插件。",
+            )}
+          </p>
         </div>
         <div className="local-plugin-marketplace__path-row">
           <input
@@ -744,16 +888,16 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
               setValidationPath(event.target.value);
               setValidation(null);
             }}
-            placeholder={tr("插件根目录")}
+            placeholder={tr("插件目录或含 marketplace.json 的市场根目录")}
             spellCheck={false}
-            aria-label={tr("要校验的插件目录")}
+            aria-label={tr("要校验的插件或市场目录")}
           />
           <button
             className="icon-button"
             type="button"
             onClick={() => void chooseValidationDirectory()}
-            title={tr("选择插件目录")}
-            aria-label={tr("选择插件目录")}
+            title={tr("选择插件目录或市场根目录")}
+            aria-label={tr("选择插件目录或市场根目录")}
           >
             <FolderOpen aria-hidden="true" size={14} />
           </button>
@@ -771,23 +915,74 @@ export function LocalPluginMarketplace({ onChanged }: LocalPluginMarketplaceProp
             {tr("校验")}
           </button>
         </div>
-        {validation ? (
+        {validation?.kind === "plugin" ? (
           <div
             className={
-              validation.ok
+              validation.validation.ok
                 ? "local-plugin-marketplace__validation-result"
                 : "local-plugin-marketplace__validation-result has-errors"
             }
             data-testid="local-plugin-validation-result"
           >
             <div>
-              <strong>{validation.name || tr("未命名插件")}</strong>
+              <strong>{validation.validation.name || tr("未命名插件")}</strong>
               <span>
-                {validation.version || tr("无版本")} · {manifestKindLabel(validation.manifestKind)}
+                {validation.validation.version || tr("无版本")} ·{" "}
+                {manifestKindLabel(validation.validation.manifestKind)}
               </span>
-              <code title={validation.rootPath}>{validation.rootPath}</code>
+              <code title={validation.validation.rootPath}>{validation.validation.rootPath}</code>
             </div>
-            <ValidationIssues validation={validation} />
+            <ValidationIssues
+              errors={validation.validation.errors}
+              warnings={validation.validation.warnings}
+            />
+          </div>
+        ) : validation?.kind === "marketplace" ? (
+          <div
+            className={
+              validation.validation.ok
+                ? "local-plugin-marketplace__validation-result"
+                : "local-plugin-marketplace__validation-result has-errors"
+            }
+            data-testid="local-plugin-validation-result"
+          >
+            <div>
+              <strong>
+                {validation.validation.displayName ||
+                  validation.validation.name ||
+                  tr("无效市场目录")}
+              </strong>
+              <span>{tr("{0} 个插件", [validation.validation.plugins.length])}</span>
+              <code title={validation.validation.catalogPath}>
+                {validation.validation.catalogPath}
+              </code>
+            </div>
+            <ValidationIssues
+              errors={validation.validation.errors}
+              warnings={validation.validation.warnings}
+            />
+            {validation.validation.plugins.map((plugin) => (
+              <article
+                className={
+                  plugin.validation.ok
+                    ? "local-plugin-marketplace__directory-plugin"
+                    : "local-plugin-marketplace__directory-plugin has-errors"
+                }
+                key={`${plugin.name}:${plugin.source}`}
+              >
+                <div>
+                  <strong>{plugin.name}</strong>
+                  <span>
+                    {plugin.version} · {plugin.source}
+                  </span>
+                  <code title={plugin.sourcePath}>{plugin.sourcePath}</code>
+                </div>
+                <ValidationIssues
+                  errors={plugin.validation.errors}
+                  warnings={plugin.validation.warnings}
+                />
+              </article>
+            ))}
           </div>
         ) : null}
       </form>

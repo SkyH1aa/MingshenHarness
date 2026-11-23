@@ -935,6 +935,59 @@ and a revision mismatch blocks replacement. Temporary guidance stays attached to
 its accepted turn or queued item and is not a persistent profile instruction.
 Quick Chat keeps its compact Chat-only composition surface.
 
+### Desktop Presentation Surfaces (1.3.5)
+
+Startup presentation and the optional desktop companion are independent surfaces,
+not another workspace theme. They use their own dark, high-contrast presentation
+palette so the atom mark, activity indicator and companion artwork remain readable
+over a transparent or edge-to-edge window. These colors and motion rules must not
+leak into Simple or Light Trails, and all regular workspaces continue to use the
+existing color and typography tokens.
+
+The startup surface covers the primary screen in a topmost, non-exclusive window:
+the current atom mark, orbit tracks, a real stage/status label and a skip action.
+When the surface displays normally and the main window is ready, the presentation
+waits for 4,680 ms of visible time before a 320 ms exit. A 500 ms loading grace
+period applies if the main window is ready first, and an approximately 8 second
+lifetime fallback or a failure releases the presentation; users can skip it or
+disable it in settings. System scheduling and synchronous disk I/O are not hard
+real-time guarantees. For a profile that has not yet accepted the policies, the
+three policy reads wait until the presentation ends and the main window is
+actually shown. The main process and UI then retain their existing minimum
+five-second reading checks and explicit confirmation requirements.
+
+Once the presentation is visible, a `setImmediate` callback optionally warms the
+existing local SQLite connection only when the user has accepted the policies,
+the presentation remains active and shutdown has not begun. Two fixed covering
+index queries select a constant and return at most 32 rows each, for unarchived
+top-level conversations and the Chat catalog. They do not read conversation
+bodies or API keys and do not create an application snapshot. The connection's
+lock-wait timeout is temporarily set to zero and restored afterward; failure does
+not block startup. Database opening and migration still precede the presentation,
+and this best-effort warmup is not evidence of a measured startup speedup.
+
+The companion is transparent and draggable, with bounded, double-buffered video
+actions for task, rest and interaction states and a still-image fallback. Its
+context menu exposes generic task status and conversation navigation, Quick Chat,
+action previews, rest, display controls and settings. Previews do not change real
+task state, and manual rest does not stop background work. Neither surface exposes
+model output, file contents, paths, commands or approval details. Settings remains
+the source of truth for the complete startup and companion options.
+
+The companion's 8/9px micro captions and 16px focus/circular-pill geometry are
+bounded overlay exceptions, with truncation or responsive hiding at small sizes;
+they are not new body-text tokens or a license to shrink workbench controls. The
+main settings view keeps full labels and values at the existing readable sizes.
+Both surfaces use the documented `Segoe UI Variable Text` stack with `Segoe UI`
+and `Microsoft YaHei UI` fallbacks, consistent with the workspace typography.
+
+Both surfaces honor `prefers-reduced-motion`: the companion uses static feedback
+and the startup surface removes orbit and entrance/exit motion. Status text, focus
+indication and controls remain available. A design scan may therefore report
+the independent palette, micro sizes, 16px geometry and font-stack spelling as
+advisories; keep them documented here rather than normalizing them into global
+tokens.
+
 ## Do's and Don'ts
 
 ### Do:

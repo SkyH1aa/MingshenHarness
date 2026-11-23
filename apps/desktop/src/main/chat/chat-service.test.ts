@@ -28,6 +28,64 @@ vi.mock("electron", () => ({
 }));
 
 describe("Chat MCP routing", () => {
+  it("runs activated plugin hooks without requiring a persistent session reference", async () => {
+    const extension = {
+      id: "plugin-1",
+      type: "plugin",
+      enabled: true,
+    };
+    const run = vi.fn(async () => []);
+    const repository = {
+      getAgentProfile: () => null,
+      listSessionExtensionIds: () => [],
+      getExtension: (id: string) => (id === extension.id ? extension : null),
+    };
+    const chat = new ChatService({
+      repository,
+      pluginHookService: { run },
+      emit: vi.fn(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      runActivatedPlugins: Map<string, Set<string>>;
+      withExternalWriter: (
+        session: SessionView,
+        runId: string,
+        signal: AbortSignal,
+        execute: () => Promise<unknown>,
+      ) => Promise<unknown>;
+      runPluginHooks: (
+        event: "Stop",
+        session: SessionView,
+        runId: string,
+        signal: AbortSignal,
+      ) => Promise<void>;
+    };
+    internal.runActivatedPlugins.set("run-1", new Set([extension.id]));
+    vi.spyOn(internal, "withExternalWriter").mockImplementation(
+      async (_session, _runId, _signal, execute) => await execute(),
+    );
+    const session = {
+      id: "session-1",
+      agentMode: "code",
+      workspacePath: "C:\\workspace",
+      executionMode: "host",
+      permissionMode: "full_access",
+    } as SessionView;
+    const signal = new AbortController().signal;
+
+    await internal.runPluginHooks("Stop", session, "run-1", signal);
+
+    expect(run).toHaveBeenCalledExactlyOnceWith(
+      "Stop",
+      session,
+      "run-1",
+      signal,
+      expect.any(Function),
+      {},
+      [extension.id],
+    );
+  });
+
   it("routes manual @subagent sessions to the profile's dedicated provider and model", async () => {
     const child = { id: "child", status: "idle" };
     const insertSession = vi.fn(() => child);
@@ -1096,11 +1154,123 @@ process.exit(1);`,
         new AbortController().signal,
       ),
     ).toEqual([
+      expect.objectContaining({ name: "use_plugin" }),
       expect.objectContaining({ name: "read_tool_output" }),
       expect.objectContaining({ name: "recall_context" }),
     ]);
     expect(internal.requestApproval).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledOnce();
+  });
+  it("filters MCP results using exact plugin ownership instead of the server id prefix", async () => {
+    const toolDefinitions = [
+      {
+        name: "mcp__custom__read",
+        serverId: "plugin-user-owned-id",
+        readOnly: true,
+      },
+      {
+        name: "mcp__plugin__read",
+        serverId: "plugin-owned-id",
+        readOnly: true,
+      },
+    ];
+    const chat = new ChatService({
+      repository: {
+        getAgentProfile: () => null,
+        getSetting: () => null,
+        listAgentProfiles: () => [],
+      },
+      extensionService: { getAvailablePluginMcpServerIds: () => new Set<string>() },
+      mcpService: {
+        pluginMcpServerIds: () => new Set(["plugin-owned-id"]),
+        toolDefinitions: vi.fn(async () => toolDefinitions),
+        list: () => [],
+      },
+      customToolService: { descriptors: vi.fn(async () => []) },
+      toolRegistry: { descriptors: () => [] },
+      permissions: new PermissionStore(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      availableTools: (
+        session: SessionView,
+        model: ModelConfig,
+      ) => Promise<Array<{ name: string; serverId?: string }>>;
+    };
+
+    const tools = await internal.availableTools(
+      {
+        id: "session",
+        agentMode: "code",
+        workspacePath: null,
+        permissionMode: "full_access",
+        executionMode: "host",
+      } as SessionView,
+      { toolCalls: true } as ModelConfig,
+    );
+
+    expect(tools).toContainEqual(expect.objectContaining({ serverId: "plugin-user-owned-id" }));
+    expect(tools).not.toContainEqual(expect.objectContaining({ serverId: "plugin-owned-id" }));
+  });
+  it("does not ask to start an unactivated plugin stdio server", async () => {
+    const server = {
+      id: "plugin-server-id",
+      name: "Plugin local process",
+      enabled: true,
+      configured: true,
+      transport: "stdio",
+      command: "node",
+      args: ["plugin-server.mjs"],
+      cwd: "",
+    };
+    const discover = vi.fn(async () => []);
+    const chat = new ChatService({
+      repository: {
+        getAgentProfile: () => null,
+        getSetting: () => null,
+        listAgentProfiles: () => [],
+      },
+      extensionService: {
+        getAvailablePluginMcpServerIds: (_sessionId: string, activeIds: string[]) =>
+          new Set(activeIds.includes("plugin-extension") ? [server.id] : []),
+      },
+      mcpService: {
+        pluginMcpServerIds: () => new Set([server.id]),
+        toolDefinitions: discover,
+        list: () => [server],
+      },
+      customToolService: { descriptors: vi.fn(async () => []) },
+      toolRegistry: { descriptors: () => [] },
+      permissions: new PermissionStore(),
+    } as unknown as ConstructorParameters<typeof ChatService>[0]);
+    const internal = chat as unknown as {
+      runActivatedPlugins: Map<string, Set<string>>;
+      requestApproval: ReturnType<typeof vi.fn>;
+      availableTools: (
+        session: SessionView,
+        model: ModelConfig,
+        runId: string,
+        signal: AbortSignal,
+      ) => Promise<Array<{ name: string }>>;
+    };
+    internal.requestApproval = vi.fn(async () => ({ decision: "deny" }));
+    const session = {
+      id: "session",
+      agentMode: "code",
+      workspacePath: null,
+      permissionMode: "request_approval",
+      executionMode: "host",
+    } as SessionView;
+    const model = { toolCalls: true } as ModelConfig;
+    const signal = new AbortController().signal;
+
+    await internal.availableTools(session, model, "run", signal);
+    expect(internal.requestApproval).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set());
+
+    internal.runActivatedPlugins.set("run", new Set(["plugin-extension"]));
+    await internal.availableTools(session, model, "run", signal);
+    expect(internal.requestApproval).toHaveBeenCalledOnce();
+    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set([server.id]));
   });
   it("exposes web tools only when a ChatAgent session allows internet access", async () => {
     const chat = new ChatService({
@@ -1186,13 +1356,14 @@ process.exit(1);`,
       { toolCalls: true } as ModelConfig,
     );
     expect(tools.map((tool) => tool.name)).toEqual([
+      "use_plugin",
       "read_tool_output",
       "recall_context",
       "execute_tool_chain",
       "read_file",
       "run_command",
     ]);
-    expect(discover).toHaveBeenCalledWith(true, null, undefined);
+    expect(discover).toHaveBeenCalledWith(true, null, undefined, new Set());
     expect(custom).not.toHaveBeenCalled();
   });
   it("exposes read-only MCP tools in Plan, executes them and remembers per-server approval", async () => {
@@ -1288,6 +1459,7 @@ process.exit(1);`,
       } as SessionView;
       const tools = await internal.availableTools(session, { toolCalls: true } as ModelConfig);
       expect(tools.map((tool) => tool.name)).toEqual([
+        "use_plugin",
         "read_tool_output",
         "recall_context",
         "mcp__fixture__lookup",
@@ -1318,6 +1490,7 @@ process.exit(1);`,
       expect((await mcp.callTool("fixture", "mutate", {})).isError).toBe(true);
       await mcp.setEnabled("fixture", false);
       expect(await internal.availableTools(session, { toolCalls: true } as ModelConfig)).toEqual([
+        expect.objectContaining({ name: "use_plugin" }),
         expect.objectContaining({ name: "read_tool_output" }),
         expect.objectContaining({ name: "recall_context" }),
       ]);

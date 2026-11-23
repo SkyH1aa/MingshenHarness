@@ -4,6 +4,7 @@ import type {
   MessagePart,
   ModelConfig,
   ProviderProtocol,
+  ProviderView,
   SessionMessage,
 } from "../../shared/domain";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
@@ -1047,6 +1048,273 @@ describe("context compaction", () => {
     },
   );
 
+  it.each([false, true])(
+    "replaces a stale transient suffix with the current compaction suffix (manual=%s)",
+    async (manual) => {
+      const f = fixture();
+      f.repository.deleteMessagesFromSeq(f.session.id, 1);
+      f.append("user", "Original goal: inspect the approved notes file.");
+      f.append("assistant", "Actual findings. ".repeat(1100));
+      f.repository.appendMessage({
+        sessionId: f.session.id,
+        role: "assistant",
+        parts: [
+          {
+            type: "tool_call",
+            name: "read_file",
+            callId: "read-file-evidence",
+            arguments: JSON.stringify({ path: "notes.txt" }),
+            status: "completed",
+          },
+        ],
+      });
+      f.repository.appendMessage({
+        sessionId: f.session.id,
+        role: "tool",
+        parts: [
+          {
+            type: "tool_result",
+            callId: "read-file-evidence",
+            output: "READ_FILE_OUTPUT_MARKER: approved document contents",
+            isError: false,
+          },
+        ],
+      });
+      f.append("user", "Continue CURRENT_USER_INSTRUCTION.");
+      const bodies: Record<string, unknown>[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, options: RequestInit) => {
+          bodies.push(JSON.parse(String(options.body)));
+          return response(
+            "openai_responses",
+            "Cached-prefix summary preserves current constraints.",
+          );
+        }),
+      );
+      const baseSystemPrompt = f.input.systemPrompt;
+      const oldContext = { userSuffix: "OLD_PLUGIN_SUFFIX" };
+      const source = f.service.messages(f.session.id);
+      const tools = [{ name: "read_file", description: "Read only", parameters: {} }];
+      const oldContextHook = vi.fn(async () => ({
+        userSuffix: "SHOULD_NOT_BE_USED_ON_FIRST_REQUEST",
+      }));
+      try {
+        for await (const _event of streamModelTurn({
+          ...f.input,
+          apiKey: "fixture-key",
+          reasoningLevel: null,
+          messages: source,
+          tools,
+          baseSystemPrompt,
+          firstRequestContext: oldContext,
+          beforeEachRequest: oldContextHook,
+          onRequestPrepared: (request) => f.service.rememberRequest(f.session, request, source),
+        })) {
+          // Capture a real request with a plugin marker in its wire prompt.
+        }
+        expect(oldContextHook).not.toHaveBeenCalled();
+        expect(JSON.stringify(bodies[0])).toContain("OLD_PLUGIN_SUFFIX");
+        const currentContext = { userSuffix: "CURRENT_PLUGIN_SUFFIX" };
+        const hookProviders: string[] = [];
+        const hookModels: string[] = [];
+        const currentContextHook = vi.fn(
+          async (hookProvider: ProviderView, hookModel: ModelConfig) => {
+            hookProviders.push(hookProvider.id);
+            hookModels.push(hookModel.id);
+            return currentContext;
+          },
+        );
+        const input = {
+          ...f.input,
+          baseSystemPrompt,
+          tools,
+          beforeEachRequest: currentContextHook,
+          manual,
+        };
+        if (!manual) f.service.recordResponse(input, { inputTokens: 17000, outputTokens: 0 });
+        await f.service.prepare(input);
+
+        const [normal, summary] = bodies;
+        if (!normal || !summary) throw new Error("Missing captured requests");
+        expect(bodies).toHaveLength(2);
+        expect(summary.tool_choice).toBe("none");
+        expect(JSON.stringify(summary)).toContain("chronological logical-message index");
+        expect(JSON.stringify(summary)).not.toContain("History fragment");
+        expect(JSON.stringify(summary)).toContain("read_file");
+        expect(JSON.stringify(summary)).toContain("READ_FILE_OUTPUT_MARKER");
+        expect(JSON.stringify(summary.input)).toContain("CURRENT_PLUGIN_SUFFIX");
+        expect(JSON.stringify(summary)).not.toContain("OLD_PLUGIN_SUFFIX");
+        expect(String(JSON.stringify(summary.input)).match(/CURRENT_PLUGIN_SUFFIX/g)).toHaveLength(
+          1,
+        );
+        expect(JSON.stringify((summary.input as Array<Record<string, unknown>>).at(-1))).toContain(
+          "CURRENT_PLUGIN_SUFFIX",
+        );
+        expect(hookProviders).toEqual([f.provider.id]);
+        expect(hookModels).toEqual([f.model.id]);
+      } finally {
+        f.database.close();
+      }
+    },
+  );
+
+  it("resolves request markers against the selected compaction provider and model", async () => {
+    const f = fixture();
+    const summaryProvider = f.repository.insertProvider({
+      name: "Summary provider",
+      baseUrl: "https://summary.invalid/v1",
+      protocol: "openai_responses",
+      authMode: "bearer",
+      customHeaderName: null,
+    });
+    f.repository.insertModel({
+      providerId: summaryProvider.id,
+      modelId: "summary-model",
+      displayName: "Summary model",
+      contextWindow: 20000,
+      maxOutputTokens: 2048,
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      toolCalls: true,
+      parallelToolCalls: false,
+      reasoningLevels: [],
+      anthropicNoneBehavior: "disabled",
+    });
+    const targetProvider = f.repository.getProvider(summaryProvider.id);
+    const targetModel = targetProvider?.models[0];
+    if (!targetProvider || !targetModel) throw new Error("Missing compaction model fixture");
+    f.service.setGlobalModel({ providerId: targetProvider.id, modelId: targetModel.id });
+    const bodies: Record<string, unknown>[] = [];
+    const hook = vi.fn(async (hookProvider: ProviderView, hookModel: ModelConfig) => {
+      return `TARGET=${hookProvider.id}/${hookModel.modelId}`;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, options: RequestInit) => {
+        bodies.push(JSON.parse(String(options.body)));
+        return response("openai_responses", "Summary with actual target model markers.");
+      }),
+    );
+    try {
+      await f.service.prepare({ ...f.input, manual: true, beforeEachRequest: hook });
+      expect(hook).toHaveBeenCalledWith(
+        expect.objectContaining({ id: targetProvider.id }),
+        expect.objectContaining({ id: targetModel.id, modelId: "summary-model" }),
+      );
+      expect(bodies[0]?.instructions).toContain(`TARGET=${targetProvider.id}/summary-model`);
+    } finally {
+      f.database.close();
+    }
+  });
+
+  it("does not send a compaction request when its per-request hook fails", async () => {
+    const f = fixture();
+    const original = f.repository.getMessages(f.session.id);
+    const fetcher = vi.fn(async () => response("openai_responses", "Must not be sent."));
+    vi.stubGlobal("fetch", fetcher);
+    const beforeEachRequest = vi.fn(async () => {
+      throw new Error("fixture plugin prompt is unavailable");
+    });
+    try {
+      await expect(
+        f.service.prepare({ ...f.input, manual: true, beforeEachRequest }),
+      ).rejects.toThrow("BeforeModelRequest failed; the compaction request was not sent.");
+      expect(beforeEachRequest).toHaveBeenCalledOnce();
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(f.repository.getMessages(f.session.id)).toEqual(original);
+    } finally {
+      f.database.close();
+    }
+  });
+
+  it("accounts for plain request suffixes in the compaction token budget", async () => {
+    const run = async (hookLength: number, placement: "system" | "suffix" = "system") => {
+      const f = fixture();
+      f.repository.deleteMessagesFromSeq(f.session.id, 1);
+      f.append("user", "Keep the current decision and verified outcome.");
+      f.append("assistant", "Verified evidence. ".repeat(300));
+      f.append("user", "Continue with the current task.");
+      const model = { ...f.model, contextWindow: 6000, maxOutputTokens: 2048 };
+      f.repository.updateModel(model.id, model);
+      const hookContext = `BUDGET_HOOK ${"x".repeat(hookLength)}`;
+      const bodies: Record<string, unknown>[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, options: RequestInit) => {
+          bodies.push(JSON.parse(String(options.body)));
+          return response("openai_responses", "Short verified summary.");
+        }),
+      );
+      try {
+        const prepared = await f.service.prepare({
+          ...f.input,
+          model,
+          manual: true,
+          ...(hookLength > 0
+            ? {
+                beforeEachRequest: async () =>
+                  placement === "suffix" ? { userSuffix: hookContext } : hookContext,
+              }
+            : {}),
+        });
+        const body = bodies[0];
+        if (!body) throw new Error("Missing compaction request");
+        expect(bodies).toHaveLength(1);
+        expect(prepared).toHaveLength(2);
+        expect(f.service.state(f.session.id)?.state).toBe("ready");
+        const checkpoint = f.repository.getSetting(`context.checkpoint.${f.session.id}`) as {
+          summary?: string;
+        } | null;
+        expect(checkpoint?.summary).toBe("Short verified summary.");
+        return {
+          body,
+          outputTokens: Number(body.max_output_tokens),
+          hookContext,
+          database: f.database,
+        };
+      } catch (error) {
+        f.database.close();
+        throw error;
+      }
+    };
+
+    const withoutHook = await run(0);
+    try {
+      const withHook = await run(8000, "system");
+      try {
+        expect(String(withHook.body.instructions)).toContain("BUDGET_HOOK");
+        expect(withHook.outputTokens).toBeGreaterThanOrEqual(64);
+        expect(withHook.outputTokens).toBeLessThan(withoutHook.outputTokens);
+        expect(withHook.outputTokens).toBeLessThan(900);
+        const target = String(withHook.body.instructions).match(/must not exceed (\d+) tokens/);
+        expect(Number(target?.[1])).toBeLessThan(withoutHook.outputTokens);
+      } finally {
+        withHook.database.close();
+      }
+      const withSuffix = await run(8000, "suffix");
+      try {
+        const suffixWire = JSON.stringify(withSuffix.body.input);
+        expect(String(withSuffix.body.instructions)).not.toContain("BUDGET_HOOK");
+        expect(suffixWire).toContain("BUDGET_HOOK");
+        expect(suffixWire.match(/BUDGET_HOOK/g)).toHaveLength(1);
+        expect(suffixWire).not.toContain("mingshen_plugin_context");
+        expect(
+          JSON.stringify((withSuffix.body.input as Array<Record<string, unknown>>).at(-1)),
+        ).toContain("BUDGET_HOOK");
+        expect(withSuffix.outputTokens).toBeGreaterThanOrEqual(64);
+        expect(withSuffix.outputTokens).toBeLessThan(withoutHook.outputTokens);
+        expect(withSuffix.outputTokens).toBeLessThan(900);
+        const target = String(withSuffix.body.instructions).match(/must not exceed (\d+) tokens/);
+        expect(Number(target?.[1])).toBeLessThan(withoutHook.outputTokens);
+      } finally {
+        withSuffix.database.close();
+      }
+    } finally {
+      withoutHook.database.close();
+    }
+  });
+
   it("appends a newly completed tool step while keeping previously transformed history unchanged", async () => {
     const f = fixture();
     const requests: Record<string, unknown>[] = [];
@@ -2044,6 +2312,36 @@ describe("context compaction", () => {
           messages: base,
         }),
       ).toBeGreaterThan(before);
+    } finally {
+      f.database.close();
+    }
+  });
+
+  it("includes transient request text in the main budget without persisting the text", () => {
+    const f = fixture();
+    try {
+      const settingKey = `context.observation.${f.session.id}`;
+      f.service.recordResponse(f.input, { inputTokens: 1000, outputTokens: 0 });
+      const before = (f.repository.getSetting(settingKey) as { baselineEstimate: number } | null)
+        ?.baselineEstimate;
+      if (before === undefined) throw new Error("Missing baseline estimate");
+
+      const prefix = "BUDGET_PREFIX";
+      const suffix = `BUDGET_SUFFIX ${"x".repeat(1200)}`;
+      f.service.recordResponse(
+        {
+          ...f.input,
+          requestContext: {
+            userPrefix: prefix,
+            userSuffix: suffix,
+          },
+        },
+        { inputTokens: 1000, outputTokens: 0 },
+      );
+      const stored = f.repository.getSetting(settingKey) as { baselineEstimate: number } | null;
+      expect(stored?.baselineEstimate).toBeGreaterThan(before + 250);
+      expect(JSON.stringify(stored)).not.toContain(prefix);
+      expect(JSON.stringify(stored)).not.toContain("BUDGET_SUFFIX");
     } finally {
       f.database.close();
     }

@@ -9,7 +9,11 @@ import {
   tokenSaverSettingsSchema,
 } from "../../shared/token-saver";
 import { readCacheDiagnostics } from "../providers/cache-diagnostics";
-import { estimateModelInputTokens, type StreamToolDefinition } from "../providers/model-stream";
+import {
+  estimateModelInputTokens,
+  type RequestUserContext,
+  type StreamToolDefinition,
+} from "../providers/model-stream";
 import type { Repository } from "../storage/repository";
 import { stableInput } from "./stable-input";
 
@@ -103,6 +107,7 @@ export class TokenSaverService {
     provider: ProviderView;
     model: ModelConfig;
     systemPrompt: string;
+    requestContext?: RequestUserContext;
     tools: StreamToolDefinition[];
     messages: SessionMessage[];
     protectedMessages?: SessionMessage[];

@@ -207,6 +207,7 @@ export function CreativeWorkstation({ onUseTemplate, workspacePath }: CreativeWo
   const [loadedStorageKey, setLoadedStorageKey] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [blockedStorage, setBlockedStorage] = useState<"invalid" | "unreadable" | null>(null);
+  const [blockedDraftNeedsExport, setBlockedDraftNeedsExport] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -330,6 +331,7 @@ export function CreativeWorkstation({ onUseTemplate, workspacePath }: CreativeWo
     const active = { key: storageKey, writable, autosave };
     persistenceRef.current = active;
     setBlockedStorage(loaded.status === "blocked" ? loaded.reason : null);
+    setBlockedDraftNeedsExport(false);
     setSaveState(writable && !recovered ? "idle" : "error");
     if (recovered) {
       setError(
@@ -391,6 +393,7 @@ export function CreativeWorkstation({ onUseTemplate, workspacePath }: CreativeWo
     setDraft(next);
     active.autosave.schedule(next);
     if (active.writable) setSaveState("saving");
+    else setBlockedDraftNeedsExport(true);
   };
 
   const retrySave = () => {
@@ -602,6 +605,7 @@ export function CreativeWorkstation({ onUseTemplate, workspacePath }: CreativeWo
       anchor.click();
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setBlockedDraftNeedsExport(false);
       showNotice(tx("草稿 JSON 已导出", "Draft JSON exported"));
     } catch (cause) {
       setError(tx(`导出失败：${errorText(cause)}`, `Export failed: ${errorText(cause)}`));
@@ -667,6 +671,7 @@ export function CreativeWorkstation({ onUseTemplate, workspacePath }: CreativeWo
       data-compact={compact}
       data-library-open={libraryOpen}
       data-preview-open={previewOpen}
+      data-navigation-unsaved={loadedStorageKey === storageKey && blockedDraftNeedsExport}
       aria-label={tx("Mingshen 创作工作站", "Mingshen creative workstation")}
     >
       <header className="creative-workstation__header">

@@ -99,6 +99,17 @@ export function ComposerAssistControls({
   const projectToneAvailable = session.agentMode !== "chat" && Boolean(session.workspacePath);
 
   useEffect(() => {
+    if (!disabled) return;
+    generation.current++;
+    setMenu(null);
+    setPolishing(false);
+    setPolishResult(null);
+    const requestId = polishRequest.current;
+    polishRequest.current = null;
+    if (requestId) void window.mingshen.cancelDraftPolish(requestId).catch(() => undefined);
+  }, [disabled]);
+
+  useEffect(() => {
     generation.current++;
     setMenu(null);
     setPolishing(false);

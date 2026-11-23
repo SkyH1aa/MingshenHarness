@@ -92,10 +92,12 @@ export class CompactionRequestCache {
       !isTextCompactionRequest(request)
     )
       return;
+    const baseSystemPrompt = request.baseSystemPrompt ?? request.systemPrompt;
     const safeRequest: PreparedModelRequest = {
       provider: request.provider,
       model: request.model,
-      systemPrompt: request.systemPrompt,
+      systemPrompt: baseSystemPrompt,
+      baseSystemPrompt,
       messages: request.messages,
       tools: request.tools,
       reasoningLevel: request.reasoningLevel,

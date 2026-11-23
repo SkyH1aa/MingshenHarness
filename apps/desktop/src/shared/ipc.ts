@@ -9,6 +9,7 @@ import type {
   PolicyDocument,
   UpdateStatus,
 } from "./desktop";
+import type { CompanionPreferences, CompanionState } from "./desktop-companion";
 import type {
   AgentProfileSaveInput,
   AgentProfileView,
@@ -78,6 +79,7 @@ import type {
 } from "./draft-assist";
 import type {
   ImageStudioAssetData,
+  ImageStudioCanvasSummary,
   ImageStudioGenerateInput,
   ImageStudioGenerateResult,
   ImageStudioImportFile,
@@ -87,10 +89,11 @@ import type {
   ImageStudioWorkspace,
 } from "./image-studio";
 import type {
+  LocalPluginDirectoryInspection,
   LocalPluginInstallResult,
   LocalPluginMarketSource,
   LocalPluginMarketView,
-  LocalPluginValidation,
+  LocalPluginUpdateCheckResult,
 } from "./local-plugins";
 import type {
   LocalReviewCommentsInput,
@@ -142,6 +145,19 @@ import type {
 import type { TokenSaverSettings, TokenSaverSnapshot } from "./token-saver";
 import type { UiPreferences } from "./ui-preferences";
 
+export type CompanionSessionNavigationFailure =
+  | "busy"
+  | "unsaved_plan"
+  | "unsaved_edits"
+  | "unavailable"
+  | "failed";
+
+export type CompanionSessionNavigationResult = {
+  requestId: string;
+  accepted: false;
+  reason: CompanionSessionNavigationFailure;
+};
+
 export const IPC_CHANNELS = {
   tokenSaverGet: "token-saver:get",
   tokenSaverSet: "token-saver:set",
@@ -165,12 +181,19 @@ export const IPC_CHANNELS = {
   desktopState: "desktop:state",
   desktopAction: "desktop:action",
   desktopEvent: "desktop:event",
+  companionSessionNavigationPreflight: "companion:session-navigation-preflight",
+  companionSessionNavigationClaim: "companion:session-navigation-claim",
+  companionSessionNavigationResult: "companion:session-navigation-result",
   desktopShortcutsGet: "desktop:shortcuts-get",
   desktopShortcutsSet: "desktop:shortcuts-set",
   desktopShortcutRecording: "desktop:shortcut-recording",
+  startupAnimationGet: "desktop:startup-animation-get",
+  startupAnimationSet: "desktop:startup-animation-set",
   quickChatState: "quick-chat:state",
   quickChatAction: "quick-chat:action",
   quickChatEvent: "quick-chat:event",
+  quickChatTransition: "quick-chat:transition",
+  quickChatTransitionAck: "quick-chat:transition-ack",
   completionState: "notifications:state",
   completionConfigure: "notifications:configure",
   completionActiveSession: "notifications:active-session",
@@ -208,9 +231,17 @@ export const IPC_CHANNELS = {
   modelRemove: "model:remove",
   imageStudioGet: "image-studio:get",
   imageStudioSave: "image-studio:save",
+  imageStudioCanvasesList: "image-studio:canvases-list",
+  imageStudioCanvasOpen: "image-studio:canvas-open",
+  imageStudioCanvasClose: "image-studio:canvas-close",
+  imageStudioCanvasRename: "image-studio:canvas-rename",
+  imageStudioCanvasDuplicate: "image-studio:canvas-duplicate",
+  imageStudioCanvasDelete: "image-studio:canvas-delete",
+  imageStudioCanvasFolder: "image-studio:canvas-folder",
   imageStudioAssetData: "image-studio:asset-data",
   imageStudioImport: "image-studio:import",
   imageStudioRemoveAsset: "image-studio:remove-asset",
+  imageStudioExportAsset: "image-studio:export-asset",
   imageStudioGenerate: "image-studio:generate",
   imageStudioPolishPrompt: "image-studio:polish-prompt",
   imageStudioReversePrompt: "image-studio:reverse-prompt",
@@ -308,6 +339,7 @@ export const IPC_CHANNELS = {
   marketplaceInstall: "marketplace:install",
   localPluginValidate: "local-plugins:validate",
   localPluginMarketsList: "local-plugins:markets-list",
+  localPluginUpdatesCheck: "local-plugins:updates-check",
   localPluginMarketAdd: "local-plugins:market-add",
   localPluginMarketGet: "local-plugins:market-get",
   localPluginMarketRefresh: "local-plugins:market-refresh",
@@ -455,9 +487,22 @@ export interface MingshenDesktopApi {
     settings: DesktopShortcutSettings,
   ): Promise<DesktopShortcutUpdateResult>;
   setDesktopShortcutRecording(recording: boolean): Promise<void>;
+  getStartupAnimationEnabled(): Promise<boolean>;
+  setStartupAnimationEnabled(enabled: boolean): Promise<boolean>;
+  getCompanionState(): Promise<CompanionState>;
+  getCompanionPreferences(): Promise<CompanionPreferences>;
+  setCompanionPreferences(patch: Partial<CompanionPreferences>): Promise<CompanionPreferences>;
+  showCompanion(): Promise<void>;
+  hideCompanion(): Promise<void>;
+  onCompanionState(listener: (state: CompanionState) => void): () => void;
+  preflightCompanionSessionNavigation(requestId: string, sessionId: string): boolean;
+  claimCompanionSessionNavigation(requestId: string, sessionId: string): boolean;
+  reportCompanionSessionNavigation(result: CompanionSessionNavigationResult): Promise<void>;
   getQuickChatState(): Promise<QuickChatState>;
   quickChatAction(action: QuickChatAction): Promise<QuickChatState | null>;
   onQuickChatState(listener: (state: QuickChatState) => void): () => void;
+  onQuickChatTransition(listener: (requestId: string, locked: boolean) => void): () => void;
+  acknowledgeQuickChatTransition(requestId: string, error?: string): void;
   desktopAction(
     action:
       | "minimize"
@@ -483,9 +528,11 @@ export interface MingshenDesktopApi {
         | "shortcuts-changed"
         | "open-manual"
         | "open-provider-settings"
+        | "open-desktop-settings"
         | "composer-draft-error"
         | "notification-reply-failed";
       sessionId?: string;
+      requestId?: string;
       maximized?: boolean;
       tasks?: number;
       runningConversations?: number;
@@ -535,9 +582,17 @@ export interface MingshenDesktopApi {
   removeModel(modelConfigId: string): Promise<ProviderView>;
   getImageStudioWorkspace(): Promise<ImageStudioWorkspace>;
   saveImageStudioWorkspace(workspace: ImageStudioWorkspace): Promise<ImageStudioWorkspace>;
+  listImageStudioCanvases(): Promise<ImageStudioCanvasSummary[]>;
+  openImageStudioCanvas(canvasId: string): Promise<ImageStudioWorkspace>;
+  closeImageStudioCanvas(canvasId: string): Promise<ImageStudioWorkspace>;
+  renameImageStudioCanvas(canvasId: string, name: string): Promise<ImageStudioWorkspace>;
+  duplicateImageStudioCanvas(canvasId: string): Promise<ImageStudioWorkspace>;
+  deleteImageStudioCanvas(canvasId: string): Promise<ImageStudioWorkspace>;
+  revealImageStudioCanvasFolder(): Promise<void>;
   getImageStudioAssetData(assetId: string): Promise<ImageStudioAssetData>;
   importImageStudioAssets(files: ImageStudioImportFile[]): Promise<ImageStudioWorkspace>;
   removeImageStudioAsset(assetId: string): Promise<ImageStudioWorkspace>;
+  exportImageStudioAsset(assetId: string): Promise<string | null>;
   generateImageStudioImage(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult>;
   polishImageStudioPrompt(input: ImageStudioPolishInput): Promise<ImageStudioServiceResult>;
   reverseImageStudioPrompt(input: ImageStudioReversePromptInput): Promise<ImageStudioServiceResult>;
@@ -567,7 +622,7 @@ export interface MingshenDesktopApi {
   saveComposerDraft(input: SaveComposerDraftInput): Promise<void>;
   clearComposerDraft(sessionId: string, revision: string): Promise<boolean>;
   onComposerDraftFlush(
-    listener: (requestId: string, purpose: ComposerDraftFlushPurpose) => void,
+    listener: (requestId: string, purpose: ComposerDraftFlushPurpose, sessionId?: string) => void,
   ): () => void;
   acknowledgeComposerDraftFlush(requestId: string, error?: string): void;
   getDraftAssistSettings(): Promise<DraftAssistSettings>;
@@ -648,8 +703,9 @@ export interface MingshenDesktopApi {
     source: MarketplaceSkill["source"],
     path: string,
   ): Promise<MarketplaceInstallResult>;
-  validateLocalPlugin(rootPath: string): Promise<LocalPluginValidation>;
+  validateLocalPlugin(rootPath: string): Promise<LocalPluginDirectoryInspection>;
   listLocalPluginMarkets(): Promise<LocalPluginMarketSource[]>;
+  checkLocalPluginUpdates(): Promise<LocalPluginUpdateCheckResult>;
   addLocalPluginMarket(path: string): Promise<LocalPluginMarketView>;
   getLocalPluginMarket(id: string): Promise<LocalPluginMarketView>;
   refreshLocalPluginMarket(id: string): Promise<LocalPluginMarketView>;

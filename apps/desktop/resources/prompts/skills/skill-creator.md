@@ -21,10 +21,27 @@ prompts; they are not evidence that the finished Skill has already been tested.
 
 ## Inspect before writing
 
-Call `discover_capabilities` with a short query for the proposed domain. If an installed
-or built-in Skill already covers most of the behavior, prefer extending or composing it
-over creating a duplicate. A new Skill should own a coherent repeatable method, not a
-copy of the current one-off task or a generic restatement of the host prompt.
+Call `discover_capabilities` with a short query for the proposed domain. Discovery can
+also find installed, enabled local plugins. The primary Code/Work Agent can select a
+relevant plugin and activate it for the current run with `use_plugin`; ordinary
+on-demand plugins do not need to be manually referenced first. A plugin marked
+`activation: "required"` must be manually referenced in the session before the turn is
+submitted. Likewise, a `UserPromptSubmit` hook needed on the first message must be
+selected before submission because plugin discovery and activation cannot trigger that
+hook retroactively. If an installed or built-in Skill already covers most of the
+behavior, prefer extending or composing it over creating a duplicate. A new Skill
+should own a coherent repeatable method, not a copy of the current one-off task or a
+generic restatement of the host prompt.
+
+Child-task prompt inheritance is not independent plugin activation. Actual children
+derived through an active parent run's `runSubagent` path receive only the parent's
+selected/activated plugins' declarative `BeforeModelRequest` `type:"prompt"` context,
+from their initial request and on subsequent requests as the parent activates plugins.
+This does not expose plugin activation, `UserPromptSubmit`, `Interrupt`, plugin commands,
+MCP, action hooks or `local_plugin` to the child. Independent child conversations opened
+directly with `@` without an active parent-run mapping do not inherit it. ChatAgent,
+approval-safety reviews, independent AutoDrive/draft-polishing and post-run-title jobs
+remain outside the hook scope.
 
 Discovery includes built-in workflows and, in WorkAgent, each packaged Work skill
 variant. An empty user-installed plugin inventory or marketplace list does not mean
@@ -97,8 +114,11 @@ update, enablement or removal tool.
 Give the user the exact source folder and manual installation path. A standalone Skill
 is imported from Settings > Skills and plugins > Local Skills and Plugins. A packaged
 plugin is installed by the user from Settings > Skills and plugins > Local plugin
-development marketplace. Do not claim installation from the existence of source files
-or describe a model-callable lifecycle tool.
+development marketplace. Once installed and enabled, an on-demand plugin can be
+discovered and activated by the primary Code/Work Agent for a relevant run; only
+`activation: "required"` plugins need manual session reference before submission. Do not
+claim installation from the existence of source files or describe a model-callable
+lifecycle tool.
 
 For a packaged Skill, prefer `local_plugin validate` over a Node SDK command; the
 read-only validator supports primary host Request Approval sessions using normal read

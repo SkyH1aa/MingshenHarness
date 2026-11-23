@@ -1,17 +1,29 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import type { ModelConfig, ModelReference, ProviderView } from "../../shared/domain";
 import {
   emptyImageStudioWorkspace,
   IMAGE_STUDIO_MAX_ASSETS,
   IMAGE_STUDIO_MAX_DOCUMENTS,
+  IMAGE_STUDIO_MAX_GENERATED_COUNT,
   IMAGE_STUDIO_MAX_IMPORT_BYTES,
   IMAGE_STUDIO_MAX_LAYERS,
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
   type ImageStudioAsset,
   type ImageStudioAssetData,
   type ImageStudioCanvas,
+  type ImageStudioCanvasSummary,
   type ImageStudioGenerateInput,
   type ImageStudioGenerateResult,
   type ImageStudioImportFile,
@@ -20,7 +32,9 @@ import {
   type ImageStudioReversePromptInput,
   type ImageStudioServiceResult,
   type ImageStudioWorkspace,
-  normalizeImageSize,
+  imageStudioApiParameters,
+  normalizeImageStudioGenerationSettings,
+  validateImageStudioGenerationSettings,
 } from "../../shared/image-studio";
 import {
   isImageOutputModel,
@@ -30,6 +44,7 @@ import {
 import {
   decodeStrictBase64Image,
   parseImageGenerationResponse,
+  parseImageGenerationResponses,
 } from "../providers/image-generation";
 import { detectImage } from "../providers/image-validation";
 import type { ProviderService } from "../providers/provider-service";
@@ -37,12 +52,33 @@ import { buildAuthHeaders } from "../providers/provider-service";
 import type { Repository } from "../storage/repository";
 
 const WORKSPACE_KEY = ["image", "studio", "workspace", "v1"].join(".");
+const LEGACY_WORKSPACE_BACKUP_KEY = `${WORKSPACE_KEY}.canvas-library-backup`;
+const CANVAS_MIGRATION_KEY = `${WORKSPACE_KEY}.canvas-library-migrated`;
+const CANVAS_PROJECT_FORMAT = "mingshen.image-studio.canvas";
+const CANVAS_PROJECT_VERSION = 1;
 const MAX_WORKSPACE_BYTES = 2 * 1024 * 1024;
+const MAX_CANVAS_PROJECT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_CHARS = 4_000;
-const MAX_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_SINGLE_BYTES * 4) / 3) + 64 * 1024;
+const MAX_TEXT_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_SINGLE_BYTES * 4) / 3) + 64 * 1024;
+const MAX_IMAGE_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_IMPORT_BYTES * 4) / 3) + 1024 * 1024;
 const TEXT_HTTP_TIMEOUT_MS = 120_000;
 const IMAGE_HTTP_TIMEOUT_MS = 180_000;
 const SAFE_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const SAFE_CANVAS_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+interface CanvasProjectFile {
+  format: string;
+  version: number;
+  canvas: ImageStudioCanvas;
+  assets: ImageStudioAsset[];
+}
+interface CanvasFileChange {
+  path: string;
+  previous: Buffer | null;
+}
+class CanvasRecoveryError extends Error {}
+class CanvasProjectNotFoundError extends Error {}
+
 interface TextModelResult {
   text: string;
   body: Record<string, unknown>;
@@ -72,6 +108,13 @@ function stripControlCharacters(value: string, replacement = ""): string {
       return code <= 0x1f || code === 0x7f ? replacement : character;
     })
     .join("");
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const scoped = relative(root, candidate);
+  return Boolean(
+    scoped && scoped !== ".." && !scoped.startsWith(`..${sep}`) && !isAbsolute(scoped),
+  );
 }
 
 function optionalModelReference(value: unknown): ModelReference | null {
@@ -125,14 +168,17 @@ function fetchErrorMessage(
   return `HTTP ${status} ${statusText}${safe ? `\n${safe}` : ""}`.trim();
 }
 
-async function boundedResponseText(response: Response): Promise<string> {
+async function boundedResponseText(
+  response: Response,
+  maxBytes = MAX_TEXT_RESPONSE_BYTES,
+): Promise<string> {
   const declaredLength = Number(response.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES)
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes)
     throw new Error("供应商响应超过安全上限。");
   const reader = response.body?.getReader();
   if (!reader) {
     const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > MAX_RESPONSE_BYTES) throw new Error("供应商响应超过安全上限。");
+    if (bytes.length > maxBytes) throw new Error("供应商响应超过安全上限。");
     return bytes.toString("utf8");
   }
 
@@ -143,7 +189,7 @@ async function boundedResponseText(response: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel().catch(() => undefined);
         throw new Error("供应商响应超过安全上限。");
       }
@@ -260,10 +306,14 @@ function base64FromDataUrl(dataUrl: string): string {
 }
 
 export class ImageStudioService {
+  private readonly studioDirectory: string;
   private readonly assetDirectory: string;
+  private readonly canvasDirectory: string;
+  private readonly canvasTrashDirectory: string;
   private readonly activeRequests = new Map<string, AbortController>();
   private readonly operations = new Set<Promise<unknown>>();
   private assetReadQueue: Promise<void> = Promise.resolve();
+  private canvasOperationQueue: Promise<void> = Promise.resolve();
   private closing = false;
   private disposal: Promise<void> | null = null;
 
@@ -272,11 +322,39 @@ export class ImageStudioService {
     private readonly providerService: ProviderService,
     userDataDirectory: string,
   ) {
-    this.assetDirectory = join(userDataDirectory, "image-studio", "assets");
+    this.studioDirectory = join(userDataDirectory, "image-studio");
+    this.assetDirectory = join(this.studioDirectory, "assets");
+    this.canvasDirectory = join(this.studioDirectory, "canvases");
+    this.canvasTrashDirectory = join(this.canvasDirectory, ".trash");
   }
 
   private async initialize(): Promise<void> {
-    await mkdir(this.assetDirectory, { recursive: true });
+    await mkdir(this.studioDirectory, { recursive: true });
+    await this.assertStorageDirectory(this.studioDirectory);
+    await Promise.all([
+      mkdir(this.assetDirectory, { recursive: true }),
+      mkdir(this.canvasDirectory, { recursive: true }),
+    ]);
+    await Promise.all([
+      this.assertStorageDirectory(this.assetDirectory),
+      this.assertStorageDirectory(this.canvasDirectory),
+    ]);
+    await mkdir(this.canvasTrashDirectory, { recursive: true });
+    await this.assertStorageDirectory(this.canvasTrashDirectory);
+  }
+
+  getCanvasDirectoryPath(): string {
+    return this.canvasDirectory;
+  }
+
+  async loadWorkspace(): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        const workspace = await this.loadWorkspaceFromProjects();
+        return this.commitWorkspace(workspace, workspace.assets);
+      }),
+    );
   }
 
   getWorkspace(): ImageStudioWorkspace {
@@ -284,13 +362,187 @@ export class ImageStudioService {
     return this.normalizeWorkspace(this.repository.getSetting(WORKSPACE_KEY), this.assets());
   }
 
-  saveWorkspace(input: unknown): ImageStudioWorkspace {
-    this.assertOpen();
-    return this.commitWorkspace(input, this.assets());
+  saveWorkspace(input: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        const workspace = this.normalizeWorkspaceForSave(input);
+        return this.persistAndCommitWorkspace(workspace);
+      }),
+    );
+  }
+
+  listCanvases(): Promise<ImageStudioCanvasSummary[]> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        return this.listCanvasProjects();
+      }),
+    );
+  }
+
+  openCanvas(canvasId: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        const project = await this.readCanvasProject(canvasId);
+        const current = await this.loadWorkspaceFromProjects();
+        if (current.documents.some((document) => document.id === project.canvas.id))
+          return this.commitWorkspace(
+            { ...current, activeDocumentId: project.canvas.id },
+            current.assets,
+          );
+        if (current.documents.length >= IMAGE_STUDIO_MAX_DOCUMENTS)
+          throw new Error(`最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布，请先关闭一个标签。`);
+        const assets = this.mergeCanvasAssets(current.assets, project.assets);
+        return this.commitWorkspace(
+          {
+            ...current,
+            assets,
+            activeDocumentId: project.canvas.id,
+            documents: [...current.documents, project.canvas],
+          },
+          assets,
+        );
+      }),
+    );
+  }
+
+  closeCanvas(canvasId: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        const id = this.validCanvasId(canvasId);
+        await this.ensureCanvasLibrary();
+        const current = await this.loadWorkspaceFromProjects();
+        const documents = current.documents.filter((document) => document.id !== id);
+        if (documents.length === current.documents.length) return current;
+        return this.commitWorkspace(
+          {
+            ...current,
+            documents,
+            activeDocumentId:
+              current.activeDocumentId === id
+                ? (documents.at(-1)?.id ?? null)
+                : current.activeDocumentId,
+          },
+          current.assets,
+        );
+      }),
+    );
+  }
+
+  renameCanvas(canvasId: unknown, name: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        const project = await this.readCanvasProject(canvasId);
+        if (typeof name !== "string") throw new Error("画布名称无效。");
+        const cleanName = stripControlCharacters(name).trim().slice(0, 120);
+        if (!cleanName) throw new Error("画布名称不能为空。");
+        const current = await this.loadWorkspaceFromProjects();
+        const updatedAt = new Date().toISOString();
+        const canvas = { ...project.canvas, name: cleanName, updatedAt };
+        const workspace = {
+          ...current,
+          documents: current.documents.map((document) =>
+            document.id === canvas.id ? canvas : document,
+          ),
+        };
+        const previous = this.createCanvasProject(project.canvas, project.assets);
+        await this.writeCanvasProject(canvas, project.assets);
+        try {
+          return this.commitWorkspace(workspace, workspace.assets);
+        } catch (error) {
+          try {
+            await this.writeCanvasProject(previous.canvas, previous.assets);
+          } catch (restoreError) {
+            throw new Error(
+              `重命名失败，且无法恢复原画布文件：${this.errorMessage(restoreError)}`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }),
+    );
+  }
+
+  duplicateCanvas(canvasId: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        const project = await this.readCanvasProject(canvasId);
+        const current = await this.loadWorkspaceFromProjects();
+        if (current.documents.length >= IMAGE_STUDIO_MAX_DOCUMENTS)
+          throw new Error(`最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布，请先关闭一个标签。`);
+        const now = new Date().toISOString();
+        const canvas: ImageStudioCanvas = {
+          ...project.canvas,
+          id: randomUUID(),
+          name: `${project.canvas.name}（副本）`.slice(0, 120),
+          layers: project.canvas.layers.map((layer) => ({ ...layer, id: randomUUID() })),
+          createdAt: now,
+          updatedAt: now,
+        };
+        const assets = this.mergeCanvasAssets(current.assets, project.assets);
+        await this.writeCanvasProject(canvas, project.assets);
+        try {
+          return this.commitWorkspace(
+            {
+              ...current,
+              assets,
+              activeDocumentId: canvas.id,
+              documents: [...current.documents, canvas],
+            },
+            assets,
+          );
+        } catch (error) {
+          try {
+            await unlink(this.canvasPath(canvas.id));
+          } catch (cleanupError) {
+            if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT")
+              throw new Error(
+                `复制画布未完成，且无法清理副本文件：${this.errorMessage(cleanupError)}`,
+                { cause: error },
+              );
+          }
+          throw error;
+        }
+      }),
+    );
+  }
+
+  deleteCanvas(canvasId: unknown): Promise<ImageStudioWorkspace> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        const id = this.validCanvasId(canvasId);
+        await this.ensureCanvasLibrary();
+        const loaded = await this.loadWorkspaceFromProjects(id);
+        const source = this.canvasPath(id);
+        const trash = join(this.canvasTrashDirectory, `${id}.${randomUUID()}.json`);
+        await rename(source, trash);
+        try {
+          const workspace = this.commitWorkspace(loaded, loaded.assets);
+          await unlink(trash).catch(() => undefined);
+          return workspace;
+        } catch (error) {
+          try {
+            await rename(trash, source);
+          } catch (restoreError) {
+            throw new Error(
+              `删除画布失败，且无法自动恢复项目文件。回收区文件：${trash}；恢复错误：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }),
+    );
   }
 
   private commitWorkspace(input: unknown, assets: ImageStudioAsset[]): ImageStudioWorkspace {
     this.assertOpen();
+    this.assertWorkspaceLimits(input);
     const workspace = this.normalizeWorkspace(input, assets);
     const serialized = JSON.stringify(workspace);
     if (Buffer.byteLength(serialized) > MAX_WORKSPACE_BYTES)
@@ -299,8 +551,497 @@ export class ImageStudioService {
     return workspace;
   }
 
+  private async persistAndCommitWorkspace(
+    workspace: ImageStudioWorkspace,
+  ): Promise<ImageStudioWorkspace> {
+    const changes = await this.persistWorkspaceCanvases(workspace);
+    try {
+      return this.commitWorkspace(workspace, workspace.assets);
+    } catch (error) {
+      await this.restoreCanvasFiles(changes, error);
+      throw error;
+    }
+  }
+
+  private normalizeWorkspaceForSave(value: unknown): ImageStudioWorkspace {
+    const record = asRecord(value);
+    if (!record || !Array.isArray(record.documents) || !Array.isArray(record.assets))
+      throw new Error("画布工作区数据格式无效。");
+    if (record.assets.length > IMAGE_STUDIO_MAX_ASSETS)
+      throw new Error(`素材库最多保存 ${IMAGE_STUDIO_MAX_ASSETS} 张图片。`);
+    this.assertWorkspaceLimits(value);
+
+    const rawDocuments = record.documents;
+    const canvasIds = new Set<string>();
+    for (const rawDocument of rawDocuments) {
+      const document = asRecord(rawDocument);
+      if (
+        !document ||
+        typeof document.id !== "string" ||
+        !SAFE_CANVAS_ID.test(document.id) ||
+        !Array.isArray(document.layers)
+      )
+        throw new Error("工作区包含无效的画布记录。");
+      if (canvasIds.has(document.id)) throw new Error("工作区包含重复的画布标识。");
+      canvasIds.add(document.id);
+      const layerIds = new Set<string>();
+      for (const rawLayer of document.layers) {
+        const layer = asRecord(rawLayer);
+        if (
+          !layer ||
+          typeof layer.id !== "string" ||
+          !SAFE_CANVAS_ID.test(layer.id) ||
+          typeof layer.assetId !== "string" ||
+          !SAFE_ASSET_ID.test(layer.assetId)
+        )
+          throw new Error("工作区包含无效图层记录。");
+        if (layerIds.has(layer.id)) throw new Error("工作区包含重复的图层标识。");
+        layerIds.add(layer.id);
+      }
+    }
+
+    // Asset metadata is owned by the main process; stale renderer snapshots may reference removed assets.
+    const assets = this.assets();
+    const workspace = this.normalizeWorkspace(record, assets);
+    this.assertWorkspaceCanvasesPreserved(record, workspace, "保存画布");
+    return workspace;
+  }
+
+  private trackCanvasOperation<T>(run: () => Promise<T>): Promise<T> {
+    const operation = this.canvasOperationQueue.then(run, run);
+    this.canvasOperationQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async ensureCanvasLibrary(): Promise<void> {
+    await this.initialize();
+    if (this.repository.getSetting(CANVAS_MIGRATION_KEY) === true) return;
+    const original = this.repository.getSetting(WORKSPACE_KEY);
+    const workspace = this.normalizeWorkspace(original, this.assets());
+    for (const canvas of workspace.documents) {
+      const path = this.canvasPath(canvas.id);
+      try {
+        await lstat(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await this.writeCanvasProject(canvas, workspace.assets);
+      }
+    }
+    if (
+      original !== undefined &&
+      this.repository.getSetting(LEGACY_WORKSPACE_BACKUP_KEY) === undefined
+    )
+      this.repository.setSetting(LEGACY_WORKSPACE_BACKUP_KEY, original);
+    this.repository.setSetting(CANVAS_MIGRATION_KEY, true);
+  }
+
+  private async loadWorkspaceFromProjects(
+    excludedCanvasId?: string,
+  ): Promise<ImageStudioWorkspace> {
+    const snapshot = this.getWorkspace();
+    let assets = snapshot.assets;
+    const documents: ImageStudioCanvas[] = [];
+    for (const document of snapshot.documents) {
+      if (document.id === excludedCanvasId) continue;
+      this.assertOpen();
+      try {
+        const project = await this.readCanvasProject(document.id);
+        assets = this.mergeCanvasAssets(assets, project.assets);
+        documents.push(project.canvas);
+      } catch (error) {
+        if (error instanceof CanvasProjectNotFoundError) {
+          try {
+            await lstat(this.canvasPath(document.id));
+          } catch (projectError) {
+            if ((projectError as NodeJS.ErrnoException).code === "ENOENT") {
+              await this.writeCanvasProject(document, snapshot.assets);
+              documents.push(document);
+            }
+          }
+        }
+        // Invalid or unavailable projects remain visible in the library for recovery/deletion.
+      }
+    }
+    const activeDocumentId = documents.some((document) => document.id === snapshot.activeDocumentId)
+      ? snapshot.activeDocumentId
+      : (documents.at(-1)?.id ?? null);
+    const candidate = { ...snapshot, assets, documents, activeDocumentId };
+    const workspace = this.normalizeWorkspace(candidate, assets);
+    this.assertWorkspaceCanvasesPreserved(candidate, workspace, "加载画布");
+    return workspace;
+  }
+
+  private async persistWorkspaceCanvases(
+    workspace: ImageStudioWorkspace,
+  ): Promise<CanvasFileChange[]> {
+    const changes: CanvasFileChange[] = [];
+    try {
+      for (const canvas of workspace.documents) {
+        this.assertOpen();
+        const expected = this.createCanvasProject(canvas, workspace.assets);
+        try {
+          const current = await this.readCanvasProject(canvas.id);
+          if (JSON.stringify(current) === JSON.stringify(expected)) continue;
+        } catch (error) {
+          if (!(error instanceof CanvasProjectNotFoundError)) throw error;
+        }
+        const path = this.canvasPath(canvas.id);
+        let previous: Buffer | null = null;
+        try {
+          previous = await readFile(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        await this.writeCanvasProject(canvas, workspace.assets);
+        changes.push({ path, previous });
+      }
+      return changes;
+    } catch (error) {
+      await this.restoreCanvasFiles(changes, error);
+      throw error;
+    }
+  }
+
+  private async restoreCanvasFiles(changes: CanvasFileChange[], cause: unknown): Promise<void> {
+    const failures: string[] = [];
+    for (const change of [...changes].reverse()) {
+      try {
+        if (change.previous === null) {
+          await unlink(change.path).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          });
+        } else {
+          await this.writeCanvasBytes(change.path, change.previous);
+        }
+      } catch (error) {
+        failures.push(`${change.path}: ${this.errorMessage(error)}`);
+      }
+    }
+    if (failures.length)
+      throw new CanvasRecoveryError(
+        `画布保存失败，且无法完整恢复先前文件：${failures.join("；")}`,
+        {
+          cause,
+        },
+      );
+  }
+
+  private async writeCanvasBytes(destination: string, bytes: Uint8Array): Promise<void> {
+    this.assertLexicalPathInside(this.canvasDirectory, destination, "画布写入位置");
+    await this.assertStorageDirectory(this.canvasDirectory);
+    const temporary = join(this.canvasDirectory, `.${randomUUID()}.tmp`);
+    let file: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      file = await open(temporary, "wx");
+      await file.writeFile(bytes);
+      await file.sync();
+      await file.close();
+      file = null;
+      await rename(temporary, destination);
+    } catch (error) {
+      await file?.close().catch(() => undefined);
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private async listCanvasProjects(): Promise<ImageStudioCanvasSummary[]> {
+    const entries = await readdir(this.canvasDirectory, { withFileTypes: true });
+    const summaries: ImageStudioCanvasSummary[] = [];
+    for (const entry of entries) {
+      const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.mingcanvas\.json$/.exec(entry.name);
+      if (!entry.isFile() || !match?.[1]) continue;
+      try {
+        const project = await this.readCanvasProject(match[1]);
+        summaries.push({
+          id: project.canvas.id,
+          name: project.canvas.name,
+          width: project.canvas.width,
+          height: project.canvas.height,
+          updatedAt: project.canvas.updatedAt,
+          layerCount: project.canvas.layers.length,
+          referencedAssetIds: [...new Set(project.canvas.layers.map((layer) => layer.assetId))],
+          available: true,
+          error: null,
+        });
+      } catch (error) {
+        const id = match[1];
+        let updatedAt = new Date(0).toISOString();
+        try {
+          updatedAt = (await lstat(join(this.canvasDirectory, entry.name))).mtime.toISOString();
+        } catch {
+          // The entry can disappear while the library is being refreshed.
+        }
+        summaries.push({
+          id,
+          name: id,
+          width: 0,
+          height: 0,
+          updatedAt,
+          layerCount: 0,
+          referencedAssetIds: [],
+          available: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  private async readCanvasProject(canvasId: unknown): Promise<CanvasProjectFile> {
+    const id = this.validCanvasId(canvasId);
+    const path = this.canvasPath(id);
+    let guarded: Awaited<ReturnType<typeof this.resolveGuardedFile>>;
+    try {
+      guarded = await this.resolveGuardedFile(this.canvasDirectory, path, "画布项目");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT")
+        throw new CanvasProjectNotFoundError(`画布工程不存在：${id}`);
+      throw error;
+    }
+    const linkInfo = guarded.stat;
+    if (
+      !linkInfo.isFile() ||
+      linkInfo.isSymbolicLink() ||
+      linkInfo.size < 1 ||
+      linkInfo.size > MAX_CANVAS_PROJECT_BYTES
+    )
+      throw new Error("画布项目文件无效或超过 2 MiB 上限。");
+    const file = await open(guarded.path, "r");
+    let raw: string;
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size !== linkInfo.size || stat.size > MAX_CANVAS_PROJECT_BYTES)
+        throw new Error("画布项目文件在读取前发生变化。");
+      const buffer = Buffer.allocUnsafe(stat.size);
+      const { bytesRead } = await file.read(buffer, 0, stat.size, 0);
+      if (bytesRead !== stat.size) throw new Error("画布项目文件读取不完整。");
+      raw = buffer.toString("utf8");
+    } finally {
+      await file.close();
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw) as unknown;
+    } catch {
+      throw new Error("画布项目 JSON 已损坏。");
+    }
+    const record = asRecord(value);
+    const canvasRecord = asRecord(record?.canvas);
+    if (
+      record?.format !== CANVAS_PROJECT_FORMAT ||
+      record.version !== CANVAS_PROJECT_VERSION ||
+      !canvasRecord ||
+      canvasRecord.id !== id ||
+      !Array.isArray(record.assets)
+    )
+      throw new Error("画布项目格式或标识无效。");
+    const assets = this.normalizeAssets(record.assets);
+    if (assets.length !== record.assets.length)
+      throw new Error("畫布工程包含無效或重複的素材記錄。");
+    const assetIds = new Set(assets.map((asset) => asset.id));
+    const rawLayers = Array.isArray(canvasRecord.layers) ? canvasRecord.layers : [];
+    if (
+      rawLayers.length > IMAGE_STUDIO_MAX_LAYERS ||
+      rawLayers.some((layer) => {
+        const record = asRecord(layer);
+        return !record || typeof record.assetId !== "string" || !assetIds.has(record.assetId);
+      })
+    )
+      throw new Error("畫布工程包含缺失的素材引用或超出圖層上限。");
+    const workspace = this.normalizeWorkspace(
+      { ...emptyImageStudioWorkspace(), documents: [canvasRecord] },
+      assets,
+    );
+    const canvas = workspace.documents[0];
+    if (!canvas || canvas.id !== id || canvas.layers.length !== rawLayers.length)
+      throw new Error("画布项目内容无效，部分图层无法通过校验。");
+    await this.assertProjectAssetsPresent(assets);
+    return { format: CANVAS_PROJECT_FORMAT, version: CANVAS_PROJECT_VERSION, canvas, assets };
+  }
+
+  private async writeCanvasProject(
+    canvas: ImageStudioCanvas,
+    allAssets: ImageStudioAsset[],
+  ): Promise<void> {
+    const id = this.validCanvasId(canvas.id);
+    const payload = this.createCanvasProject(canvas, allAssets);
+    const serialized = JSON.stringify(payload);
+    if (Buffer.byteLength(serialized) > MAX_CANVAS_PROJECT_BYTES)
+      throw new Error("单张画布项目超过 2 MiB 限制。");
+    const destination = this.canvasPath(id);
+    await this.writeCanvasBytes(destination, Buffer.from(serialized, "utf8"));
+  }
+
+  private createCanvasProject(
+    canvas: ImageStudioCanvas,
+    allAssets: ImageStudioAsset[],
+  ): CanvasProjectFile {
+    const assetIds = new Set(canvas.layers.map((layer) => layer.assetId));
+    const assets = allAssets.filter((asset) => assetIds.has(asset.id));
+    const workspace = this.normalizeWorkspace(
+      { ...emptyImageStudioWorkspace(), documents: [canvas] },
+      assets,
+    );
+    const normalizedCanvas = workspace.documents[0];
+    if (!normalizedCanvas || normalizedCanvas.layers.length !== canvas.layers.length)
+      throw new Error("无法保存包含无效图层引用的画布。");
+    return {
+      format: CANVAS_PROJECT_FORMAT,
+      version: CANVAS_PROJECT_VERSION,
+      canvas: normalizedCanvas,
+      assets: workspace.assets,
+    };
+  }
+
+  private async assertProjectAssetsPresent(assets: ImageStudioAsset[]): Promise<void> {
+    for (const asset of assets) {
+      const path = this.assetPath(asset);
+      let guarded: Awaited<ReturnType<typeof this.resolveGuardedFile>>;
+      try {
+        guarded = await this.resolveGuardedFile(this.assetDirectory, path, "图片素材");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          throw new Error(`画布引用的素材文件缺失：${asset.name}`, { cause: error });
+        throw error;
+      }
+      if (guarded.stat.size !== asset.size)
+        throw new Error(`画布引用的素材文件缺失或已变化：${asset.name}`);
+    }
+  }
+
+  private mergeCanvasAssets(
+    current: ImageStudioAsset[],
+    project: ImageStudioAsset[],
+  ): ImageStudioAsset[] {
+    const merged = new Map(current.map((asset) => [asset.id, asset]));
+    for (const asset of project) {
+      const existing = merged.get(asset.id);
+      if (existing && !this.sameCanvasAsset(existing, asset))
+        throw new Error(`画布素材元数据冲突：${asset.name}`);
+      if (!existing) merged.set(asset.id, asset);
+    }
+    if (merged.size > IMAGE_STUDIO_MAX_ASSETS)
+      throw new Error("打开此画布将超过素材库上限，请先清理未使用的素材。");
+    const normalized = this.normalizeAssets([...merged.values()]);
+    if (normalized.length !== merged.size) throw new Error("画布素材元数据无效，读取已取消。");
+    return normalized;
+  }
+
+  private sameCanvasAsset(left: ImageStudioAsset, right: ImageStudioAsset): boolean {
+    return (
+      left.mimeType === right.mimeType &&
+      left.size === right.size &&
+      left.width === right.width &&
+      left.height === right.height &&
+      this.assetPath(left) === this.assetPath(right)
+    );
+  }
+
+  private assertWorkspaceCanvasesPreserved(
+    value: unknown,
+    workspace: ImageStudioWorkspace,
+    action: string,
+  ): void {
+    const record = asRecord(value);
+    const rawDocuments = Array.isArray(record?.documents) ? record.documents : [];
+    if (rawDocuments.length !== workspace.documents.length)
+      throw new Error(`${action}会丢失画布，操作已取消。`);
+    const normalized = new Map(workspace.documents.map((document) => [document.id, document]));
+    for (const rawDocument of rawDocuments) {
+      const document = asRecord(rawDocument);
+      if (!document || typeof document.id !== "string")
+        throw new Error(`${action}包含无效画布，操作已取消。`);
+      const current = normalized.get(document.id);
+      const rawLayers = Array.isArray(document.layers) ? document.layers : [];
+      if (!current || current.layers.length !== rawLayers.length)
+        throw new Error(`画布「${document.name ?? document.id}」的图层会丢失，${action}已取消。`);
+    }
+  }
+
+  private async assertStorageDirectory(directory: string): Promise<void> {
+    const stat = await lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error(`图片工作台存储目录不安全：${directory}`);
+  }
+
+  private assertLexicalPathInside(root: string, candidate: string, label: string): void {
+    const relativePath = relative(root, candidate);
+    if (
+      !relativePath ||
+      relativePath === ".." ||
+      relativePath.startsWith(`..${sep}`) ||
+      isAbsolute(relativePath)
+    )
+      throw new Error(`${label}无效。`);
+  }
+
+  private async resolveGuardedFile(
+    root: string,
+    candidate: string,
+    label: string,
+  ): Promise<{ path: string; stat: Awaited<ReturnType<typeof lstat>> }> {
+    this.assertLexicalPathInside(root, candidate, label);
+    await this.assertStorageDirectory(root);
+    const linkStat = await lstat(candidate);
+    if (!linkStat.isFile() || linkStat.isSymbolicLink())
+      throw new Error(`${label}必须是普通文件。`);
+    const canonicalRoot = await realpath(root);
+    const canonicalCandidate = await realpath(candidate);
+    if (!isPathInside(canonicalRoot, canonicalCandidate))
+      throw new Error(`${label}超出图片工作台目录。`);
+    const stat = await lstat(canonicalCandidate);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label}必须是普通文件。`);
+    return { path: canonicalCandidate, stat };
+  }
+
+  private assertWorkspaceLimits(value: unknown): void {
+    const record = asRecord(value);
+    if (!record || !Array.isArray(record.documents)) return;
+    if (record.documents.length > IMAGE_STUDIO_MAX_DOCUMENTS)
+      throw new Error(`最多同时打开 ${IMAGE_STUDIO_MAX_DOCUMENTS} 张画布。`);
+    for (const item of record.documents) {
+      const document = asRecord(item);
+      if (Array.isArray(document?.layers) && document.layers.length > IMAGE_STUDIO_MAX_LAYERS)
+        throw new Error(`每张画布最多 ${IMAGE_STUDIO_MAX_LAYERS} 个图层。`);
+    }
+  }
+
+  private validCanvasId(value: unknown): string {
+    if (typeof value !== "string" || !SAFE_CANVAS_ID.test(value)) throw new Error("画布标识无效。");
+    return value;
+  }
+
+  private canvasPath(canvasId: unknown): string {
+    return join(this.canvasDirectory, `${this.validCanvasId(canvasId)}.mingcanvas.json`);
+  }
+
   getAssetData(assetId: unknown): Promise<ImageStudioAssetData> {
     return this.trackOperation(() => this.queueAssetRead(assetId));
+  }
+
+  exportAsset(assetId: unknown, destinationPath: unknown): Promise<void> {
+    return this.trackOperation(async () => {
+      if (
+        typeof destinationPath !== "string" ||
+        !destinationPath.trim() ||
+        destinationPath.length > 32_768 ||
+        !isAbsolute(destinationPath)
+      )
+        throw new Error("图片导出位置无效。");
+      const data = await this.queueAssetRead(assetId);
+      this.assertOpen();
+      const base64 = data.dataUrl.replace(/^data:[^;]+;base64,/, "");
+      const bytes = decodeStrictBase64Image(base64);
+      await writeFile(destinationPath, bytes, { flag: "w" });
+    });
   }
 
   private queueAssetRead(assetId: unknown, signal?: AbortSignal): Promise<ImageStudioAssetData> {
@@ -321,7 +1062,13 @@ export class ImageStudioService {
     if (typeof assetId !== "string") throw new Error("图片素材标识无效。");
     const asset = this.assets().find((item) => item.id === assetId);
     if (!asset) throw new Error("图片素材不存在。");
-    const file = await open(this.assetPath(asset), "r");
+    const guarded = await this.resolveGuardedFile(
+      this.assetDirectory,
+      this.assetPath(asset),
+      "图片素材",
+    );
+    signal?.throwIfAborted();
+    const file = await open(guarded.path, "r");
     let bytes: Buffer;
     try {
       const stat = await file.stat();
@@ -353,7 +1100,12 @@ export class ImageStudioService {
   }
 
   importAssets(input: unknown): Promise<ImageStudioWorkspace> {
-    return this.trackOperation(() => this.importAssetsInternal(input));
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        return this.importAssetsInternal(input);
+      }),
+    );
   }
 
   private async importAssetsInternal(input: unknown): Promise<ImageStudioWorkspace> {
@@ -422,11 +1174,23 @@ export class ImageStudioService {
   }
 
   removeAsset(assetId: unknown): Promise<ImageStudioWorkspace> {
-    return this.trackOperation(() => this.removeAssetInternal(assetId));
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        return this.removeAssetInternal(assetId);
+      }),
+    );
   }
 
   private async removeAssetInternal(assetId: unknown): Promise<ImageStudioWorkspace> {
     if (typeof assetId !== "string") throw new Error("图片素材标识无效。");
+    const projects = await this.listCanvasProjects();
+    const unreadable = projects.find((project) => !project.available);
+    if (unreadable)
+      throw new Error(`无法确认素材引用，因为画布「${unreadable.name}」不可读取；删除已取消。`);
+    const referencing = projects.find((project) => project.referencedAssetIds.includes(assetId));
+    if (referencing)
+      throw new Error(`图片仍被画布「${referencing.name}」引用。请先从画布移除该图层。`);
     const workspace = this.getWorkspace();
     const asset = workspace.assets.find((item) => item.id === assetId);
     if (!asset) throw new Error("图片素材不存在。");
@@ -458,6 +1222,7 @@ export class ImageStudioService {
   ): Promise<ImageStudioGenerateResult> {
     const modelReference = optionalModelReference(input.model);
     if (!modelReference) throw new Error("请选择图片生成模型。");
+    const generation = validateImageStudioGenerationSettings(input.generation);
     const prompt = promptWithNegative(validateTextPrompt(input.prompt), input.negativePrompt);
     const { provider, model } = this.resolveModel(modelReference);
     if (!isImageOutputModel(model))
@@ -472,9 +1237,7 @@ export class ImageStudioService {
     const body = {
       model: model.modelId,
       prompt,
-      n: 1,
-      size: normalizeImageSize(input.size),
-      response_format: "b64_json",
+      ...imageStudioApiParameters(generation),
     };
     return this.withRequest(input.requestId, IMAGE_HTTP_TIMEOUT_MS, async (signal) => {
       const response = await fetch(url, {
@@ -490,7 +1253,7 @@ export class ImageStudioService {
         body: JSON.stringify(body),
         signal,
       });
-      const raw = await boundedResponseText(response);
+      const raw = await boundedResponseText(response, MAX_IMAGE_RESPONSE_BYTES);
       if (!response.ok)
         throw new Error(fetchErrorMessage(response.status, response.statusText, raw, apiKey));
       let payload: unknown;
@@ -499,22 +1262,49 @@ export class ImageStudioService {
       } catch {
         throw new Error("图片供应商返回的不是有效 JSON。");
       }
-      const generated = await parseImageGenerationResponse(payload);
+      const generated = await parseImageGenerationResponses(payload);
       signal.throwIfAborted();
       this.assertOpen();
-      const dataUrl = `data:${generated.mimeType};base64,${generated.base64}`;
-      const workspace = await this.importGeneratedAsset({
-        dataUrl,
-        detected: generated,
-        prompt,
-        model: modelReference,
-        revisedPrompt: generated.revisedPrompt,
-        addToActiveCanvas: input.addToActiveCanvas === true,
-        signal,
+      if (generated.length > generation.imageCount)
+        throw new Error("供应商返回的图片数量超过本次请求数量，已拒绝保存异常结果。");
+      const warnings = generated.flatMap((image, index) =>
+        generation.resolution !== "auto" &&
+        (image.width !== generation.width || image.height !== generation.height)
+          ? [
+              {
+                code: "size_mismatch" as const,
+                imageIndex: index + 1,
+                requestedWidth: generation.width,
+                requestedHeight: generation.height,
+                actualWidth: image.width,
+                actualHeight: image.height,
+              },
+            ]
+          : [],
+      );
+      if (
+        generation.transparentBackground &&
+        generated.some((image) => image.mimeType !== "image/png" && image.mimeType !== "image/webp")
+      )
+        throw new Error("透明背景请求必须返回 PNG 或 WebP，供应商结果未保存。");
+      signal.throwIfAborted();
+      this.assertOpen();
+      const workspace = await this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        return this.importGeneratedAssets({
+          generated,
+          prompt,
+          workspacePrompt: validateTextPrompt(input.prompt),
+          model: modelReference,
+          addToActiveCanvas: input.addToActiveCanvas === true,
+          signal,
+        });
       });
-      const asset = workspace.assets.at(-1);
-      if (!asset) throw new Error("保存生成图片失败。");
-      return { asset, dataUrl, revisedPrompt: generated.revisedPrompt, workspace };
+      return {
+        generatedAssets: workspace.assets.slice(-generated.length),
+        workspace,
+        warnings,
+      };
     });
   }
 
@@ -603,98 +1393,141 @@ export class ImageStudioService {
     return operation;
   }
 
-  private async importGeneratedAsset(input: {
-    dataUrl: string;
-    detected: {
+  private async importGeneratedAssets(input: {
+    generated: Array<{
+      base64: string;
+      byteLength: number;
       mimeType: ImageStudioAsset["mimeType"];
       width: number;
       height: number;
       extension: string;
-    };
+      revisedPrompt: string | null;
+    }>;
     prompt: string;
+    workspacePrompt: string;
     model: ModelReference;
-    revisedPrompt: string | null;
     addToActiveCanvas: boolean;
     signal: AbortSignal;
   }): Promise<ImageStudioWorkspace> {
-    const bytes = parseDataUrl(input.dataUrl).bytes;
-    const detected = input.detected;
-    const id = randomUUID();
-    const asset: ImageStudioAsset = {
-      id,
-      name: `generated-${new Date().toISOString().replace(/[:.]/g, "-")}${detected.extension}`,
-      mimeType: detected.mimeType,
-      size: bytes.length,
-      width: detected.width,
-      height: detected.height,
-      source: "generated",
-      createdAt: new Date().toISOString(),
-      prompt: input.revisedPrompt || input.prompt,
-      model: input.model,
-    };
+    if (!input.generated.length || input.generated.length > IMAGE_STUDIO_MAX_GENERATED_COUNT)
+      throw new Error("供应商返回的图片数量无效。");
+    const previous = this.getWorkspace();
+    if (previous.assets.length + input.generated.length > IMAGE_STUDIO_MAX_ASSETS)
+      throw new Error(`图片素材库最多保存 ${IMAGE_STUDIO_MAX_ASSETS} 张图片，请先删除部分素材。`);
     await this.initialize();
     input.signal.throwIfAborted();
     this.assertOpen();
-    const path = this.assetPath(asset);
-    const temporary = `${path}.${randomUUID()}.tmp`;
+    const now = new Date().toISOString();
+    const stamp = now.replace(/[:.]/g, "-");
+    const assets: ImageStudioAsset[] = [];
+    const temporaryFiles: string[] = [];
+    const writtenFiles: string[] = [];
     let workspaceSaved = false;
     try {
-      await writeFile(temporary, bytes, { flag: "wx" });
-      input.signal.throwIfAborted();
-      this.assertOpen();
-      await rename(temporary, path);
-      input.signal.throwIfAborted();
-      this.assertOpen();
+      for (const [index, generated] of input.generated.entries()) {
+        input.signal.throwIfAborted();
+        this.assertOpen();
+        const bytes = decodeStrictBase64Image(generated.base64);
+        if (bytes.length !== generated.byteLength)
+          throw new Error("供应商返回图片的大小校验失败。");
+        const asset: ImageStudioAsset = {
+          id: randomUUID(),
+          name: `generated-${stamp}-${index + 1}${generated.extension}`,
+          mimeType: generated.mimeType,
+          size: bytes.length,
+          width: generated.width,
+          height: generated.height,
+          source: "generated",
+          createdAt: now,
+          prompt: generated.revisedPrompt || input.prompt,
+          model: input.model,
+        };
+        const path = this.assetPath(asset);
+        const temporary = `${path}.${randomUUID()}.tmp`;
+        temporaryFiles.push(temporary);
+        await writeFile(temporary, bytes, { flag: "wx" });
+        input.signal.throwIfAborted();
+        this.assertOpen();
+        await rename(temporary, path);
+        temporaryFiles.pop();
+        writtenFiles.push(path);
+        assets.push(asset);
+      }
 
-      const now = new Date().toISOString();
-      const previous = this.getWorkspace();
-      if (previous.assets.length >= IMAGE_STUDIO_MAX_ASSETS)
-        throw new Error(`图片素材库已达到 ${IMAGE_STUDIO_MAX_ASSETS} 张上限。`);
       let documents = previous.documents;
       if (input.addToActiveCanvas && previous.activeDocumentId) {
+        const columns = Math.ceil(Math.sqrt(assets.length));
+        const rows = Math.ceil(assets.length / columns);
         documents = documents.map((document) => {
           if (document.id !== previous.activeDocumentId) return document;
-          const scale = Math.min(
-            (document.width * 0.72) / detected.width,
-            (document.height * 0.72) / detected.height,
-            1,
-          );
-          const width = Math.max(16, detected.width * scale);
-          const height = Math.max(16, detected.height * scale);
-          const layer: ImageStudioLayer = {
-            id: randomUUID(),
-            assetId: asset.id,
-            x: (document.width - width) / 2,
-            y: (document.height - height) / 2,
-            width,
-            height,
-            rotation: 0,
-            opacity: 1,
-            zIndex: document.layers.length,
-          };
+          const layers = [...document.layers];
+          assets.forEach((asset, index) => {
+            if (layers.length >= IMAGE_STUDIO_MAX_LAYERS) return;
+            const cellWidth = document.width / columns;
+            const cellHeight = document.height / rows;
+            const scale = Math.min(
+              (assets.length === 1 ? document.width * 0.72 : cellWidth * 0.82) / asset.width,
+              (assets.length === 1 ? document.height * 0.72 : cellHeight * 0.82) / asset.height,
+              1,
+            );
+            const width = Math.max(16, asset.width * scale);
+            const height = Math.max(16, asset.height * scale);
+            const column = index % columns;
+            const row = Math.floor(index / columns);
+            layers.push({
+              id: randomUUID(),
+              assetId: asset.id,
+              x:
+                assets.length === 1
+                  ? (document.width - width) / 2
+                  : column * cellWidth + (cellWidth - width) / 2,
+              y:
+                assets.length === 1
+                  ? (document.height - height) / 2
+                  : row * cellHeight + (cellHeight - height) / 2,
+              width,
+              height,
+              rotation: 0,
+              opacity: 1,
+              zIndex: layers.length,
+            });
+          });
           return {
             ...document,
-            layers: [...document.layers, layer].slice(-IMAGE_STUDIO_MAX_LAYERS),
+            layers,
             updatedAt: now,
           };
         });
       }
       const workspace: ImageStudioWorkspace = {
         ...previous,
-        assets: [...previous.assets, asset],
+        assets: [...previous.assets, ...assets],
         documents,
-        prompt: input.prompt,
+        prompt: input.workspacePrompt,
       };
-      this.commitWorkspace(workspace, workspace.assets);
-      workspaceSaved = true;
-      return this.getWorkspace();
+      const changes = await this.persistWorkspaceCanvases(workspace);
+      try {
+        input.signal.throwIfAborted();
+        const saved = this.commitWorkspace(workspace, workspace.assets);
+        workspaceSaved = true;
+        return saved;
+      } catch (error) {
+        await this.restoreCanvasFiles(changes, error);
+        throw error;
+      }
     } catch (error) {
       if (!workspaceSaved) {
         await Promise.all([
-          unlink(temporary).catch(() => undefined),
-          unlink(path).catch(() => undefined),
+          ...temporaryFiles.map((path) => unlink(path).catch(() => undefined)),
+          ...(error instanceof CanvasRecoveryError
+            ? []
+            : writtenFiles.map((path) => unlink(path).catch(() => undefined))),
         ]);
       }
+      if (error instanceof CanvasRecoveryError)
+        throw new Error(`${error.message}。本轮新素材已保留，可能需要人工恢复画布。`, {
+          cause: error,
+        });
       throw error;
     }
   }
@@ -966,6 +1799,7 @@ export class ImageStudioService {
       activeDocumentId,
       imageModel: optionalModelReference(record.imageModel),
       textModel: optionalModelReference(record.textModel),
+      generation: normalizeImageStudioGenerationSettings(record.generation),
       prompt: boundedString(record.prompt, MAX_PROMPT_CHARS),
       negativePrompt: boundedString(record.negativePrompt, 2_000),
       selectedAssetIds: [...new Set(selectedAssetIds)],

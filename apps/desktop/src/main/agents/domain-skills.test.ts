@@ -132,6 +132,71 @@ describe("built-in domain skill resources", () => {
     expect(output).toContain("Installation and lifecycle changes remain explicit user actions");
   });
 
+  it("accepts the skill-id markdown filename as an alias for the built-in entry", async () => {
+    const promptDirectory = resolve("resources/prompts");
+
+    for (const [skillId, heading] of [
+      ["plugin-creator", "# Create and Update Native Mingshen Plugins"],
+      ["harness-plugin-api", "# Mingshen Local Plugin Interface"],
+    ]) {
+      const output = await loadDomainSkill(
+        codeSession,
+        { name: `builtin:${skillId}`, resource: `${skillId}.md` },
+        promptDirectory,
+        extensions,
+      );
+
+      expect(output).toContain("Resource: SKILL.md");
+      expect(output).toContain(heading);
+    }
+  });
+
+  it("loads every documented plugin API resource by its exact path", async () => {
+    const promptDirectory = resolve("resources/prompts");
+    const resources = [
+      "references/interface-template.md",
+      "references/plugin-api.md",
+      "references/manifest.md",
+      "references/manifest-schema.md",
+      "references/hooks.md",
+      "references/local-plugin-development.md",
+    ];
+
+    for (const resource of resources) {
+      const output = await loadDomainSkill(
+        codeSession,
+        { name: "builtin:harness-plugin-api", resource },
+        promptDirectory,
+        extensions,
+      );
+      expect(output).toContain(`Resource: ${resource}`);
+      expect(output).toContain("Built-in skill: builtin:harness-plugin-api");
+      expect(output.length).toBeGreaterThan(100);
+    }
+
+    const creatorGuide = await loadDomainSkill(
+      codeSession,
+      { name: "builtin:plugin-creator", resource: "references/guide.md" },
+      promptDirectory,
+      extensions,
+    );
+    expect(creatorGuide).toContain("Resource: references/guide.md");
+    expect(creatorGuide).toContain("references/manifest.md");
+
+    const pluginDevelopment = await loadDomainSkill(
+      codeSession,
+      {
+        name: "builtin:plugin-creator",
+        resource: "references/local-plugin-development.md",
+      },
+      promptDirectory,
+      extensions,
+    );
+    expect(pluginDevelopment).toContain("Resource: references/local-plugin-development.md");
+    expect(pluginDevelopment).toContain("BeforeModelRequest");
+    expect(pluginDevelopment).toContain("Marketplace reconciliation");
+  });
+
   it("exposes every copied design entry through the on-demand resource loader", async () => {
     const promptDirectory = resolve("resources/prompts");
     const manifest = JSON.parse(
@@ -277,6 +342,16 @@ describe("built-in domain skill resources", () => {
         extensions,
       ),
     ).toContain("SAFE-GUIDE");
+    await expect(
+      loadDomainSkill(
+        codeSession,
+        { name: "builtin:code-debugging", resource: "references/manifest.md" },
+        promptDirectory,
+        extensions,
+      ),
+    ).rejects.toThrow(
+      /SKILL_RESOURCE_NOT_FOUND:.*Available references: .*references\/nested\/guide\.md/,
+    );
     expect(
       await loadDomainSkill(
         codeSession,
@@ -336,6 +411,16 @@ describe("built-in domain skill resources", () => {
       await symlink(outside, link, "dir");
 
       try {
+        await expect(
+          loadDomainSkill(
+            codeSession,
+            { name: "builtin:code-debugging", resource: "references/missing.md" },
+            promptDirectory,
+            extensions,
+          ),
+        ).rejects.toThrow(
+          /SKILL_RESOURCE_NOT_FOUND:.*Available references: .*references\/nested\/guide\.md(?!.*linked-outside\/secret\.md)/,
+        );
         await expect(
           loadDomainSkill(
             codeSession,

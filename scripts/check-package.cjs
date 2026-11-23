@@ -7,6 +7,8 @@ const { TENCENT_MEMORY_RESOURCES, checkTencentMemoryResources } = require('./ten
 const { validateWindowsIcon } = require('./windows-icon.cjs');
 const { checkElectronRuntime } = require('./provision-electron-runtime.cjs');
 const { validateNodePty } = require('./package-native-dependencies.cjs');
+const { checkDesktopSurfaceRuntime, checkDesktopSurfaceSources } = require('./package-desktop-surfaces.cjs');
+const { checkInstallerVisuals } = require('./installer-visuals.cjs');
 const desktop = path.resolve(__dirname, '../apps/desktop');
 const requireDesktop = createRequire(path.resolve(desktop, 'package.json'));
 const YAML = requireDesktop('yaml');
@@ -724,6 +726,8 @@ const required = [...new Set([
     'work-operations', 'artifact-quality', 'work-pdf', 'work-visual-design', 'work-visualization',
     'work-image-sourcing', 'work-ppt-master', 'work-asd-ste100',
     'skill-creator', 'plugin-creator', 'harness-plugin-api'].map(name => `prompts/skills/${name}.md`),
+  'prompts/skills/plugin-creator/references/local-plugin-development.md',
+  'prompts/skills/harness-plugin-api/references/interface-template.md',
   ...[
     'code-engineering/references/large-change-execution.md',
     'code-debugging/references/failure-forensics.md',
@@ -761,6 +765,8 @@ function isEmptyPackageResourceAllowed(item) {
 }
 
 function check(root) {
+  if (!root) checkDesktopSurfaceSources(desktop);
+  checkInstallerVisuals({ desktopDirectory: desktop });
   const version = require(path.join(desktop, 'package.json')).version;
   for (const item of required) {
     const file = root ? path.join(root, item) : sourcePath(item);
@@ -826,6 +832,12 @@ module.exports = async context => {
   for (const entry of ['out/main/index.js', 'out/preload/index.js', 'out/renderer/index.html', 'node_modules/browserdo-mcp/dist/index.js'])
     assert.ok(files.has(entry), `Missing packaged application file: ${entry}`);
   const unpacked = path.join(resources, 'app.asar.unpacked');
+  checkDesktopSurfaceRuntime({
+    readFile: packagedFileReader(archive, unpacked, files, asar),
+    files,
+    expectedCompanionAsset: path.join(desktop, 'src/renderer/companion-assets/atom-companion.png'),
+    expectedCompanionMotions: path.join(desktop, 'src/renderer/companion-assets/motions/manifest.json'),
+  });
   checkParsers(name => require.resolve(name, {paths:[unpacked]}), unpacked);
   checkDocumentRuntime(name => require.resolve(name, {paths:[unpacked]}), unpacked);
   checkTerminalRuntime(name => require.resolve(name, {paths:[unpacked]}), unpacked);
@@ -860,6 +872,7 @@ module.exports.checkPackagedAuthoringRuntime = checkPackagedAuthoringRuntime;
 module.exports.checkTerminalRuntime = checkTerminalRuntime;
 module.exports.checkImageRuntime = checkImageRuntime;
 module.exports.checkImageNotices = checkImageNotices;
+module.exports.checkInstallerVisuals = checkInstallerVisuals;
 module.exports.checkWorkSourceCatalog = checkWorkSourceCatalog;
 module.exports.checkImportedSkillSources = checkImportedSkillSources;
 module.exports.importedSkillTreeDescriptor = importedSkillTreeDescriptor;

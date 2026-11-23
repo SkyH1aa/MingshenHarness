@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  ListChecks,
   LoaderCircle,
   MessageCircle,
   MoreHorizontal,
@@ -17,10 +18,16 @@ import {
 } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatGroupView, SessionUpdateInput, SessionView } from "../../../shared/domain";
-import type { SessionPage } from "../../../shared/session-catalog";
 import { useLocale } from "../i18n";
 import { tr } from "../i18n/index";
 import { formatRelativeTime } from "../lib/format";
+import { loadChatSessionSnapshot } from "../lib/session-catalog-sync";
+import {
+  planSessionBatch,
+  runSessionBatch,
+  type SessionBatchAction,
+  type SessionBatchResult,
+} from "../lib/session-management";
 import { useDialog } from "./DialogProvider";
 import { RenameSessionDialog } from "./RenameSessionDialog";
 
@@ -32,9 +39,14 @@ interface ChatSidebarProps {
   onNewChat: (groupId: string | null) => void;
   creatingChatSession: boolean;
   chatSessionError: string;
+  catalogReady: boolean;
+  catalogError: string;
+  onRetryCatalog: () => void;
   onLoadSessions: (sessions: SessionView[]) => void;
   onPatch: (input: SessionUpdateInput) => Promise<SessionView>;
   onRemove: (sessionId: string) => Promise<void>;
+  onBatchChanged: (action: SessionBatchAction, result: SessionBatchResult) => Promise<void>;
+  onBatchBusyChange: (busy: boolean) => void;
   onCreateGroup: (name: string) => Promise<void>;
   onRenameGroup: (groupId: string, name: string) => Promise<void>;
   onRemoveGroup: (groupId: string) => Promise<void>;
@@ -43,24 +55,43 @@ interface ChatSidebarProps {
 function ChatRow({
   session,
   selected,
+  managing,
+  checked,
+  disabled,
   onSelect,
   onMenu,
+  onToggle,
 }: {
   session: SessionView;
   selected: boolean;
+  managing: boolean;
+  checked: boolean;
+  disabled: boolean;
   onSelect: (sessionId: string) => void;
   onMenu: (session: SessionView) => void;
+  onToggle: (sessionId: string) => void;
 }) {
   return (
     <div
-      className={`chat-session-row${selected ? " chat-session-row--selected" : ""}`}
+      className={`chat-session-row${selected ? " chat-session-row--selected" : ""}${managing ? " chat-session-row--managing" : ""}`}
       data-testid="chat-session-row"
       data-session-id={session.id}
     >
+      {managing ? (
+        <input
+          className="chat-sidebar__checkbox"
+          type="checkbox"
+          aria-label={tr("选择会话：{0}", [session.title])}
+          checked={checked}
+          disabled={disabled}
+          onChange={() => onToggle(session.id)}
+        />
+      ) : null}
       <button
         className="chat-session-row__main"
         type="button"
-        onClick={() => onSelect(session.id)}
+        disabled={disabled}
+        onClick={() => (managing ? onToggle(session.id) : onSelect(session.id))}
         title={session.title}
       >
         <MessageCircle size={14} aria-hidden="true" />
@@ -70,14 +101,17 @@ function ChatRow({
         </span>
         {session.pinned ? <Pin size={11} aria-label={tr("已置顶")} /> : null}
       </button>
-      <button
-        className="icon-button icon-button--small"
-        type="button"
-        aria-label={tr("对话操作")}
-        onClick={() => onMenu(session)}
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      {!managing ? (
+        <button
+          className="icon-button icon-button--small"
+          type="button"
+          aria-label={tr("对话操作")}
+          disabled={disabled}
+          onClick={() => onMenu(session)}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -90,9 +124,14 @@ export function ChatSidebar({
   onNewChat,
   creatingChatSession,
   chatSessionError,
+  catalogReady,
+  catalogError,
+  onRetryCatalog,
   onLoadSessions,
   onPatch,
   onRemove,
+  onBatchChanged,
+  onBatchBusyChange,
   onCreateGroup,
   onRenameGroup,
   onRemoveGroup,
@@ -112,6 +151,15 @@ export function ChatSidebar({
   const [archived, setArchived] = useState<SessionView[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [managing, setManaging] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [progress, setProgress] = useState("");
+  const [batchResult, setBatchResult] = useState<{
+    action: SessionBatchAction;
+    value: SessionBatchResult;
+  } | null>(null);
+  const batchPending = useRef(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const activeChats = useMemo(
@@ -130,6 +178,14 @@ export function ChatSidebar({
     [normalizedSearch, sessions],
   );
   const pinned = activeChats.filter((session) => session.pinned);
+  const matchingArchived = archived.filter(
+    (session) => !normalizedSearch || session.title.toLocaleLowerCase().includes(normalizedSearch),
+  );
+  const selectable = [...activeChats, ...(archivedOpen ? matchingArchived : [])].filter(
+    (session) => session.parentSessionId === null,
+  );
+  const picked = selectable.filter((session) => selected.has(session.id));
+  const allSelected = selectable.length > 0 && picked.length === selectable.length;
   const nameEditorOpen = Boolean(nameEditor);
   const grouped = new Map<string, SessionView[]>();
   for (const session of activeChats.filter((item) => !item.pinned)) {
@@ -143,30 +199,120 @@ export function ChatSidebar({
     nameInputRef.current?.select();
   }, [nameEditorOpen]);
 
+  useEffect(() => {
+    if (selectAllRef.current)
+      selectAllRef.current.indeterminate = picked.length > 0 && !allSelected;
+  }, [allSelected, picked.length]);
+
+  const resetSelection = () => {
+    setSelected(new Set());
+    setBatchResult(null);
+    setError("");
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const loadArchived = async () => {
+    setArchived([]);
+    try {
+      const rows = await loadChatSessionSnapshot(
+        (input) => window.mingshen.listSessionPage(input),
+        true,
+      );
+      setArchived(rows);
+      onLoadSessions(rows);
+    } catch (cause) {
+      setArchivedOpen(false);
+      throw cause;
+    }
+  };
+
   const refreshArchived = async (next = !archivedOpen) => {
+    if (busy || batchPending.current) return;
+    resetSelection();
     setArchivedOpen(next);
     if (!next) return;
     setBusy(true);
     setError("");
     try {
-      const rows: SessionView[] = [];
-      let cursor: string | null = null;
-      do {
-        const page: SessionPage = await window.mingshen.listSessionPage({
-          agentMode: "chat",
-          archived: true,
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        });
-        rows.push(...page.sessions);
-        cursor = page.nextCursor;
-      } while (cursor);
-      setArchived(rows);
-      onLoadSessions(rows);
+      await loadArchived();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const applyBatch = async (action: SessionBatchAction) => {
+    if (batchPending.current || busy || !catalogReady || !picked.length) return;
+    batchPending.current = true;
+    onBatchBusyChange(true);
+    setBusy(true);
+    setError("");
+    setBatchResult(null);
+    setProgress(tr("正在核对所选会话…"));
+    try {
+      const plan = await planSessionBatch(window.mingshen, picked, action);
+      if (
+        action !== "restore" &&
+        !(await confirm({
+          title: tr(action === "delete" ? "删除所选会话？" : "归档所选会话？"),
+          description:
+            action === "delete"
+              ? tr(
+                  "将永久删除 {0} 个对话及 {1} 个子会话的消息、草稿和附件，无法撤销。运行中的任务会先停止。",
+                  [plan.roots.length, plan.sessions.length - plan.roots.length],
+                )
+              : tr(
+                  "将归档 {0} 个对话及 {1} 个子会话并暂停关联的定时任务，草稿会保留。运行中的任务需先停止；恢复后定时任务不会自动开启。",
+                  [plan.roots.length, plan.sessions.length - plan.roots.length],
+                ),
+          confirmLabel: tr(action === "delete" ? "永久删除" : "归档"),
+          tone: action === "delete" ? "danger" : "default",
+        }))
+      )
+        return;
+      const value = await runSessionBatch(window.mingshen, plan, ({ completed, total }) =>
+        setProgress(tr("正在处理会话 {0} / {1}…", [completed, total])),
+      );
+      setBatchResult({ action, value });
+      setSelected(new Set(value.failures.map((failure) => failure.sessionId)));
+      const succeeded = new Set(value.succeeded);
+      const removed = new Set(value.removedIds);
+      setArchived((current) => {
+        const remaining = current.filter((session) => !removed.has(session.id));
+        if (action === "archive") {
+          const existing = new Set(remaining.map((session) => session.id));
+          return [
+            ...remaining,
+            ...plan.roots
+              .filter((session) => succeeded.has(session.id) && !existing.has(session.id))
+              .map((session) => ({ ...session, archived: true })),
+          ];
+        }
+        return action === "restore"
+          ? remaining.filter((session) => !succeeded.has(session.id))
+          : remaining;
+      });
+      try {
+        await onBatchChanged(action, value);
+      } finally {
+        if (archivedOpen) await loadArchived();
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setProgress("");
+      setBusy(false);
+      batchPending.current = false;
+      onBatchBusyChange(false);
     }
   };
 
@@ -287,22 +433,39 @@ export function ChatSidebar({
           <strong>{tr("对话")}</strong>
           <small>{activeChats.length ? tr("{0} 个会话", [activeChats.length]) : ""}</small>
         </div>
-        <button
-          className="icon-button chat-sidebar__new"
-          type="button"
-          aria-label={tr("新建对话")}
-          title={tr("新建对话")}
-          data-testid="new-chat"
-          disabled={creatingChatSession}
-          aria-busy={creatingChatSession}
-          onClick={() => newChat(null)}
-        >
-          {creatingChatSession ? (
-            <LoaderCircle className="spin" size={17} aria-hidden="true" />
-          ) : (
-            <Plus size={17} aria-hidden="true" />
-          )}
-        </button>
+        <div className="chat-sidebar__header-actions">
+          <button
+            className="icon-button chat-sidebar__manage"
+            type="button"
+            aria-label={tr(managing ? "退出批量管理" : "批量管理对话")}
+            title={tr(managing ? "退出批量管理" : "批量管理对话")}
+            data-testid="chat-batch-toggle"
+            aria-pressed={managing}
+            disabled={busy || (!catalogReady && !managing)}
+            onClick={() => {
+              setManaging((current) => !current);
+              resetSelection();
+            }}
+          >
+            <ListChecks size={17} aria-hidden="true" />
+          </button>
+          <button
+            className="icon-button chat-sidebar__new"
+            type="button"
+            aria-label={tr("新建对话")}
+            title={tr("新建对话")}
+            data-testid="new-chat"
+            disabled={creatingChatSession || managing || busy}
+            aria-busy={creatingChatSession}
+            onClick={() => newChat(null)}
+          >
+            {creatingChatSession ? (
+              <LoaderCircle className="spin" size={17} aria-hidden="true" />
+            ) : (
+              <Plus size={17} aria-hidden="true" />
+            )}
+          </button>
+        </div>
       </header>
       <div className="chat-sidebar__controls">
         <label className="chat-sidebar__search">
@@ -310,20 +473,138 @@ export function ChatSidebar({
           <input
             type="search"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            disabled={busy}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              resetSelection();
+            }}
             placeholder={tr("搜索对话")}
             aria-label={tr("搜索对话")}
           />
           {search ? (
-            <button type="button" aria-label={tr("清除搜索")} onClick={() => setSearch("")}>
+            <button
+              type="button"
+              aria-label={tr("清除搜索")}
+              disabled={busy}
+              onClick={() => {
+                setSearch("");
+                resetSelection();
+              }}
+            >
               <X size={13} />
             </button>
           ) : null}
         </label>
+        {managing ? (
+          <div className="chat-sidebar__batch" aria-busy={busy}>
+            <div className="chat-sidebar__batch-select">
+              <label>
+                <input
+                  ref={selectAllRef}
+                  className="chat-sidebar__checkbox"
+                  type="checkbox"
+                  data-testid="chat-batch-select-all"
+                  checked={allSelected}
+                  disabled={busy || !catalogReady || !selectable.length}
+                  onChange={(event) =>
+                    setSelected(
+                      new Set(event.target.checked ? selectable.map((session) => session.id) : []),
+                    )
+                  }
+                />
+                <span>{tr("全选匹配会话（{0}）", [selectable.length])}</span>
+              </label>
+              <span role="status">{tr("已选 {0}", [picked.length])}</span>
+            </div>
+            <div className="chat-sidebar__batch-actions">
+              <button
+                type="button"
+                className="btn btn--secondary"
+                data-session-action="archive"
+                title={tr("归档所选未归档会话")}
+                disabled={
+                  busy ||
+                  !catalogReady ||
+                  !picked.length ||
+                  picked.some((session) => session.archived)
+                }
+                onClick={() => void applyBatch("archive")}
+              >
+                <Archive size={13} aria-hidden="true" />
+                {tr("归档")}
+              </button>
+              <button
+                type="button"
+                className="btn btn--secondary"
+                data-session-action="restore"
+                title={tr("恢复所选已归档会话")}
+                disabled={
+                  busy ||
+                  !catalogReady ||
+                  !picked.length ||
+                  picked.some((session) => !session.archived)
+                }
+                onClick={() => void applyBatch("restore")}
+              >
+                <RotateCcw size={13} aria-hidden="true" />
+                {tr("恢复")}
+              </button>
+              <button
+                type="button"
+                className="btn btn--danger"
+                data-session-action="delete"
+                title={tr("删除所选会话")}
+                disabled={busy || !catalogReady || !picked.length}
+                onClick={() => void applyBatch("delete")}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+                {tr("删除")}
+              </button>
+            </div>
+            {progress ? <p role="status">{progress}</p> : null}
+            {batchResult ? (
+              <div className="chat-sidebar__batch-result" role="status">
+                <p>
+                  {tr(
+                    {
+                      archive: "已归档 {0} 个主会话。",
+                      restore: "已恢复 {0} 个主会话。",
+                      delete: "已删除 {0} 个主会话。",
+                    }[batchResult.action],
+                    [batchResult.value.succeeded.length],
+                  )}{" "}
+                  {batchResult.value.failures.length
+                    ? tr("有 {0} 个会话未完成，已保留勾选，可重试。", [
+                        batchResult.value.failures.length,
+                      ])
+                    : ""}
+                </p>
+                {batchResult.value.failures.length ? (
+                  <ul>
+                    {batchResult.value.failures.map((failure) => (
+                      <li key={failure.sessionId}>
+                        <strong>{failure.title}</strong>: {tr(failure.message)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {chatSessionError ? (
           <p className="chat-sidebar__error" role="alert">
             {chatSessionError}
           </p>
+        ) : null}
+        {catalogError ? (
+          <div className="chat-sidebar__error" role="alert">
+            <span>{catalogError}</span>{" "}
+            <button type="button" className="btn btn--secondary" onClick={onRetryCatalog}>
+              <RotateCcw size={13} aria-hidden="true" />
+              {tr("重试")}
+            </button>
+          </div>
         ) : null}
       </div>
       <div className="chat-sidebar__scroll">
@@ -331,6 +612,7 @@ export function ChatSidebar({
           className="chat-group-create"
           type="button"
           data-testid="chat-group-create"
+          disabled={busy || managing}
           onClick={() => setNameEditor({ kind: "create", value: "" })}
         >
           <FolderPlus size={14} aria-hidden="true" />
@@ -355,8 +637,12 @@ export function ChatSidebar({
                   <ChatRow
                     session={session}
                     selected={selectedSessionId === session.id}
+                    managing={managing}
+                    checked={selected.has(session.id)}
+                    disabled={busy || (managing && session.parentSessionId !== null)}
                     onSelect={onSelect}
                     onMenu={setMenuSession}
+                    onToggle={toggleSelection}
                     key={session.id}
                   />
                 ))
@@ -388,7 +674,7 @@ export function ChatSidebar({
                   aria-label={tr("在 {0} 中新建对话", [group.name])}
                   title={tr("在 {0} 中新建对话", [group.name])}
                   data-testid="chat-group-new"
-                  disabled={creatingChatSession}
+                  disabled={creatingChatSession || managing || busy}
                   aria-busy={creatingChatSession}
                   onClick={() => newChat(group.id)}
                 >
@@ -400,6 +686,7 @@ export function ChatSidebar({
                   aria-label={tr("重命名分组")}
                   title={tr("重命名分组")}
                   data-testid="chat-group-rename"
+                  disabled={busy || managing}
                   onClick={() =>
                     setNameEditor({ kind: "rename", groupId: group.id, value: group.name })
                   }
@@ -412,6 +699,7 @@ export function ChatSidebar({
                   aria-label={tr("删除分组")}
                   title={tr("删除分组")}
                   data-testid="chat-group-delete"
+                  disabled={busy || managing}
                   onClick={() => void groupMenu(group)}
                 >
                   <Trash2 size={12} />
@@ -422,8 +710,12 @@ export function ChatSidebar({
                     <ChatRow
                       session={session}
                       selected={selectedSessionId === session.id}
+                      managing={managing}
+                      checked={selected.has(session.id)}
+                      disabled={busy || (managing && session.parentSessionId !== null)}
                       onSelect={onSelect}
                       onMenu={setMenuSession}
+                      onToggle={toggleSelection}
                       key={session.id}
                     />
                   ))
@@ -451,7 +743,7 @@ export function ChatSidebar({
               aria-label={tr("在 {0} 中新建对话", [tr("未分组")])}
               title={tr("在 {0} 中新建对话", [tr("未分组")])}
               data-testid="chat-group-new"
-              disabled={creatingChatSession}
+              disabled={creatingChatSession || managing || busy}
               aria-busy={creatingChatSession}
               onClick={() => newChat(null)}
             >
@@ -463,8 +755,12 @@ export function ChatSidebar({
                 <ChatRow
                   session={session}
                   selected={selectedSessionId === session.id}
+                  managing={managing}
+                  checked={selected.has(session.id)}
+                  disabled={busy || (managing && session.parentSessionId !== null)}
                   onSelect={onSelect}
                   onMenu={setMenuSession}
+                  onToggle={toggleSelection}
                   key={session.id}
                 />
               ))
@@ -476,6 +772,7 @@ export function ChatSidebar({
           type="button"
           data-testid="chat-archive-toggle"
           aria-expanded={archivedOpen}
+          disabled={busy}
           onClick={() => void refreshArchived()}
         >
           <Archive size={14} aria-hidden="true" />
@@ -486,34 +783,50 @@ export function ChatSidebar({
           <div className="chat-sidebar__archive-list">
             {busy && !archived.length ? <p>{tr("正在加载…")}</p> : null}
             {!busy && !archived.length ? <p>{tr("暂无已归档对话")}</p> : null}
-            {archived.map((session) => (
+            {!busy && archived.length > 0 && !matchingArchived.length ? (
+              <p>{tr("没有匹配的会话。")}</p>
+            ) : null}
+            {matchingArchived.map((session) => (
               <div
-                className="chat-archived-row"
+                className={`chat-archived-row${managing ? " chat-archived-row--managing" : ""}`}
                 key={session.id}
                 data-testid="chat-archived-row"
                 data-session-id={session.id}
               >
+                {managing ? (
+                  <input
+                    className="chat-sidebar__checkbox"
+                    type="checkbox"
+                    checked={selected.has(session.id)}
+                    disabled={busy || session.parentSessionId !== null}
+                    aria-label={tr("选择会话：{0}", [session.title])}
+                    onChange={() => toggleSelection(session.id)}
+                  />
+                ) : null}
                 <div className="chat-archived-row__copy" title={session.title}>
                   <MessageCircle size={13} />
                   <span>{session.title}</span>
                 </div>
-                <button
-                  className="icon-button icon-button--small"
-                  type="button"
-                  aria-label={tr("恢复对话")}
-                  title={tr("恢复对话")}
-                  data-testid="chat-archived-restore"
-                  onClick={() => void patch({ sessionId: session.id, archived: false })}
-                >
-                  <RotateCcw size={13} />
-                </button>
+                {!managing ? (
+                  <button
+                    className="icon-button icon-button--small"
+                    type="button"
+                    aria-label={tr("恢复对话")}
+                    title={tr("恢复对话")}
+                    data-testid="chat-archived-restore"
+                    disabled={busy}
+                    onClick={() => void patch({ sessionId: session.id, archived: false })}
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
         ) : null}
         {error ? (
           <p className="chat-sidebar__error" role="alert">
-            {error}
+            {tr(error)}
           </p>
         ) : null}
       </div>

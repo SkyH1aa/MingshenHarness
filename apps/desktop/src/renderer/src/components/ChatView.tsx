@@ -162,6 +162,8 @@ interface ChatViewProps {
   approval: ApprovalRequest | null;
   question: QuestionRequest | null;
   creatingSession?: boolean;
+  managingSessions?: boolean;
+  interactionLocked?: boolean;
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onSend: (
@@ -361,6 +363,8 @@ export function ChatView({
   approval,
   question,
   creatingSession = false,
+  managingSessions = false,
+  interactionLocked = false,
   onNewSession,
   onSelectSession,
   onSend,
@@ -393,6 +397,25 @@ export function ChatView({
   const sessionId = session?.id ?? null;
   const selectedSessionIdRef = useRef(sessionId);
   selectedSessionIdRef.current = sessionId;
+  const interactionBlocked = managingSessions || interactionLocked;
+  const interactionBlockedRef = useRef(interactionBlocked);
+  interactionBlockedRef.current = interactionBlocked;
+  const preparationCounts = useRef(new Map<string, number>());
+  const updateModePreparation = useCallback(
+    (id: string, preparing: boolean) => {
+      const count = preparationCounts.current.get(id) ?? 0;
+      if (preparing) {
+        preparationCounts.current.set(id, count + 1);
+        if (count === 0) onModePreparationChange(id, true);
+      } else if (count > 0) {
+        if (count === 1) {
+          preparationCounts.current.delete(id);
+          onModePreparationChange(id, false);
+        } else preparationCounts.current.set(id, count - 1);
+      }
+    },
+    [onModePreparationChange],
+  );
   const chatMode = agentMode === "chat" || session?.agentMode === "chat";
   const chatNetworkEnabled = session?.chatNetworkEnabled !== false;
   const workStarters = orbit && !compact && !chatMode && agentMode === "work";
@@ -405,7 +428,7 @@ export function ChatView({
   const setDraft = useCallback(
     (next: SetStateAction<string>) => {
       previewFocusRequested.current = false;
-      if (!sessionId) return;
+      if (interactionBlockedRef.current || !sessionId) return;
       composerDrafts.update(sessionId, (current) => ({
         ...current,
         text: typeof next === "function" ? next(current.text) : next,
@@ -416,7 +439,7 @@ export function ChatView({
   );
   const setFormattedDraft = useCallback(
     (text: string | null) => {
-      if (!sessionId) return;
+      if (interactionBlockedRef.current || !sessionId) return;
       composerDrafts.update(sessionId, (current) =>
         current.formatted === (text !== null && text === current.text)
           ? current
@@ -427,7 +450,7 @@ export function ChatView({
   );
   const setAttachments = useCallback(
     (next: SetStateAction<DraftAttachment[]>) => {
-      if (!sessionId) return;
+      if (interactionBlockedRef.current || !sessionId) return;
       composerDrafts.update(sessionId, (current) => ({
         ...current,
         attachments: typeof next === "function" ? next(current.attachments) : next,
@@ -456,6 +479,8 @@ export function ChatView({
   const [sending, setSending] = useState(false);
   const [queueing, setQueueing] = useState(false);
   const [steering, setSteering] = useState(false);
+  const [recoveringDraft, setRecoveringDraft] = useState(false);
+  const draftRecoveryRef = useRef(false);
   const composerActionRef = useRef(false);
   const [temporaryInstruction, setTemporaryInstruction] = useState("");
   const temporaryInstructionRef = useRef("");
@@ -479,7 +504,7 @@ export function ChatView({
   const [renameOpen, setRenameOpen] = useState(false);
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const choices =
-    chatMode || formatted || slashDismissed === draft
+    interactionBlocked || chatMode || formatted || slashDismissed === draft
       ? null
       : slashItems(draft, commands, extensions);
   const scrollRef = useRef<HTMLElement>(null);
@@ -494,6 +519,12 @@ export function ChatView({
   useEffect(() => {
     updateTemporaryInstruction("");
   }, [sessionId]);
+  useEffect(() => {
+    if (!interactionBlocked) return;
+    setEditMenu(null);
+    setRenameOpen(false);
+    setDragActive(false);
+  }, [interactionBlocked]);
   useLayoutEffect(() => {
     if (!draftState.ready) return;
     const field = textareaRef.current;
@@ -558,7 +589,7 @@ export function ChatView({
       onReplaceQueuedPromptAttachments &&
       onResumeQueuedPrompt,
   );
-  const mentionMatch = chatMode ? null : /(?:^|\s)@([^\s]*)$/.exec(draft);
+  const mentionMatch = interactionBlocked || chatMode ? null : /(?:^|\s)@([^\s]*)$/.exec(draft);
   const mentionQuery = formatted ? null : (mentionMatch?.[1]?.toLocaleLowerCase("zh-CN") ?? null);
   const commandPosition = useFloatingPanel(Boolean(choices), textareaRef, slashMenuRef, {
     maxHeight: 360,
@@ -760,7 +791,12 @@ export function ChatView({
     });
   }, [session?.id]);
   useEffect(() => {
-    if (!draftState.ready || notificationDraft?.sessionId !== sessionId || !notificationDraft)
+    if (
+      interactionBlocked ||
+      !draftState.ready ||
+      notificationDraft?.sessionId !== sessionId ||
+      !notificationDraft
+    )
       return;
     if (restoredNotificationDraftRef.current === notificationDraft.id) return;
     restoredNotificationDraftRef.current = notificationDraft.id;
@@ -784,7 +820,7 @@ export function ChatView({
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
     setError(notificationDraft.error);
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [notificationDraft, sessionId, draftState.ready]);
+  }, [interactionBlocked, notificationDraft, sessionId, draftState.ready]);
   useEffect(
     () =>
       window.mingshen.onDesktopEvent((event) => {
@@ -850,7 +886,12 @@ export function ChatView({
 
   const addFiles = useCallback(
     (files: File[]) => {
-      if (!sessionId || !composerDrafts.state(sessionId).ready || files.length === 0) {
+      if (
+        interactionBlockedRef.current ||
+        !sessionId ||
+        !composerDrafts.state(sessionId).ready ||
+        files.length === 0
+      ) {
         return;
       }
       if (chatMode) {
@@ -869,6 +910,7 @@ export function ChatView({
       void composerDrafts
         .load(sessionId)
         .then(() => {
+          if (interactionBlockedRef.current) return;
           const current = composerDrafts.state(sessionId).value.attachments;
           const keys = new Set(current.map((item) => `${item.file.name}:${item.file.size}`));
           const additions = files.filter((file) => {
@@ -912,6 +954,7 @@ export function ChatView({
         return;
       }
       event.preventDefault();
+      if (interactionBlockedRef.current) return;
       dragDepth += 1;
       setDragActive(true);
     };
@@ -921,7 +964,7 @@ export function ChatView({
       }
       event.preventDefault();
       if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = "copy";
+        event.dataTransfer.dropEffect = interactionBlockedRef.current ? "none" : "copy";
       }
     };
     const onDragLeave = (event: DragEvent) => {
@@ -987,7 +1030,7 @@ export function ChatView({
             className="btn btn--primary"
             type="button"
             onClick={onNewSession}
-            disabled={creatingSession}
+            disabled={creatingSession || interactionBlocked}
             aria-busy={creatingSession}
           >
             {creatingSession ? (
@@ -1003,7 +1046,7 @@ export function ChatView({
   }
 
   const send = async () => {
-    if (!draftState.ready) return;
+    if (interactionBlockedRef.current || !draftState.ready) return;
     if (draftState.error) {
       setError(tr("请先处理草稿同步错误。"));
       return;
@@ -1051,7 +1094,7 @@ export function ChatView({
     setSending(true);
     setSendingStartedAt(Date.now());
     setError(null);
-    onModePreparationChange(session.id, true);
+    updateModePreparation(session.id, true);
     let submittedToRun = false;
     try {
       await composerDrafts.flush(session.id);
@@ -1088,7 +1131,7 @@ export function ChatView({
           : runtimeText(cause instanceof Error ? cause.message : String(cause)),
       );
     } finally {
-      onModePreparationChange(session.id, false);
+      updateModePreparation(session.id, false);
       composerActionRef.current = false;
       setSending(false);
       setSendingStartedAt(null);
@@ -1097,6 +1140,7 @@ export function ChatView({
 
   const queueCurrentDraft = async () => {
     if (
+      interactionBlockedRef.current ||
       !onAddQueuedPrompt ||
       session.parentSessionId ||
       !draftState.ready ||
@@ -1138,6 +1182,7 @@ export function ChatView({
     composerActionRef.current = true;
     setQueueing(true);
     setError(null);
+    updateModePreparation(session.id, true);
     let submittedToQueue = false;
     try {
       await composerDrafts.flush(session.id);
@@ -1172,13 +1217,22 @@ export function ChatView({
           : runtimeText(cause instanceof Error ? cause.message : String(cause)),
       );
     } finally {
+      updateModePreparation(session.id, false);
       composerActionRef.current = false;
       setQueueing(false);
     }
   };
 
   const steerCurrentDraft = async () => {
-    if (composerActionRef.current || steering || sending || queueing || !draftState.ready) return;
+    if (
+      interactionBlockedRef.current ||
+      composerActionRef.current ||
+      steering ||
+      sending ||
+      queueing ||
+      !draftState.ready
+    )
+      return;
     if (draftState.error) {
       setError(tr("请先处理草稿同步错误。"));
       return;
@@ -1212,6 +1266,7 @@ export function ChatView({
     composerActionRef.current = true;
     setSteering(true);
     setError(null);
+    updateModePreparation(session.id, true);
     let submittedToRun = false;
     try {
       await composerDrafts.flush(session.id);
@@ -1236,6 +1291,7 @@ export function ChatView({
             : runtimeText(cause instanceof Error ? cause.message : String(cause)),
         );
     } finally {
+      updateModePreparation(session.id, false);
       composerActionRef.current = false;
       setSteering(false);
     }
@@ -1246,12 +1302,32 @@ export function ChatView({
     originalRevision: string;
     polishedText: string;
   }) => {
-    if (!sessionId) return;
+    if (interactionBlockedRef.current || !sessionId) return;
     composerDrafts.update(sessionId, (current) =>
       current.revision === input.originalRevision && current.text === input.originalText
         ? { ...current, text: input.polishedText, formatted: false }
         : current,
     );
+  };
+
+  const recoverDraft = async (resolution?: "overwrite" | "reload") => {
+    if (interactionBlockedRef.current || draftRecoveryRef.current) return;
+    draftRecoveryRef.current = true;
+    setRecoveringDraft(true);
+    updateModePreparation(session.id, true);
+    try {
+      if (resolution) await composerDrafts.resolveConflict(session.id, resolution);
+      else {
+        await composerDrafts.flush(session.id);
+        if (selectedSessionIdRef.current === session.id) setError(null);
+      }
+    } catch {
+      // The draft store retains the recovery error for the existing UI.
+    } finally {
+      updateModePreparation(session.id, false);
+      draftRecoveryRef.current = false;
+      setRecoveringDraft(false);
+    }
   };
 
   const replaceQueuedAttachments = async (itemId: string, text: string, files: File[]) => {
@@ -1289,7 +1365,7 @@ export function ChatView({
   };
 
   const executeBuiltin = async (command: BuiltinCommand, argument = "") => {
-    if (!draftState.ready) return;
+    if (interactionBlockedRef.current || !draftState.ready) return;
     const submittedRevision = composerDrafts.state(session.id).value.revision;
     setSlashIndex(0);
     if (sending) return;
@@ -1379,6 +1455,7 @@ export function ChatView({
   };
 
   const selectSlashItem = async (item: SlashItem) => {
+    if (interactionBlockedRef.current) return;
     setSlashIndex(0);
     if (item.kind === "builtin" && item.command) {
       await executeBuiltin(item.command);
@@ -1491,6 +1568,7 @@ export function ChatView({
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (interactionBlockedRef.current) return;
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if (running && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -1527,11 +1605,12 @@ export function ChatView({
   };
 
   const editDraft = () => {
+    if (interactionBlockedRef.current) return;
     flushSync(() => setFormattedDraft(null));
     textareaRef.current?.focus({ preventScroll: true });
   };
   const onPreviewKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (sending) return;
+    if (interactionBlockedRef.current || sending) return;
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if ((event.ctrlKey || event.metaKey) && ["a", "x"].includes(event.key.toLowerCase())) {
       event.preventDefault();
@@ -1684,6 +1763,7 @@ export function ChatView({
             : tr("\u5C31\u7EEA");
 
   const applyStarterPrompt = (text: string) => {
+    if (interactionBlockedRef.current || !draftState.ready) return;
     setDraft((current) => (current ? `${current}\n\n${text}` : text));
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
@@ -1826,7 +1906,8 @@ export function ChatView({
                 </p>
                 <fieldset
                   className="conversation-empty__starters"
-                  disabled={!draftState.ready}
+                  data-testid="chat-empty-starters"
+                  disabled={interactionBlocked || !draftState.ready}
                   aria-label={tr("\u5E38\u7528\u8D77\u59CB\u4EFB\u52A1")}
                 >
                   <button
@@ -1928,7 +2009,18 @@ export function ChatView({
                   activeToolDetails={activeToolDetails}
                   onOpenWorkspace={onOpenWorkspace}
                   onRewriteMessage={onRewriteMessage}
-                  rewriteDisabled={running}
+                  onRewritePreparationChange={(preparing) =>
+                    updateModePreparation(session.id, preparing)
+                  }
+                  rewriteDisabled={
+                    running ||
+                    sending ||
+                    queueing ||
+                    steering ||
+                    recoveringDraft ||
+                    interactionBlocked
+                  }
+                  editingLocked={interactionBlocked}
                   workspacePath={session.workspacePath}
                   onOpenError={setError}
                   onOpenFile={onOpenFile}
@@ -2097,6 +2189,37 @@ export function ChatView({
       </div>
 
       <div className="composer-wrap" ref={composerWrapRef}>
+        {managingSessions ? (
+          <p
+            className="composer-management-status"
+            data-testid="chat-batch-composer-status"
+            role="status"
+          >
+            {tr("正在批量管理会话，输入暂时锁定，草稿会保留。")}
+            {running || sending ? (
+              <button
+                className="btn btn--secondary"
+                type="button"
+                data-testid="chat-batch-stop"
+                onClick={() => void onStop()}
+              >
+                <Square aria-hidden="true" size={13} />
+                {tr("停止当前任务")}
+              </button>
+            ) : null}
+          </p>
+        ) : null}
+        {!managingSessions && interactionLocked ? (
+          <p className="composer-management-status" role="status">
+            {tr("正在切换对话，草稿会保留。")}
+            {running || sending ? (
+              <button className="btn btn--secondary" type="button" onClick={() => void onStop()}>
+                <Square aria-hidden="true" size={13} />
+                {tr("停止当前任务")}
+              </button>
+            ) : null}
+          </p>
+        ) : null}
         {waitingForRequest || (approval && approval.id === dismissedApprovalId) ? (
           <div className="approval-submission" role="status">
             <LoaderCircle size={15} className="spin" aria-hidden="true" />
@@ -2253,6 +2376,9 @@ export function ChatView({
         <div
           className={`composer${orbit ? " composer--orbit" : ""}`}
           data-testid="chat-composer"
+          data-management-locked={managingSessions ? "true" : "false"}
+          data-interaction-locked={interactionBlocked ? "true" : "false"}
+          inert={interactionBlocked}
           data-busy={running || sending ? "true" : "false"}
         >
           <div className={`composer__context${orbit ? " orbit-composer-top" : ""}`}>
@@ -2269,7 +2395,7 @@ export function ChatView({
                   : null
               }
               onChange={(selection, model) => void changeModel(selection, model)}
-              disabled={running}
+              disabled={running || interactionBlocked}
             />
             {chatMode ? (
               <fieldset className="chat-network-control">
@@ -2279,7 +2405,7 @@ export function ChatView({
                   data-testid="chat-network-allow"
                   data-network-action="allow"
                   aria-pressed={chatNetworkEnabled}
-                  disabled={running || sending}
+                  disabled={running || sending || interactionBlocked}
                   onClick={() =>
                     void onPatch({ sessionId: session.id, chatNetworkEnabled: true }).catch(
                       (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
@@ -2294,7 +2420,7 @@ export function ChatView({
                   data-testid="chat-network-deny"
                   data-network-action="deny"
                   aria-pressed={!chatNetworkEnabled}
-                  disabled={running || sending}
+                  disabled={running || sending || interactionBlocked}
                   onClick={() =>
                     void onPatch({ sessionId: session.id, chatNetworkEnabled: false }).catch(
                       (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
@@ -2465,19 +2591,19 @@ export function ChatView({
                 y: event.clientY || bounds.top + 12,
               });
             }}
-            disabled={sending || !draftState.ready}
+            disabled={interactionBlocked || sending || !draftState.ready}
           />
           {formatted ? (
             <section
               ref={previewRef}
               className="composer-preview"
               aria-label={tr("消息格式预览")}
-              aria-disabled={sending}
+              aria-disabled={interactionBlocked || sending}
               // biome-ignore lint/a11y/noNoninteractiveTabindex: The scrollable draft accepts send, edit and native undo shortcuts.
               tabIndex={0}
               onKeyDown={onPreviewKeyDown}
               onPaste={(event) => {
-                if (sending) return;
+                if (interactionBlockedRef.current || sending) return;
                 const images = clipboardImages(event.clipboardData);
                 if (images.length) {
                   event.preventDefault();
@@ -2516,7 +2642,7 @@ export function ChatView({
               {tr("运行中补充仅支持纯文本，请先移除附件和临时指令。")}
             </p>
           ) : null}
-          {editMenu ? (
+          {editMenu && !interactionBlocked ? (
             <ComposerEditMenu
               position={editMenu}
               textarea={textareaRef}
@@ -2717,9 +2843,11 @@ export function ChatView({
                   draftText={draft}
                   draftRevision={draftState.value.revision}
                   formatted={formatted}
-                  disabled={sending || !draftState.ready}
+                  disabled={interactionBlocked || sending || !draftState.ready}
                   temporaryInstruction={temporaryInstruction}
-                  onTemporaryInstructionChange={updateTemporaryInstruction}
+                  onTemporaryInstructionChange={(value) => {
+                    if (!interactionBlockedRef.current) updateTemporaryInstruction(value);
+                  }}
                   onApplyPolished={applyPolishedDraft}
                 />
               ) : null}
@@ -2727,7 +2855,7 @@ export function ChatView({
                 builtinCapabilities={builtinCapabilities}
                 extensions={extensions}
                 selectedIds={selectedExtensionIds}
-                disabled={sending || running}
+                disabled={interactionBlocked || sending || running}
                 attachmentsOnly={chatMode}
                 onToggle={onToggleExtension}
                 onToggleBuiltin={onToggleBuiltinCapability}
@@ -2776,6 +2904,7 @@ export function ChatView({
                   running={running || sending}
                   canCompact={messages.length >= 2}
                   openRequest={contextOpenRequest}
+                  disabled={interactionBlocked}
                   onSettings={() => onOpenSettings("context")}
                   onCompact={() => void executeBuiltin("compact")}
                 />
@@ -2906,22 +3035,16 @@ export function ChatView({
                 <button
                   className="btn btn--secondary"
                   type="button"
-                  disabled={draftState.saving}
-                  onClick={() =>
-                    void composerDrafts
-                      .resolveConflict(session.id, "overwrite")
-                      .catch(() => undefined)
-                  }
+                  disabled={interactionBlocked || draftState.saving || recoveringDraft}
+                  onClick={() => void recoverDraft("overwrite")}
                 >
                   {tr("用本地内容覆盖")}
                 </button>
                 <button
                   className="btn btn--secondary"
                   type="button"
-                  disabled={draftState.saving}
-                  onClick={() =>
-                    void composerDrafts.resolveConflict(session.id, "reload").catch(() => undefined)
-                  }
+                  disabled={interactionBlocked || draftState.saving || recoveringDraft}
+                  onClick={() => void recoverDraft("reload")}
                 >
                   <RotateCcw size={14} aria-hidden="true" />
                   {tr("载入最新草稿")}
@@ -2931,14 +3054,8 @@ export function ChatView({
               <button
                 className="btn btn--secondary"
                 type="button"
-                onClick={() =>
-                  void composerDrafts
-                    .flush(session.id)
-                    .then(() => {
-                      if (selectedSessionIdRef.current === session.id) setError(null);
-                    })
-                    .catch(() => undefined)
-                }
+                disabled={interactionBlocked || recoveringDraft}
+                onClick={() => void recoverDraft()}
               >
                 <RotateCcw size={14} aria-hidden="true" />
                 {tr("重试")}
@@ -3425,7 +3542,9 @@ const MessageRow = memo(function MessageRow({
   activeToolDetails,
   onOpenWorkspace,
   onRewriteMessage,
+  onRewritePreparationChange,
   rewriteDisabled,
+  editingLocked,
   workspacePath,
   onOpenError,
   onOpenFile,
@@ -3440,7 +3559,9 @@ const MessageRow = memo(function MessageRow({
   activeToolDetails: ReadonlySet<NonNullable<ReturnType<typeof toolDetailsForMessage>>>;
   onOpenWorkspace: () => void;
   onRewriteMessage: (messageId: string, text: string) => Promise<void>;
+  onRewritePreparationChange: (preparing: boolean) => void;
   rewriteDisabled: boolean;
+  editingLocked: boolean;
   workspacePath: string | null;
   onOpenError: (message: string) => void;
   onOpenFile: (path: string) => void;
@@ -3486,6 +3607,10 @@ const MessageRow = memo(function MessageRow({
   const [copied, setCopied] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const rewriteDisabledRef = useRef(rewriteDisabled);
+  rewriteDisabledRef.current = rewriteDisabled;
+  const editingLockedRef = useRef(editingLocked);
+  editingLockedRef.current = editingLocked;
 
   useEffect(() => {
     setEditDraft(text);
@@ -3514,12 +3639,14 @@ const MessageRow = memo(function MessageRow({
       }
       setActionBusy(true);
       setActionError(null);
+      onRewritePreparationChange(true);
       try {
         await onRewriteMessage(message.id, editDraft);
-        setEditing(false);
+        flushSync(() => setEditing(false));
       } catch (cause) {
         setActionError(cause instanceof Error ? cause.message : String(cause));
       } finally {
+        onRewritePreparationChange(false);
         setActionBusy(false);
       }
     };
@@ -3535,7 +3662,7 @@ const MessageRow = memo(function MessageRow({
         confirmLabel: tr("\u8986\u76D6\u5E76\u91CD\u8BD5"),
         tone: "danger",
       });
-      if (!confirmed) {
+      if (!confirmed || rewriteDisabledRef.current) {
         return;
       }
       setActionBusy(true);
@@ -3576,7 +3703,10 @@ const MessageRow = memo(function MessageRow({
             <textarea
               ref={editRef}
               value={editDraft}
-              onChange={(event) => setEditDraft(event.target.value)}
+              disabled={editingLocked}
+              onChange={(event) => {
+                if (!editingLockedRef.current) setEditDraft(event.target.value);
+              }}
               rows={4}
               aria-label={tr("\u4FEE\u6539\u6D88\u606F")}
             />
@@ -3595,7 +3725,7 @@ const MessageRow = memo(function MessageRow({
                   setEditing(false);
                   setActionError(null);
                 }}
-                disabled={actionBusy}
+                disabled={actionBusy || editingLocked}
               >
                 {tr("\u53D6\u6D88")}
               </button>

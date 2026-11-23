@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeModelRetrySettings } from "../../shared/model-retry";
 import {
+  ModelInputBudgetError,
   ModelRequestError,
   retryAfterMs,
   retryDelayMs,
   upstreamError,
 } from "./model-request-error";
-import { type ModelStreamEvent, type StreamTurnInput, streamModelTurn } from "./model-stream";
+import {
+  estimateModelInputTokens,
+  type ModelStreamEvent,
+  type StreamTurnInput,
+  streamModelTurn,
+} from "./model-stream";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -129,6 +135,84 @@ describe("automatic model request retries", () => {
       expect(value.retry?.onRetry).toHaveBeenCalledTimes(count);
     },
   );
+  it("refreshes BeforeModelRequest before retries and refuses to send one without its context", async () => {
+    const value = input();
+    value.retry.maxRetries = 1;
+    const requestBodies: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBodies.push(String(init?.body ?? ""));
+      if (requestBodies.length === 1)
+        return new Response("temporary upstream", {
+          status: 503,
+          headers: { "retry-after-ms": "0" },
+        });
+      return sse(
+        { type: "response.output_text.delta", delta: "Recovered" },
+        { type: "response.completed" },
+      );
+    });
+    const beforeEachRequest = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce("plugin marker: attempt one")
+      .mockRejectedValueOnce(new Error("fixture hook failure"));
+    value.beforeEachRequest = beforeEachRequest;
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(collect(value)).rejects.toThrow(
+      "BeforeModelRequest failed; the next model request was not sent.",
+    );
+    expect(beforeEachRequest).toHaveBeenCalledTimes(2);
+    expect(requestBodies).toHaveLength(1);
+    expect(JSON.parse(requestBodies[0] ?? "{}").instructions).toContain(
+      "plugin marker: attempt one",
+    );
+  });
+  it("clamps output using the fully injected prompt and snapshots its stable base", async () => {
+    const value = input();
+    const context = `PLUGIN_NEAR_WINDOW ${"x".repeat(2400)}`;
+    const effectivePrompt = `${value.systemPrompt}\n\n${context}`;
+    const estimate = estimateModelInputTokens({ ...value, systemPrompt: effectivePrompt });
+    value.model.contextWindow = estimate + 256 + 37;
+    value.maxOutputTokens = 100;
+    value.firstRequestContext = context;
+    value.baseSystemPrompt = "Test";
+    const prepared = vi.fn();
+    value.onRequestPrepared = prepared;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      sse(
+        { type: "response.output_text.delta", delta: "Budgeted" },
+        { type: "response.completed" },
+      ),
+    );
+    vi.stubGlobal("fetch", fetcher);
+
+    await collect(value);
+
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.max_output_tokens).toBe(37);
+    expect(prepared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: effectivePrompt,
+        baseSystemPrompt: "Test",
+      }),
+    );
+  });
+  it("rejects an injected prompt over the context window before fetch", async () => {
+    const value = input();
+    value.firstRequestContext = "OVERSIZED_PLUGIN_CONTEXT";
+    value.model.contextWindow =
+      estimateModelInputTokens({
+        ...value,
+        systemPrompt: `${value.systemPrompt}\n\n${value.firstRequestContext}`,
+      }) - 1;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      throw new Error("Unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(collect(value)).rejects.toBeInstanceOf(ModelInputBudgetError);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it.each(["openai_responses", "openai_chat_completions", "anthropic_messages"] as const)(
     "renews the allowance and backoff for each recovered disconnection in one %s turn",
     async (protocol) => {

@@ -13,6 +13,11 @@ export class DesktopController {
   private closePending = false;
   private policyOpenedAt: number | null = null;
   private manualOpened = false;
+  private readonly onBeforeQuit = () => {
+    this.quitting = true;
+    this.tray?.destroy();
+    this.tray = null;
+  };
   constructor(
     private readonly repository: Repository,
     private readonly window: BrowserWindow,
@@ -55,11 +60,12 @@ export class DesktopController {
       });
     window.on("maximize", windowState);
     window.on("unmaximize", windowState);
-    app.on("before-quit", () => {
-      this.quitting = true;
-      this.tray?.destroy();
-      this.tray = null;
-    });
+    app.on("before-quit", this.onBeforeQuit);
+  }
+  dispose(): void {
+    this.tray?.destroy();
+    this.tray = null;
+    app.removeListener("before-quit", this.onBeforeQuit);
   }
   show(): void {
     if (this.window.isMinimized()) this.window.restore();
@@ -127,7 +133,11 @@ export class DesktopController {
       maximized: this.window.isMaximized(),
     };
   }
-  async policy(document: PolicyDocument, locale?: "en" | "zh-CN"): Promise<string> {
+  async policy(
+    document: PolicyDocument,
+    locale?: "en" | "zh-CN",
+    isCurrent: () => boolean = () => true,
+  ): Promise<string> {
     const files = {
       terms: "TERMS_OF_SERVICE.md",
       privacy: "PRIVACY_POLICY.md",
@@ -141,6 +151,7 @@ export class DesktopController {
         ? files[document].replace(".md", ".en.md")
         : files[document];
     const content = await readFile(join(this.documentsRoot, filename), "utf8");
+    if (!isCurrent()) throw new Error("The main window is no longer available.");
     if (document === "manual" && this.state().accepted) this.manualOpened = true;
     if (["terms", "privacy", "disclaimer"].includes(document) && this.policyOpenedAt === null)
       this.policyOpenedAt = Date.now();
