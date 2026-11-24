@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as portServer } from "node:net";
@@ -10,6 +11,7 @@ import { experimentalExecutable } from "./experimental-executable.mjs";
 
 const require = createRequire(resolve("apps/desktop/package.json"));
 const { createCanvas } = require("@napi-rs/canvas");
+const { unzipSync } = require("fflate");
 const temporary = await mkdtemp(join(tmpdir(), "mingshen-creative-image-"));
 const project = join(temporary, "project-a");
 const otherProject = join(temporary, "project-b");
@@ -20,6 +22,8 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 let child, main, renderer, session, secondSession, provider, textModel, imageModel;
 let holdPolish = false;
 const heldPolish = [];
+let holdImage = false;
+const heldImages = [];
 
 function fixturePng(background, accent) {
   const canvas = createCanvas(128, 96);
@@ -35,24 +39,140 @@ function fixturePng(background, accent) {
 
 const generatedPng = fixturePng("#005a55", "#ef6556");
 const importedPng = fixturePng("#ca5e1f", "#2578a5");
+const referencePngs = [
+  importedPng,
+  fixturePng("#6d3c9a", "#f1c453"),
+  fixturePng("#235c8f", "#79d6b5"),
+  fixturePng("#7a283e", "#f4a261"),
+];
+const manualReferencePng = fixturePng("#3f6f32", "#d8e26d");
+const referenceFileNames = [
+  "reference-a.png",
+  "reference-b.png",
+  "reference-c.png",
+  "reference-d.png",
+];
 const polishedText = "Polished fixture: a copper vessel on a clear teal stage, soft side lighting.";
 const reverseText = "Reverse fixture: geometric color blocks with a bright rectangular accent.";
+const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+function pngDimensions(bytes) {
+  assert.ok(
+    bytes.length >= 24 &&
+      bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
+    "Expected a validated PNG entry",
+  );
+  assert.equal(bytes.subarray(12, 16).toString("ascii"), "IHDR");
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
 
 const server = createServer(async (request, response) => {
   try {
     const chunks = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
     assert.equal(request.method, "POST");
+    const raw = Buffer.concat(chunks);
+    if (request.url === "/v1/images/edits") {
+      const contentType = String(request.headers["content-type"] ?? "");
+      assert.match(contentType, /^multipart\/form-data; boundary=/);
+      const form = await new Response(raw, { headers: { "content-type": contentType } }).formData();
+      const fields = Object.fromEntries(
+        [...form.entries()]
+          .filter(([, value]) => typeof value === "string")
+          .map(([key, value]) => [key, String(value)]),
+      );
+      const uploaded = [];
+      for (const [field, value] of form.entries()) {
+        if (field !== "image" && field !== "image[]") continue;
+        assert.notEqual(typeof value, "string", "Reference upload must be a file");
+        const bytes = Buffer.from(await value.arrayBuffer());
+        uploaded.push({
+          field,
+          name: value.name,
+          type: value.type,
+          size: bytes.length,
+          sha256: digest(bytes),
+        });
+      }
+      const record = {
+        url: request.url,
+        kind: "reference-image",
+        model: fields.model,
+        hasImage: uploaded.length > 0,
+        toolCount: 0,
+        settled: false,
+        fields,
+        files: uploaded,
+        clientClosed: false,
+      };
+      response.once("close", () => {
+        if (!response.writableEnded) record.clientClosed = true;
+      });
+      requests.push(record);
+      assert.ok(uploaded.length >= 1 && uploaded.length <= 3, JSON.stringify(uploaded));
+      assert.deepEqual(
+        uploaded.map((file) => file.field),
+        uploaded.length === 1 ? ["image"] : uploaded.map(() => "image[]"),
+        "A single reference uses image; multiple references use repeated image[] fields",
+      );
+      assert.equal(fields.model, "studio-image");
+      assert.match(fields.prompt, /Polished fixture/);
+      assert.equal(fields.n, "1");
+      assert.equal(fields.size, "1024x1024");
+      assert.equal(fields.quality, "auto");
+      assert.ok(
+        !Object.hasOwn(fields, "response_format"),
+        "The image edit API omits legacy response_format",
+      );
+      if (holdImage) await new Promise((done) => heldImages.push(done));
+      if (response.destroyed) {
+        record.settled = true;
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          data: [
+            {
+              b64_json: generatedPng.toString("base64"),
+              revised_prompt: "Generated reference fixture",
+            },
+          ],
+        }),
+      );
+      record.settled = true;
+      return;
+    }
+    const body = JSON.parse(raw.toString("utf8") || "{}");
     assert.deepEqual(body.tools ?? [], [], "Studio requests must not expose tools");
     const hasImage = JSON.stringify(body.input ?? []).includes("input_image");
     const kind = request.url === "/v1/images/generations" ? "image" : hasImage ? "reverse" : "polish";
-    const record = { url: request.url, kind, model: body.model, hasImage, toolCount: (body.tools ?? []).length, settled: false };
+    const record = {
+      url: request.url,
+      kind,
+      model: body.model,
+      hasImage,
+      toolCount: (body.tools ?? []).length,
+      settled: false,
+      files: [],
+      fields:
+        kind === "image"
+          ? { n: body.n, size: body.size, quality: body.quality }
+          : undefined,
+      clientClosed: false,
+    };
+    response.once("close", () => {
+      if (!response.writableEnded) record.clientClosed = true;
+    });
     requests.push(record);
     if (kind === "image") {
       assert.equal(body.n, 1);
       assert.ok(!Object.hasOwn(body, "response_format"), "The current image API omits legacy response_format");
       assert.match(body.prompt, /Polished fixture/);
+      if (holdImage) await new Promise((done) => heldImages.push(done));
+      if (response.destroyed) {
+        record.settled = true;
+        return;
+      }
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ data: [{ b64_json: generatedPng.toString("base64"), revised_prompt: "Generated local fixture" }] }));
       record.settled = true;
@@ -201,8 +321,86 @@ function releasePolish() {
   holdPolish = false;
   for (const done of heldPolish.splice(0)) done();
 }
+function releaseImage() {
+  holdImage = false;
+  for (const done of heldImages.splice(0)) done();
+}
 async function click(selector) {
   await until(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el||el.disabled||el.closest('[hidden]'))return false;const style=getComputedStyle(el),rect=el.getBoundingClientRect();if(style.display==='none'||style.visibility!=='visible'||rect.width<1||rect.height<1)return false;el.scrollIntoView({block:"nearest",inline:"nearest"});el.click();return true})()`);
+}
+async function controlChecked(selector) {
+  return renderer.evaluate(`(()=>{
+    const el=document.querySelector(${JSON.stringify(selector)});
+    if(!el)return null;
+    if(el instanceof HTMLInputElement&&el.type==="checkbox")return el.checked;
+    const input=el.querySelector?.('input[type="checkbox"]');
+    if(input instanceof HTMLInputElement)return input.checked;
+    const state=el.getAttribute("aria-checked")??el.getAttribute("aria-pressed");
+    return state==="true";
+  })()`);
+}
+async function clearImageAssetSelection() {
+  const selected = await renderer.evaluate(
+    'document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length',
+  );
+  if (!selected) return;
+  const batchClear = await renderer.evaluate(
+    '(()=>{const el=document.querySelector("[data-testid=image-assets-clear-selection]");return Boolean(el&&!el.disabled&&!el.closest("[hidden]"))})()',
+  );
+  if (batchClear) await click("[data-testid=image-assets-clear-selection]");
+  else {
+    while (
+      (await renderer.evaluate(
+        'document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length',
+      )) > 0
+    )
+      await renderer.evaluate(
+        'document.querySelector("[data-testid=image-asset] .image-asset__select[aria-pressed=true]")?.click();true',
+      );
+  }
+  await until(
+    'document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===0',
+  );
+}
+async function selectImageAssetIds(ids) {
+  await clearImageAssetSelection();
+  for (const id of ids)
+    await click(
+      `[data-testid=image-asset][data-asset-id="${id}"] .image-asset__select[aria-pressed=false]`,
+    );
+  await until(
+    `document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===${ids.length}`,
+  );
+}
+async function untilFile(path, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const bytes = await readFile(path);
+      if (bytes.length) return bytes;
+    } catch {}
+    await sleep(80);
+  }
+  throw new Error(`Timed out waiting for file: ${path}`);
+}
+async function installSaveDialogFixture(filePath) {
+  await main.evaluate(`(()=>{
+    const electron=process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron");
+    const descriptor=Object.getOwnPropertyDescriptor(electron.dialog,"showSaveDialog");
+    globalThis.__studioSaveDialogDescriptor=descriptor;
+    Object.defineProperty(electron.dialog,"showSaveDialog",{configurable:true,enumerable:descriptor?.enumerable??true,writable:true,value:async()=>({canceled:false,filePath:${JSON.stringify(filePath)}})});
+    return true;
+  })()`);
+}
+async function restoreSaveDialogFixture() {
+  await main.evaluate(`(()=>{
+    const electron=process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron");
+    const descriptor=globalThis.__studioSaveDialogDescriptor;
+    if(descriptor)Object.defineProperty(electron.dialog,"showSaveDialog",descriptor);
+    else delete electron.dialog.showSaveDialog;
+    delete globalThis.__studioSaveDialogDescriptor;
+    return true;
+  })()`);
 }
 async function pointerClick(selector) {
   const point = await renderer.evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el||el.disabled||el.closest('[hidden]'))return null;const r=el.getBoundingClientRect(),x=(r.left+r.right)/2,y=(r.top+r.bottom)/2,hit=document.elementFromPoint(x,y);return{x,y,width:r.width,height:r.height,hitOk:Boolean(hit&&(el===hit||el.contains(hit))),hit:hit?.outerHTML.slice(0,180)}})()`);
@@ -534,8 +732,11 @@ try {
   await mkdir(evidence, { recursive: true });
   await writeFile(join(project, "README.md"), "# Isolated creative fixture\n");
   await writeFile(join(otherProject, "README.md"), "# Isolated second workspace\n");
-  const imageFile = join(temporary, "local-frame.png");
-  await writeFile(imageFile, importedPng);
+  const referenceFiles = referenceFileNames.map((name) => join(temporary, name));
+  const imageFile = referenceFiles[0];
+  const manualReferenceFile = join(temporary, "manual-reference.png");
+  await Promise.all(referenceFiles.map((path, index) => writeFile(path, referencePngs[index])));
+  await writeFile(manualReferenceFile, manualReferencePng);
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const fixtureOrigin = `http://127.0.0.1:${server.address().port}`;
   const mainPort = await port(); let rendererPort = await port();
@@ -810,7 +1011,7 @@ try {
   assert.equal(await renderer.evaluate('document.querySelector("[data-testid=chat-composer-input]").value.split("【工作请求】").length-1'), 1);
   assert.ok((await renderer.evaluate('document.querySelector("[data-testid=chat-composer-input]").value')).endsWith(previewPrompt), "The handoff differs from the preview and clipboard fixture");
   assert.equal(await renderer.evaluate('document.querySelectorAll(".draft-attachment").length'), 1);
-  assert.match(await renderer.evaluate('document.querySelector(".draft-attachment").textContent'), /local-frame\.png/);
+  assert.match(await renderer.evaluate('document.querySelector(".draft-attachment").textContent'), /reference-a\.png/);
   assert.deepEqual(await api("getSessionMessages", session.id), beforeMessages);
   await renderer.evaluate('window.__restoreCreativeClipboard();delete window.__restoreCreativeClipboard;true');
   passed.push("The detailed prompt contains at least 800 Chinese characters and its real skills and reasons; preview, isolated clipboard capture and successful handoff are identical, with no system clipboard access.");
@@ -930,12 +1131,69 @@ try {
   await until('(()=>{const image=document.querySelector(".image-canvas-layer img");return document.querySelectorAll("[data-testid=image-asset]").length===1&&image?.complete&&image.naturalWidth>0})()', 60_000);
   await until('Boolean(document.querySelector("[data-testid=image-generation-warning]"))');
   assert.match(await renderer.evaluate('document.querySelector("[data-testid=image-generation-warning]").textContent'), /供应商返回 128×96/);
+  await click('[data-testid="image-generation-warning"] button[aria-label="关闭警告"]');
+  await until('!document.querySelector("[data-testid=image-generation-warning]")');
   await click('[data-testid="image-inspector-toggle"]');
   await until('document.querySelector("#image-studio-inspector")?.hidden===false');
   await until('Boolean(document.querySelector("[data-testid=image-polish]:not(:disabled)"))');
   assert.ok(requests.some((request) => request.kind === "image"));
   assert.ok(requests.filter((request) => request.kind === "polish").length >= 2);
   passed.push("Polish returns a tool-free preview that can be discarded or explicitly applied; a valid provider image saves and displays at its returned dimensions with a visible mismatch warning.");
+
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();const asset=workspace.assets.find(item=>item.source==="generated");return Boolean(asset&&asset.prompt===${JSON.stringify(polishedText)}&&asset.negativePrompt===""&&asset.revisedPrompt==="Generated local fixture"&&asset.promptOrigin==="mingshen_generated"&&asset.promptMetadataVersion===1)})()`);
+  const promptWorkspace = await api("getImageStudioWorkspace");
+  const generatedPromptAsset = promptWorkspace.assets.find((asset) => asset.source === "generated");
+  assert.ok(generatedPromptAsset, "The generated fixture must retain its original prompt metadata");
+  assert.equal(generatedPromptAsset.prompt, polishedText);
+  assert.equal(generatedPromptAsset.negativePrompt, "");
+  assert.equal(generatedPromptAsset.revisedPrompt, "Generated local fixture");
+  const generatedPromptButton = `[data-testid=image-asset][data-asset-id="${generatedPromptAsset.id}"] [data-testid=image-asset-import-prompt]`;
+  await until(`document.querySelector(${JSON.stringify(`[data-testid=image-asset][data-asset-id="${generatedPromptAsset.id}"] [data-testid=image-asset-prompt-state]`)})?.textContent.includes("负向")`);
+  await fill("[data-testid=image-prompt]", "Workspace prompt before prompt restore");
+  await fill("[data-testid=image-negative-prompt]", "Workspace negative before prompt restore");
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.prompt==="Workspace prompt before prompt restore"&&workspace.negativePrompt==="Workspace negative before prompt restore"})()`);
+
+  await click(generatedPromptButton);
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  assert.match(await renderer.evaluate('document.querySelector("#mingshen-dialog-description").textContent'), /负面提示词|清空/);
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--secondary");
+  await until('!document.querySelector("[role=alertdialog]")');
+  assert.equal(await renderer.evaluate('document.querySelector("[data-testid=image-prompt]").value'), "Workspace prompt before prompt restore");
+  assert.equal(await renderer.evaluate('document.querySelector("[data-testid=image-negative-prompt]").value'), "Workspace negative before prompt restore");
+
+  await click(generatedPromptButton);
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--primary");
+  await until(`document.querySelector("[data-testid=image-prompt]")?.value===${JSON.stringify(polishedText)}&&document.querySelector("[data-testid=image-negative-prompt]")?.value===""`);
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.prompt===${JSON.stringify(polishedText)}&&workspace.negativePrompt===""})()`);
+  assert.match(await renderer.evaluate(`document.querySelector(${JSON.stringify(`[data-testid=image-asset][data-asset-id="${generatedPromptAsset.id}"] .image-asset__prompt-state`)})?.textContent ?? ""`), /正向与负向|positive and negative/i);
+  await click(generatedPromptButton);
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--secondary");
+  await until('!document.querySelector("[role=alertdialog]")');
+
+  await api("saveImageStudioWorkspace", {
+    ...promptWorkspace,
+    assets: promptWorkspace.assets.map((asset) =>
+      asset.id === generatedPromptAsset.id
+        ? {
+            ...asset,
+            prompt: "Renderer must not replace the trusted asset prompt",
+            negativePrompt: "Renderer must not replace the trusted negative prompt",
+            promptOrigin: null,
+            promptMetadataVersion: null,
+          }
+        : asset,
+    ),
+  });
+  const protectedAsset = (await api("getImageStudioWorkspace")).assets.find(
+    (asset) => asset.id === generatedPromptAsset.id,
+  );
+  assert.equal(protectedAsset.prompt, polishedText);
+  assert.equal(protectedAsset.negativePrompt, "");
+  assert.equal(protectedAsset.promptOrigin, "mingshen_generated");
+  assert.equal(protectedAsset.promptMetadataVersion, 1);
+  passed.push("Generated assets persist original positive and negative prompts separately from provider revisions; overwrite prompts require confirmation, cancel preserves both fields, confirmed empty-negative restores clear only that field, and stale renderer workspace snapshots cannot forge or replace main-process-owned asset prompt metadata.");
 
   holdPolish = true;
   let polishCount = requests.filter((request) => request.kind === "polish").length;
@@ -950,10 +1208,12 @@ try {
   polishCount = requests.filter((request) => request.kind === "polish").length;
   await click("[data-testid=image-polish]"); await waitForRequestCount("polish", polishCount + 1);
   await openSurface("workstation"); releasePolish(); await waitForRequestSettled("polish", polishCount + 1); await openSurface("image-studio");
-  assert.equal(await renderer.evaluate('Boolean(document.querySelector("[data-testid=image-prompt-preview]"))'), false);
+  await until('Boolean(document.querySelector("[data-testid=image-prompt-preview]"))');
   await until('document.querySelector("[data-testid=image-prompt]")?.value==="Changed while the fixture request was pending."');
+  await click("[data-testid=image-prompt-discard]");
+  await until('!document.querySelector("[data-testid=image-prompt-preview]")');
   await fill("[data-testid=image-prompt]", polishedText);
-  passed.push("A stale polish preview cannot replace a newer prompt; after unmount, the cancelled or settled request leaves no preview in the new surface.");
+  passed.push("A stale polish preview cannot replace a newer prompt; the hidden studio remains mounted and retains a completed preview until it is explicitly discarded.");
 
   await renderer.evaluate('(()=>{const button=document.querySelector("[data-testid=image-asset] .image-asset__select");if(button?.getAttribute("aria-pressed")!=="true")button?.click();return true})()');
   await until('document.querySelector("[data-testid=image-asset] .image-asset__select")?.getAttribute("aria-pressed")==="true"');
@@ -965,9 +1225,362 @@ try {
   assert.ok(requests.some((request) => request.kind === "reverse" && request.hasImage && request.toolCount === 0));
   await setFiles("[data-testid=image-import-input]", [imageFile]);
   await until('document.querySelectorAll("[data-testid=image-asset]").length===2');
+  const importedPromptWorkspace = await api("getImageStudioWorkspace");
+  const importedPromptAsset = importedPromptWorkspace.assets.find(
+    (asset) => asset.source === "imported" && asset.name === "reference-a.png",
+  );
+  assert.ok(importedPromptAsset, "The external image import fixture is missing");
+  assert.match(
+    await renderer.evaluate(`document.querySelector(${JSON.stringify(`[data-testid=image-asset][data-asset-id="${importedPromptAsset.id}"] [data-testid=image-asset-prompt-state]`)})?.textContent ?? ""`),
+    /无生成提示词|No generated prompt/i,
+  );
+  await fill("[data-testid=image-prompt]", "External import positive must stay");
+  await fill("[data-testid=image-negative-prompt]", "External import negative must stay");
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.prompt==="External import positive must stay"&&workspace.negativePrompt==="External import negative must stay"})()`);
+  await click(
+    `[data-testid=image-asset][data-asset-id="${importedPromptAsset.id}"] [data-testid=image-asset-import-prompt]`,
+  );
+  await until('Boolean(document.querySelector(".image-studio__error[role=alert]"))');
+  assert.match(
+    await renderer.evaluate('document.querySelector(".image-studio__error[role=alert]").textContent'),
+    /外部导入|无法确认|external|imported|verified/i,
+  );
+  assert.equal(await renderer.evaluate('Boolean(document.querySelector("[role=alertdialog]"))'), false);
+  assert.equal(
+    await renderer.evaluate('document.querySelector("[data-testid=image-prompt]").value'),
+    "External import positive must stay",
+  );
+  assert.equal(
+    await renderer.evaluate('document.querySelector("[data-testid=image-negative-prompt]").value'),
+    "External import negative must stay",
+  );
+  await click('.image-studio__error[role=alert] button[aria-label="关闭"]');
+  passed.push("Externally imported images never expose recoverable generation prompts; importing their unavailable prompts keeps both current workspace fields unchanged and shows an explicit explanation.");
   await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset] .image-asset__select").forEach(button=>{if(button.getAttribute("aria-pressed")!=="true")button.click()});true');
   await until('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===2');
   passed.push("Vision reverse uses an actual selected image and a tool-free request, previews the result, and local image import adds a second independent frame.");
+
+  await setFiles("[data-testid=image-import-input]", referenceFiles.slice(1));
+  await until('document.querySelectorAll("[data-testid=image-asset]").length===5');
+  await fill("[data-testid=image-prompt]", polishedText);
+  while (true) {
+    const selectedCount = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length');
+    if (selectedCount === 0) break;
+    await renderer.evaluate('document.querySelector("[data-testid=image-asset] .image-asset__select[aria-pressed=true]")?.click()');
+    await until(`document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===${selectedCount - 1}`);
+  }
+  for (const name of referenceFileNames) {
+    await click(`[data-testid=image-asset] .image-asset__select[title="${name}"]`);
+  }
+  await until('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===4');
+  assert.equal(await controlChecked("[data-testid=image-reference-toggle]"), false);
+  await click("[data-testid=image-reference-toggle]");
+  await until('document.querySelectorAll("[data-testid=image-reference-item]").length===3');
+  assert.deepEqual(
+    await renderer.evaluate('[...document.querySelectorAll("[data-testid=image-reference-item] figcaption")].map(item=>item.textContent.trim())'),
+    referenceFileNames.slice(0, 3),
+  );
+  assert.match(
+    await renderer.evaluate('document.querySelector("[data-testid=image-reference-overflow]")?.textContent ?? ""'),
+    /已选 4 张，仅前 3 张会参与本次生成/,
+  );
+  let referenceCount = requests.filter((request) => request.kind === "reference-image").length;
+  const assetCountBeforeReference = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset]").length');
+  await click("[data-testid=image-generate]");
+  await waitForRequestCount("reference-image", referenceCount + 1);
+  await waitForRequestSettled("reference-image", referenceCount + 1);
+  await until(`document.querySelectorAll("[data-testid=image-asset]").length>${assetCountBeforeReference}`);
+  const orderedEdit = requests.filter((request) => request.kind === "reference-image").at(-1);
+  assert.deepEqual(orderedEdit.files.map((file) => file.name), [
+    "reference-1.png",
+    "reference-2.png",
+    "reference-3.png",
+  ]);
+  assert.deepEqual(orderedEdit.files.map((file) => file.sha256), referencePngs.slice(0, 3).map(digest));
+  assert.ok(orderedEdit.files.every((file) => file.type === "image/png" && file.size > 0));
+  passed.push("Reference generation is opt-in, preserves selection order, caps four selected assets to the first three, and sends their exact bytes as repeated multipart image[] files.");
+
+  if (await renderer.evaluate('document.querySelector("#image-studio-inspector")?.hidden')) {
+    await click("[data-testid=image-inspector-toggle]");
+    await until('document.querySelector("#image-studio-inspector")?.hidden===false');
+  }
+  if (await controlChecked("[data-testid=image-reference-toggle]")) {
+    await click("[data-testid=image-reference-toggle]");
+  }
+  await until('document.querySelectorAll("[data-testid=image-reference-item]").length===0');
+  const imageRequestCount = requests.filter((request) => request.kind === "image").length;
+  const assetsBeforeDisabledImage = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset]").length');
+  await click("[data-testid=image-generate]");
+  await waitForRequestCount("image", imageRequestCount + 1);
+  await waitForRequestSettled("image", imageRequestCount + 1);
+  await until(`document.querySelectorAll("[data-testid=image-asset]").length===${assetsBeforeDisabledImage + 1}`);
+  const disabledEdit = requests.filter((request) => request.kind === "image").at(-1);
+  assert.equal(disabledEdit.url, "/v1/images/generations");
+  assert.deepEqual(disabledEdit.files, []);
+  passed.push("Disabling reference mode keeps selected assets in the library but sends a JSON text-to-image request with no uploaded files.");
+
+  if (await renderer.evaluate('document.querySelector("#image-studio-inspector")?.hidden')) {
+    await click("[data-testid=image-inspector-toggle]");
+    await until('document.querySelector("#image-studio-inspector")?.hidden===false');
+  }
+  const assetsBeforeBackgroundGeneration = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset]").length');
+  const workspaceBeforeBackground = await api("getImageStudioWorkspace");
+  const existingBackgroundAssetIds = new Set(workspaceBeforeBackground.assets.map((asset) => asset.id));
+  const backgroundImageCount = requests.filter((request) => request.kind === "image").length;
+  holdImage = true;
+  await click("[data-testid=image-generate]");
+  await waitForRequestCount("image", backgroundImageCount + 1);
+  await until('document.querySelector(".image-studio")?.getAttribute("data-navigation-busy")==="true"');
+  await click('[data-testid="agent-mode-chat"]');
+  await until('document.querySelector(".app-shell")?.dataset.agentMode==="chat"&&document.querySelector(".app-topbar")?.dataset.appSurface==="conversation"');
+  await until('document.querySelector(".app-studio-host[data-app-surface=image-studio]")?.hidden===true&&Boolean(document.querySelector("[data-app-surface=image-studio] .image-studio"))');
+  const backgroundImageRequest = requests.filter((request) => request.kind === "image")[backgroundImageCount];
+  assert.equal(backgroundImageRequest.settled, false);
+  assert.equal(backgroundImageRequest.clientClosed, false, "Switching to ChatAgent must not cancel the provider request");
+  assert.equal(
+    await renderer.evaluate('document.querySelector("[data-app-surface=image-studio] .image-studio")?.getAttribute("data-navigation-busy")'),
+    "false",
+  );
+  await openSurface("workstation");
+  assert.equal(backgroundImageRequest.clientClosed, false, "Switching to the workstation must not cancel the provider request");
+  releaseImage();
+  await waitForRequestSettled("image", backgroundImageCount + 1);
+  await until(`document.querySelectorAll("[data-app-surface=image-studio] [data-testid=image-asset]").length===${assetsBeforeBackgroundGeneration + 1}`);
+  await openSurface("image-studio");
+  const workspaceAfterBackground = await api("getImageStudioWorkspace");
+  const backgroundAsset = workspaceAfterBackground.assets.find((asset) => !existingBackgroundAssetIds.has(asset.id));
+  assert.ok(backgroundAsset, "The provider result must be persisted in the local asset library");
+  const activeDocument = workspaceAfterBackground.documents.find(
+    (document) => document.id === workspaceAfterBackground.activeDocumentId,
+  );
+  const backgroundLayer = activeDocument?.layers.find((layer) => layer.assetId === backgroundAsset.id);
+  assert.ok(backgroundLayer, "The provider result must also be added to the active canvas");
+  const backgroundAssetData = await api("getImageStudioAssetData", backgroundAsset.id);
+  assert.match(backgroundAssetData?.dataUrl ?? "", /^data:image\/png;base64,/);
+  await until(`Boolean(document.querySelector('[data-app-surface="image-studio"] [data-layer-id="${backgroundLayer.id}"] img'))`);
+  await until(`[...document.querySelectorAll('[data-app-surface="image-studio"] .image-asset__name')].some(item=>item.textContent.trim()===${JSON.stringify(backgroundAsset.name)})`);
+  assert.equal(backgroundImageRequest.clientClosed, false);
+  passed.push("A delayed image generation survives switching to ChatAgent and the workstation, does not block other navigation, and saves into the local asset library and active canvas when the provider responds.");
+
+  const batchWorkspaceBefore = await api("getImageStudioWorkspace");
+  const batchGeneratedAsset = batchWorkspaceBefore.assets.find(
+    (asset) => asset.id === generatedPromptAsset.id,
+  );
+  const batchImportedAsset = batchWorkspaceBefore.assets.find(
+    (asset) => asset.id === importedPromptAsset.id,
+  );
+  assert.ok(batchGeneratedAsset, "The generated prompt fixture must still exist for batch removal");
+  assert.ok(batchImportedAsset, "The imported prompt fixture must still exist for batch removal");
+  assert.equal(batchGeneratedAsset.promptMetadataVersion, 1);
+  assert.equal(batchGeneratedAsset.prompt, polishedText);
+  assert.equal(batchGeneratedAsset.negativePrompt, "");
+  await clearImageAssetSelection();
+  await until(
+    'Boolean(document.querySelector("[data-testid=image-assets-select-all]:not(:disabled)"))',
+  );
+  await click("[data-testid=image-assets-select-all]");
+  const visibleAssetCount = await renderer.evaluate(
+    'document.querySelectorAll("[data-testid=image-asset]").length',
+  );
+  await until(
+    `document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===${Math.min(visibleAssetCount, 200)}`,
+  );
+  await clearImageAssetSelection();
+  await selectImageAssetIds([batchGeneratedAsset.id, batchImportedAsset.id]);
+  for (const selector of [
+    "[data-testid=image-assets-export]",
+    "[data-testid=image-assets-add]",
+    "[data-testid=image-assets-delete]",
+  ])
+    await until(
+      `(()=>{const el=document.querySelector(${JSON.stringify(selector)});return Boolean(el&&!el.disabled&&!el.closest("[hidden]"))})()`,
+    );
+
+  const batchExportFile = join(temporary, "selected-assets.zip");
+  try {
+    await installSaveDialogFixture(batchExportFile);
+    await renderer.evaluate(`(()=>{
+      window.__imageStudioExportProgress=[];
+      window.__imageStudioExportProgressUiSeen=false;
+      window.__imageStudioExportProgressObserver=new MutationObserver(()=>{
+        if(document.querySelector('[data-testid="image-export-progress"]'))
+          window.__imageStudioExportProgressUiSeen=true;
+      });
+      window.__imageStudioExportProgressObserver.observe(document.body,{childList:true,subtree:true});
+      window.mingshen.onImageStudioExportProgress(progress=>window.__imageStudioExportProgress.push(progress));
+    })()`);
+    await click("[data-testid=image-assets-export]");
+    const archiveBytes = await untilFile(batchExportFile);
+    const exportProgress = await renderer.evaluate(`(()=>{
+      window.__imageStudioExportProgressObserver?.disconnect();
+      return {events:window.__imageStudioExportProgress??[],uiSeen:window.__imageStudioExportProgressUiSeen===true};
+    })()`);
+    assert.equal(exportProgress.uiSeen, true, "The batch export progress bar must be rendered");
+    assert.deepEqual(
+      exportProgress.events.map((event) => event.phase),
+      ["packing", "packing", "packing", "finalizing", "complete"],
+    );
+    assert.equal(exportProgress.events.at(-1)?.completedAssets, 2);
+    assert.equal(exportProgress.events.at(-1)?.completedBytes, generatedPng.length + importedPng.length);
+    const archive = unzipSync(new Uint8Array(archiveBytes));
+    const entries = Object.entries(archive);
+    assert.equal(entries.length, 2);
+    assert.equal(new Set(entries.map(([name]) => name.toLocaleLowerCase("en-US"))).size, 2);
+    for (const [name, bytes] of entries) {
+      assert.ok(name && !name.startsWith(".") && !/[\\/]/.test(name), `Unsafe ZIP entry: ${name}`);
+      assert.equal(name.includes(".."), false, `Unsafe ZIP entry: ${name}`);
+      assert.equal(/\.(?:json|txt|md)$/i.test(name), false, `Prompt metadata leaked as ${name}`);
+      assert.deepEqual(pngDimensions(Buffer.from(bytes)), { width: 128, height: 96 });
+    }
+    assert.deepEqual(
+      entries.map(([, bytes]) => digest(Buffer.from(bytes))).sort(),
+      [digest(generatedPng), digest(importedPng)].sort(),
+      "The batch ZIP must contain the exact selected image bytes",
+    );
+  } finally {
+    await restoreSaveDialogFixture();
+  }
+
+  const batchWorkspaceForDocument = await api("getImageStudioWorkspace");
+  const documentBeforeBatchAdd = batchWorkspaceForDocument.documents.find(
+    (document) => document.id === batchWorkspaceForDocument.activeDocumentId,
+  );
+  const layersBeforeBatchAdd = documentBeforeBatchAdd?.layers.length ?? 0;
+  await click("[data-testid=image-assets-add]");
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();const document=workspace.documents.find(item=>item.id===workspace.activeDocumentId);return Boolean(document&&document.layers.length===${layersBeforeBatchAdd + 2}&&[${JSON.stringify(batchGeneratedAsset.id)},${JSON.stringify(batchImportedAsset.id)}].every(id=>document.layers.some(layer=>layer.assetId===id)))})()`);
+  await until(`document.querySelectorAll(".image-canvas-layer").length===${layersBeforeBatchAdd + 2}`);
+  await until('(()=>{const images=[...document.querySelectorAll(".image-canvas-layer img")];return images.length>0&&images.slice(-2).every(image=>image.complete&&image.naturalWidth===128&&image.naturalHeight===96)})()');
+
+  await click("[data-testid=image-assets-delete]");
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--danger-solid");
+  await until('Boolean(document.querySelector(".image-studio__error[role=alert]"))');
+  assert.match(
+    await renderer.evaluate('document.querySelector(".image-studio__error[role=alert]").textContent'),
+    /引用|批量删除|reference|batch/i,
+  );
+  let referencedWorkspace = await api("getImageStudioWorkspace");
+  assert.ok(referencedWorkspace.assets.some((asset) => asset.id === batchGeneratedAsset.id));
+  assert.ok(referencedWorkspace.assets.some((asset) => asset.id === batchImportedAsset.id));
+  await click('.image-studio__error[role=alert] button[aria-label="关闭"]');
+
+  await click("[data-testid=image-assets-delete]");
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--secondary");
+  await until('!document.querySelector("[role=alertdialog]")');
+  let cancelledWorkspace = await api("getImageStudioWorkspace");
+  assert.ok(cancelledWorkspace.assets.some((asset) => asset.id === batchGeneratedAsset.id));
+  assert.ok(cancelledWorkspace.assets.some((asset) => asset.id === batchImportedAsset.id));
+
+  await sleep(500);
+  const workspaceBeforeLayerCleanup = await api("getImageStudioWorkspace");
+  const documentsWithoutBatchLayers = workspaceBeforeLayerCleanup.documents.map((document) => ({
+    ...document,
+    layers: document.layers
+      .filter(
+        (layer) =>
+          layer.assetId !== batchGeneratedAsset.id && layer.assetId !== batchImportedAsset.id,
+      )
+      .map((layer, index) => ({ ...layer, zIndex: index })),
+  }));
+  await api("saveImageStudioWorkspace", {
+    ...workspaceBeforeLayerCleanup,
+    documents: documentsWithoutBatchLayers,
+  });
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return workspace.documents.every(document=>document.layers.every(layer=>layer.assetId!==${JSON.stringify(batchGeneratedAsset.id)}&&layer.assetId!==${JSON.stringify(batchImportedAsset.id)}))})()`);
+
+  const promptStateBeforeBatchDelete = await api("getImageStudioWorkspace");
+  await click("[data-testid=image-assets-delete]");
+  await until('Boolean(document.querySelector("[role=alertdialog]"))');
+  await click("[role=alertdialog] .mingshen-dialog__actions button.btn--danger-solid");
+  await until(`(async()=>{const workspace=await window.mingshen.getImageStudioWorkspace();return !workspace.assets.some(asset=>asset.id===${JSON.stringify(batchGeneratedAsset.id)}||asset.id===${JSON.stringify(batchImportedAsset.id)})})()`);
+  const workspaceAfterBatchDelete = await api("getImageStudioWorkspace");
+  assert.equal(workspaceAfterBatchDelete.prompt, promptStateBeforeBatchDelete.prompt);
+  assert.equal(workspaceAfterBatchDelete.negativePrompt, promptStateBeforeBatchDelete.negativePrompt);
+  assert.equal(
+    workspaceAfterBatchDelete.selectedAssetIds.includes(batchGeneratedAsset.id),
+    false,
+  );
+  assert.equal(
+    workspaceAfterBatchDelete.selectedAssetIds.includes(batchImportedAsset.id),
+    false,
+  );
+  assert.equal(
+    workspaceAfterBatchDelete.assets.find((asset) => asset.id === batchGeneratedAsset.id),
+    undefined,
+  );
+  await reload();
+  await selectSession(session);
+  await openSurface("image-studio");
+  const reloadedAfterBatchDelete = await api("getImageStudioWorkspace");
+  assert.equal(
+    reloadedAfterBatchDelete.assets.find((asset) => asset.id === batchGeneratedAsset.id),
+    undefined,
+    "Deleting a generated asset must delete its bundled prompt metadata persistently",
+  );
+  assert.equal(
+    reloadedAfterBatchDelete.assets.find((asset) => asset.id === batchImportedAsset.id),
+    undefined,
+  );
+  passed.push("Image assets support ordered select-all, a 200-item ZIP batch export with per-asset progress and validated PNG entries without prompt sidecars, multi-layer insertion into the active canvas, all-or-nothing referenced deletion, cancel without state loss, and persistent batch deletion of image records together with their bundled prompt metadata.");
+
+  if (await renderer.evaluate('document.querySelector("#image-studio-inspector")?.hidden')) {
+    await click("[data-testid=image-inspector-toggle]");
+    await until('document.querySelector("#image-studio-inspector")?.hidden===false');
+  }
+  await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").forEach(button=>button.click());true');
+  await until('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===0');
+  assert.ok(await renderer.evaluate('Boolean(document.querySelector("[data-testid=image-reference-upload]"))'));
+  const assetCountBeforeManualReference = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset]").length');
+  await setFiles("[data-testid=image-reference-input]", [manualReferenceFile]);
+  await until(`document.querySelectorAll("[data-testid=image-asset]").length>${assetCountBeforeManualReference}`);
+  await until('document.querySelectorAll("[data-testid=image-reference-item]").length===1');
+  assert.equal(await controlChecked("[data-testid=image-reference-toggle]"), true);
+  assert.equal(
+    await renderer.evaluate('document.querySelector("[data-testid=image-reference-item] figcaption")?.textContent.trim()'),
+    "manual-reference.png",
+  );
+  referenceCount = requests.filter((request) => request.kind === "reference-image").length;
+  await click("[data-testid=image-generate]");
+  await waitForRequestCount("reference-image", referenceCount + 1);
+  await waitForRequestSettled("reference-image", referenceCount + 1);
+  const manualEdit = requests.filter((request) => request.kind === "reference-image").at(-1);
+  assert.equal(manualEdit.files.length, 1);
+  assert.equal(manualEdit.files[0].field, "image");
+  assert.equal(manualEdit.files[0].sha256, digest(manualReferencePng));
+  passed.push("Manual reference upload imports into the local library, selects the new image, enables reference mode, and sends a single multipart image field with the exact uploaded bytes.");
+
+  const composerAttachmentsBeforeDrop = (await api("getComposerDraft", session.id)).attachments.map((item) => item.id);
+  const assetCountBeforeDrop = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset]").length');
+  await renderer.evaluate(`(()=>{const transfer=new DataTransfer();const bytes=Uint8Array.from(atob(${JSON.stringify(referencePngs[3].toString("base64"))}),character=>character.charCodeAt(0));transfer.items.add(new File([bytes],"dropped-reference.png",{type:"image/png"}));window.__studioImageDrop=transfer;document.querySelector('[data-testid="image-studio"]').dispatchEvent(new DragEvent("dragenter",{bubbles:true,dataTransfer:transfer}));return true})()`);
+  await until('Boolean(document.querySelector("[data-testid=image-drop-overlay]"))');
+  await renderer.evaluate('document.querySelector("[data-testid=image-studio]").dispatchEvent(new DragEvent("dragover",{bubbles:true,dataTransfer:window.__studioImageDrop}));document.querySelector("[data-testid=image-studio]").dispatchEvent(new DragEvent("drop",{bubbles:true,dataTransfer:window.__studioImageDrop}));true');
+  await until(`document.querySelectorAll("[data-testid=image-asset]").length===${assetCountBeforeDrop + 1}`);
+  await until('!document.querySelector("[data-testid=image-drop-overlay]")');
+  const droppedWorkspace = await api("getImageStudioWorkspace");
+  assert.ok(
+    droppedWorkspace.assets.some((asset) => asset.name === "dropped-reference.png"),
+    "The dragged image should be registered in the local asset library",
+  );
+  assert.deepEqual(
+    (await api("getComposerDraft", session.id)).attachments.map((item) => item.id),
+    composerAttachmentsBeforeDrop,
+  );
+  passed.push("Dragging a PNG file onto Image Studio shows the drop target and imports it into the local asset library without navigating away.");
+
+  if (await renderer.evaluate('document.querySelector("#image-studio-inspector")?.hidden')) {
+    await click("[data-testid=image-inspector-toggle]");
+    await until('document.querySelector("#image-studio-inspector")?.hidden===false');
+  }
+  if (await controlChecked("[data-testid=image-reference-toggle]")) {
+    await click("[data-testid=image-reference-toggle]");
+  }
+  while (true) {
+    const selectedCount = await renderer.evaluate('document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length');
+    if (selectedCount >= 2) break;
+    await renderer.evaluate('document.querySelector("[data-testid=image-asset] .image-asset__select[aria-pressed=false]")?.click()');
+    await until(`document.querySelectorAll("[data-testid=image-asset] .image-asset__select[aria-pressed=true]").length===${selectedCount + 1}`);
+  }
 
   await click('.image-workspace__tools button[aria-label="适应画布"]');
   await until('Boolean(document.querySelector(".image-canvas-layer img"))');
@@ -1158,6 +1771,7 @@ try {
   throw cause;
 } finally {
   releasePolish();
+  releaseImage();
   await main?.evaluate(`(()=>{const original=globalThis.__studioDesktopStateHandler;if(original){process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers.set("desktop:state",original);delete globalThis.__studioDesktopStateHandler}return true})()`).catch(() => {});
   await main?.evaluate(`(()=>{const original=globalThis.__studioCanvasCloseHandler;if(original){globalThis.__releaseStudioCanvasClose?.();process.getBuiltinModule("module").createRequire(process.cwd()+"/package.json")("electron").ipcMain._invokeHandlers.set("image-studio:canvas-close",original);delete globalThis.__studioCanvasCloseHandler;delete globalThis.__studioCanvasCloseGate;delete globalThis.__releaseStudioCanvasClose}return true})()`).catch(() => {});
   if (child) {

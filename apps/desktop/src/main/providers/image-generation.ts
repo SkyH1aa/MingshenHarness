@@ -1,6 +1,6 @@
 import {
   IMAGE_STUDIO_MAX_GENERATED_COUNT,
-  IMAGE_STUDIO_MAX_IMPORT_BYTES,
+  IMAGE_STUDIO_MAX_GENERATION_BYTES,
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
   type ImageStudioAsset,
 } from "../../shared/image-studio";
@@ -18,7 +18,7 @@ export interface ImageGenerationPayload {
   extension: string;
 }
 
-const MAX_GENERATION_BYTES = IMAGE_STUDIO_MAX_IMPORT_BYTES;
+const MAX_GENERATION_BYTES = IMAGE_STUDIO_MAX_GENERATION_BYTES;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)

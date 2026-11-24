@@ -107,6 +107,25 @@ Quick Chat accepts guidance IPC only for its own Chat session.
   forwarded to arbitrary image-download targets. Text-only application flows reject
   image-output-only model configurations. This separation does not establish that
   every third-party image gateway is compatible or trustworthy.
+- Generated assets store prompt provenance locally with a bounded, versioned record:
+  the user's positive and negative prompt is kept separately from any provider
+  revision, and only a generated asset with matching provenance can be offered for
+  prompt restoration. External imports cannot forge that trusted record through the
+  ordinary import path. Re-import always requires confirmation, and the save is
+  rejected if the workspace prompt or asset record changes while confirmation is
+  open. Legacy or incomplete records are reported as unavailable rather than guessed.
+  Batch ZIP export contains image bytes only; it does not add an unverified prompt
+  sidecar. Batch deletion is all-or-nothing when any selected asset remains referenced
+  by a saved or open canvas.
+- Reference images are disabled by default. Enabling them sends at most the first
+  three selected assets, in selection order, to the selected image provider through
+  multipart `/images/edits`; an unsupported edit endpoint is not silently retried
+  as text-only generation. Manual reference uploads enter the same bounded local
+  asset store. The main process reads validated asset IDs, not arbitrary paths,
+  and rechecks image bytes before sending them. PNG/JPEG bytes are retained;
+  GIF/WebP references send a bounded first-frame PNG without changing the source.
+  Drag-and-drop image imports use the same bounded import path and are not treated
+  as references unless the user separately selects them.
 - AutoDrive uses the current conversation's model with an empty tool catalog and
   bounded, read-only project/history evidence. It proposes alternatives without
   writing files or sending a new execution turn. Selecting a proposal appends a

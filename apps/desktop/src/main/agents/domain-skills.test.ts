@@ -132,6 +132,21 @@ describe("built-in domain skill resources", () => {
     expect(output).toContain("Installation and lifecycle changes remain explicit user actions");
   });
 
+  it("keeps the creator SDK outside a prompt directory embedded in app.asar", async () => {
+    const promptDirectory = resolve("resources/prompts");
+    const externalResources = resolve("MingshenHarness", "resources");
+    const output = await loadDomainSkill(
+      codeSession,
+      { name: "builtin:plugin-creator" },
+      promptDirectory,
+      extensions,
+      externalResources,
+    );
+
+    expect(output).toContain(join(externalResources, "sdk", "plugin-dev", "mingshen-plugin.mjs"));
+    expect(output).not.toContain(join(promptDirectory, "sdk", "plugin-dev", "mingshen-plugin.mjs"));
+  });
+
   it("accepts the skill-id markdown filename as an alias for the built-in entry", async () => {
     const promptDirectory = resolve("resources/prompts");
 

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
+  CheckCheck,
   Copy,
   Download,
   Film,
@@ -11,6 +12,7 @@ import {
   Layers3,
   LoaderCircle,
   Maximize2,
+  MessageSquareText,
   Minus,
   PanelRight,
   Pencil,
@@ -24,6 +26,7 @@ import {
 } from "lucide-react";
 import {
   type ChangeEvent,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useMemo,
@@ -35,27 +38,36 @@ import type { ProviderView } from "../../../shared/domain";
 import {
   alignImageStudioDimension,
   emptyImageStudioWorkspace,
+  IMAGE_STUDIO_MAX_ASSETS,
   IMAGE_STUDIO_MAX_DIMENSION,
   IMAGE_STUDIO_MAX_DOCUMENTS,
+  IMAGE_STUDIO_MAX_EXPORT_BYTES,
   IMAGE_STUDIO_MAX_GIF_FRAMES,
   IMAGE_STUDIO_MAX_IMPORT_BYTES,
+  IMAGE_STUDIO_MAX_LAYERS,
+  IMAGE_STUDIO_MAX_REFERENCE_IMAGES,
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
   IMAGE_STUDIO_MIN_DIMENSION,
   type ImageStudioAspectRatio,
   type ImageStudioAsset,
   type ImageStudioCanvas,
   type ImageStudioCanvasSummary,
+  type ImageStudioExportProgress,
   type ImageStudioGenerationSettings,
   type ImageStudioGenerationWarning,
   type ImageStudioLayer,
   type ImageStudioQuality,
   type ImageStudioResolution,
   type ImageStudioWorkspace,
+  imageStudioAssetPromptRestore,
   imageStudioPresetDimensions,
+  selectImageStudioReferenceIds,
+  withinImageStudioByteBudget,
 } from "../../../shared/image-studio";
 import { isVisionTextModel } from "../../../shared/model-capabilities";
 import { useLocale } from "../i18n";
 import { encodeGif } from "../lib/gif-encoder";
+import { promoteImageStudioReferenceIds } from "../lib/image-studio-reference";
 import {
   downloadBlob,
   downloadCanvasPng,
@@ -68,12 +80,13 @@ import {
   ImageStudioWorkspaceQueue,
   mergeAssetResult,
   mergeGeneratedResult,
-  mergeRemovedAsset,
+  mergeRemovedAssets,
 } from "../lib/image-studio-workspace";
 import { useDialog } from "./DialogProvider";
 import { ModelPicker } from "./ModelPicker";
 
 export interface ImageStudioProps {
+  active: boolean;
   providers: ProviderView[];
   onOpenProviderSettings?: () => void;
 }
@@ -93,11 +106,7 @@ interface CanvasBundle {
   format: string;
   version: 1;
   canvas: ImageStudioCanvas;
-  assets: Array<{
-    id: string;
-    name: string;
-    dataUrl: string;
-  }>;
+  assets: Array<{ id: string; name: string; dataUrl: string }>;
 }
 
 const CANVAS_BUNDLE_FORMAT = ["ming", "shen", "image", "canvas"].join(".");
@@ -132,6 +141,23 @@ const imageAspectRatios: Array<{ value: ImageStudioAspectRatio; ratio?: string }
   { value: "9:21", ratio: "9 / 21" },
   { value: "auto" },
 ];
+const imageMimeTypes: Record<string, string> = {
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+};
+
+function imageFileMimeType(file: File): string | null {
+  if (["image/gif", "image/jpeg", "image/png", "image/webp"].includes(file.type)) return file.type;
+  const extension = /\.[^.]+$/.exec(file.name)?.[0]?.toLowerCase() ?? "";
+  return imageMimeTypes[extension] ?? null;
+}
+
+function hasFileTransfer(event: ReactDragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types).includes("Files");
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -205,6 +231,7 @@ function AssetThumbnail({
   selectedOrder,
   onToggle,
   onAdd,
+  onImportPrompt,
   onDownload,
   onDelete,
   downloadBusy,
@@ -214,6 +241,7 @@ function AssetThumbnail({
   selectedOrder: number | null;
   onToggle: () => void;
   onAdd: () => void;
+  onImportPrompt: () => void;
   onDownload: () => void;
   onDelete: () => void;
   downloadBusy: boolean;
@@ -224,6 +252,14 @@ function AssetThumbnail({
   const containerRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const url = useAssetUrl(visible ? asset.id : null);
+  const restorablePrompt = imageStudioAssetPromptRestore(asset);
+  const promptState = restorablePrompt
+    ? restorablePrompt.replacesNegativePrompt
+      ? tx("可恢复正向与负向提示词", "Positive and negative prompts saved")
+      : tx("可恢复正向提示词，负向需保留", "Positive prompt saved; current negative will be kept")
+    : asset.source === "generated"
+      ? tx("生成提示词记录不完整", "Generated prompt record is incomplete")
+      : tx("无生成提示词可恢复", "No generated prompt is available");
 
   useEffect(() => {
     const element = containerRef.current;
@@ -246,12 +282,14 @@ function AssetThumbnail({
       ref={containerRef}
       className={selectedOrder === null ? "image-asset" : "image-asset image-asset--selected"}
       data-testid="image-asset"
+      data-asset-id={asset.id}
     >
       <button
         type="button"
         className="image-asset__select"
         aria-pressed={selectedOrder !== null}
         title={asset.name}
+        disabled={disabled}
         onClick={onToggle}
       >
         <span className="image-asset__preview">
@@ -262,8 +300,28 @@ function AssetThumbnail({
         <small>
           {asset.width}×{asset.height} · {(asset.size / 1024 / 1024).toFixed(1)} MiB
         </small>
+        <small
+          className={
+            restorablePrompt
+              ? "image-asset__prompt-state"
+              : "image-asset__prompt-state image-asset__prompt-state--missing"
+          }
+          data-testid="image-asset-prompt-state"
+        >
+          {promptState}
+        </small>
       </button>
       <div className="image-asset__actions">
+        <button
+          type="button"
+          data-testid="image-asset-import-prompt"
+          title={`${tx("导入提示词", "Import prompts")} · ${promptState}`}
+          aria-label={tx(`导入 ${asset.name} 的提示词`, `Import prompts from ${asset.name}`)}
+          disabled={disabled}
+          onClick={onImportPrompt}
+        >
+          <MessageSquareText aria-hidden="true" size={14} />
+        </button>
         <button
           type="button"
           data-testid="image-asset-download"
@@ -297,6 +355,46 @@ function AssetThumbnail({
         </button>
       </div>
     </div>
+  );
+}
+
+function ReferenceAssetPreview({
+  asset,
+  order,
+  onRemove,
+  disabled,
+}: {
+  asset: ImageStudioAsset;
+  order: number;
+  onRemove: () => void;
+  disabled: boolean;
+}) {
+  const en = useLocale() === "en";
+  const url = useAssetUrl(asset.id);
+  return (
+    <figure className="image-reference-preview__item" data-testid="image-reference-item">
+      <div className="image-reference-preview__media">
+        {url ? <img src={url} alt="" draggable={false} /> : <ImageIcon aria-hidden="true" />}
+        <b>{order}</b>
+        <button
+          type="button"
+          className="image-reference-preview__remove"
+          data-testid="image-reference-remove"
+          disabled={disabled}
+          title={en ? "Remove from selection" : "从选择中移除"}
+          aria-label={en ? `Remove ${asset.name} from selection` : `从选择中移除 ${asset.name}`}
+          onClick={onRemove}
+        >
+          <X aria-hidden="true" size={11} />
+        </button>
+      </div>
+      <figcaption title={asset.name}>{asset.name}</figcaption>
+      {asset.mimeType === "image/gif" || asset.mimeType === "image/webp" ? (
+        <small title={en ? "Uses the first frame as PNG" : "以首帧 PNG 作为参考"}>
+          {en ? "PNG · first frame" : "PNG · 首帧"}
+        </small>
+      ) : null}
+    </figure>
   );
 }
 
@@ -337,7 +435,7 @@ function CanvasLayerImage({
   );
 }
 
-export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioProps) {
+export function ImageStudio({ active, providers, onOpenProviderSettings }: ImageStudioProps) {
   const en = useLocale() === "en";
   const tx = (zh: string, english: string) => (en ? english : zh);
   const { confirm } = useDialog();
@@ -348,6 +446,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
+  const [exportProgress, setExportProgress] = useState<ImageStudioExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [generationWarnings, setGenerationWarnings] = useState<ImageStudioGenerationWarning[]>([]);
@@ -368,9 +467,11 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     () => typeof window === "undefined" || !window.matchMedia("(max-width: 920px)").matches,
   );
   const [frameDelay, setFrameDelay] = useState(350);
+  const [imageDropActive, setImageDropActive] = useState(false);
   const [imageCountDraft, setImageCountDraft] = useState("1");
   const [search, setSearch] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   const bundleInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -383,6 +484,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const activeRequestId = useRef<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelRenameRef = useRef<string | null>(null);
+  const imageDropDepth = useRef(0);
 
   useEffect(() => {
     if (!renamingCanvasId) return;
@@ -397,6 +499,11 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   const selectedAssets = workspace.selectedAssetIds
     .map((id) => workspace.assets.find((asset) => asset.id === id))
     .filter((asset): asset is ImageStudioAsset => Boolean(asset));
+  const referenceAssetIds = selectImageStudioReferenceIds(selectedAssets.map((asset) => asset.id));
+  const referenceAssets = referenceAssetIds
+    .map((id) => workspace.assets.find((asset) => asset.id === id))
+    .filter((asset): asset is ImageStudioAsset => Boolean(asset));
+  const referenceOverflow = Math.max(0, selectedAssets.length - IMAGE_STUDIO_MAX_REFERENCE_IMAGES);
   const filteredAssets = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     const newestFirst = [...workspace.assets].reverse();
@@ -761,9 +868,15 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     }
   };
 
-  const addAssetToCanvas = (asset: ImageStudioAsset) => {
+  const addAssetsToCanvas = (sourceAssets: ImageStudioAsset[]): number => {
     const current = workspaceRef.current;
-    if (!current.assets.some((item) => item.id === asset.id)) return;
+    const availableIds = new Set(current.assets.map((asset) => asset.id));
+    const assets = sourceAssets.filter(
+      (asset, index) =>
+        availableIds.has(asset.id) &&
+        sourceAssets.findIndex((candidate) => candidate.id === asset.id) === index,
+    );
+    if (!assets.length) return 0;
     let document = current.documents.find((item) => item.id === current.activeDocumentId) ?? null;
     const hadDocument = Boolean(document);
     if (!document) {
@@ -774,7 +887,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
             `You can open up to ${IMAGE_STUDIO_MAX_DOCUMENTS} canvases at once.`,
           ),
         );
-        return;
+        return 0;
       }
       const now = new Date().toISOString();
       document = {
@@ -791,33 +904,47 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
         updatedAt: now,
       };
     }
-    const scale = Math.min(
-      (document.width * 0.72) / Math.max(1, asset.width),
-      (document.height * 0.72) / Math.max(1, asset.height),
-      1,
-    );
-    const width = Math.max(24, asset.width * scale);
-    const height = Math.max(24, asset.height * scale);
-    const layer: ImageStudioLayer = {
-      id: crypto.randomUUID(),
-      assetId: asset.id,
-      x: (document.width - width) / 2,
-      y: (document.height - height) / 2,
-      width,
-      height,
-      rotation: 0,
-      opacity: 1,
-      zIndex: document.layers.length,
-    };
+    const availableLayers = Math.max(0, IMAGE_STUDIO_MAX_LAYERS - document.layers.length);
+    if (!availableLayers) {
+      setError(
+        tx(
+          `当前画布最多容纳 ${IMAGE_STUDIO_MAX_LAYERS} 个图层。`,
+          `A canvas can contain up to ${IMAGE_STUDIO_MAX_LAYERS} layers.`,
+        ),
+      );
+      return 0;
+    }
+    const selected = assets.slice(0, availableLayers);
+    const layers: ImageStudioLayer[] = selected.map((asset, index) => {
+      const scale = Math.min(
+        (document.width * 0.72) / Math.max(1, asset.width),
+        (document.height * 0.72) / Math.max(1, asset.height),
+        1,
+      );
+      const width = Math.max(24, asset.width * scale);
+      const height = Math.max(24, asset.height * scale);
+      const offset = Math.min(index, 8) * 22;
+      return {
+        id: crypto.randomUUID(),
+        assetId: asset.id,
+        x: clamp((document.width - width) / 2 + offset, 0, document.width - width),
+        y: clamp((document.height - height) / 2 + offset, 0, document.height - height),
+        width,
+        height,
+        rotation: 0,
+        opacity: 1,
+        zIndex: document.layers.length + index,
+      };
+    });
     const nextDocument = {
       ...document,
-      layers: [...document.layers, layer],
+      layers: [...document.layers, ...layers],
       updatedAt: new Date().toISOString(),
     };
     const documents = hadDocument
       ? current.documents.map((item) => (item.id === nextDocument.id ? nextDocument : item))
       : [...current.documents, nextDocument];
-    setSelectedLayerId(layer.id);
+    setSelectedLayerId(layers.at(-1)?.id ?? null);
     updateWorkspace({
       ...current,
       activeDocumentId: nextDocument.id,
@@ -825,11 +952,21 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     });
     if (!hadDocument) void refreshCanvasProjects();
     if (window.matchMedia("(max-width: 680px)").matches) setAssetsExpanded(false);
+    if (selected.length < assets.length)
+      setError(
+        tx(
+          `只添加了前 ${selected.length} 张图片；当前画布最多容纳 ${IMAGE_STUDIO_MAX_LAYERS} 个图层。`,
+          `Only the first ${selected.length} images were added; a canvas can contain up to ${IMAGE_STUDIO_MAX_LAYERS} layers.`,
+        ),
+      );
+    return selected.length;
   };
 
-  const importImages = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = [...(event.target.files ?? [])];
-    event.target.value = "";
+  const addAssetToCanvas = (asset: ImageStudioAsset) => {
+    addAssetsToCanvas([asset]);
+  };
+
+  const importImageFiles = async (files: File[], asReference = false) => {
     if (!files.length || busyRef.current) return;
     setError(null);
     setOperation("import");
@@ -837,12 +974,20 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
       if (files.length > 20)
         throw new Error(tx("每次最多导入 20 张图片。", "Import up to 20 images."));
       const total = files.reduce((sum, file) => sum + file.size, 0);
-      if (total > IMAGE_STUDIO_MAX_IMPORT_BYTES)
+      if (!withinImageStudioByteBudget(total, IMAGE_STUDIO_MAX_IMPORT_BYTES))
         throw new Error(
-          tx("本次图片合计不能超过 100 MiB。", "The import must not exceed 100 MiB."),
+          tx("本次图片合计不能超过 500 MiB。", "The import must not exceed 500 MiB."),
         );
       const payload = await Promise.all(
         files.map(async (file) => {
+          const mimeType = imageFileMimeType(file);
+          if (!mimeType)
+            throw new Error(
+              tx(
+                `${file.name} 不是支持的图片格式。`,
+                `${file.name} is not a supported image format.`,
+              ),
+            );
           if (file.size > IMAGE_STUDIO_MAX_SINGLE_BYTES)
             throw new Error(
               tx(`${file.name} 超过单图 25 MiB 限制。`, `${file.name} exceeds 25 MiB.`),
@@ -851,7 +996,10 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
             name: file.name,
             dataUrl: await new Promise<string>((resolve, reject) => {
               const reader = new FileReader();
-              reader.onload = () => resolve(String(reader.result));
+              reader.onload = () =>
+                resolve(
+                  String(reader.result).replace(/^data:[^;,]*;base64,/, `data:${mimeType};base64,`),
+                );
               reader.onerror = () =>
                 reject(new Error(tx("读取图片失败。", "Could not read image.")));
               reader.readAsDataURL(file);
@@ -863,9 +1011,37 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
       if (!mounted.current) return;
       await workspaceQueue.run(async () => {
         const next = await window.mingshen.importImageStudioAssets(payload);
-        updateWorkspace((current) => mergeAssetResult(current, next));
+        updateWorkspace((current) => {
+          const merged = mergeAssetResult(current, next);
+          if (!asReference) return merged;
+          const existingIds = new Set(current.assets.map((asset) => asset.id));
+          const importedIds = next.assets
+            .filter((asset) => !existingIds.has(asset.id))
+            .map((asset) => asset.id);
+          return {
+            ...merged,
+            generation: {
+              ...merged.generation,
+              referenceEnabled: true,
+            },
+            selectedAssetIds: promoteImageStudioReferenceIds(
+              current.selectedAssetIds,
+              importedIds,
+              IMAGE_STUDIO_MAX_GIF_FRAMES,
+            ),
+          };
+        });
       });
-      showNotice(tx(`已导入 ${files.length} 张图片`, `${files.length} images imported`));
+      showNotice(
+        asReference
+          ? files.length > IMAGE_STUDIO_MAX_REFERENCE_IMAGES
+            ? tx(
+                `已添加 ${files.length} 张素材，前 ${IMAGE_STUDIO_MAX_REFERENCE_IMAGES} 张作为参考图`,
+                `Added ${files.length} assets; the first ${IMAGE_STUDIO_MAX_REFERENCE_IMAGES} will be used as references`,
+              )
+            : tx(`已添加 ${files.length} 张参考图`, `Added ${files.length} references`)
+          : tx(`已导入 ${files.length} 张图片`, `${files.length} images imported`),
+      );
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -873,31 +1049,176 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     }
   };
 
-  const removeAsset = async (asset: ImageStudioAsset) => {
-    if (busyRef.current) return;
+  const importImages = (event: ChangeEvent<HTMLInputElement>, asReference = false) => {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    void importImageFiles(files, asReference);
+  };
+
+  const onImageDragEnter = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasFileTransfer(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    imageDropDepth.current += 1;
+    if (
+      Array.from(event.dataTransfer.items).some((item) => {
+        if (item.kind !== "file") return false;
+        const file = item.getAsFile();
+        return file ? imageFileMimeType(file) !== null : false;
+      })
+    )
+      setImageDropActive(true);
+  };
+
+  const onImageDragOver = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasFileTransfer(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = busyRef.current ? "none" : "copy";
+  };
+
+  const onImageDragLeave = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasFileTransfer(event)) return;
+    event.stopPropagation();
+    imageDropDepth.current = Math.max(0, imageDropDepth.current - 1);
+    if (imageDropDepth.current === 0) setImageDropActive(false);
+  };
+
+  const onImageDrop = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasFileTransfer(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    imageDropDepth.current = 0;
+    setImageDropActive(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (!files.length) return;
+    const images = files.filter((file) => imageFileMimeType(file) !== null);
+    if (!images.length) {
+      setError(tx("拖入的文件中没有支持的图片。", "The drop contains no supported images."));
+      return;
+    }
+    void importImageFiles(images);
+  };
+
+  const removeAssetsWithConfirmation = async (
+    assets: ImageStudioAsset[],
+    batch: boolean,
+  ): Promise<void> => {
+    if (busyRef.current || !assets.length || !mounted.current) return;
+    const assetIds = [...new Set(assets.map((asset) => asset.id))];
     const yes = await confirm({
-      title: tx("删除图片素材", "Delete image"),
-      description: tx(
-        `将删除「${asset.name}」及所有画布中的引用。`,
-        `Delete “${asset.name}” and all canvas references.`,
-      ),
-      confirmLabel: tx("删除素材", "Delete"),
+      title: batch
+        ? tx(`删除 ${assetIds.length} 张图片素材？`, `Delete ${assetIds.length} image assets?`)
+        : tx("删除图片素材", "Delete image"),
+      description:
+        assetIds.length === 1
+          ? tx(
+              `将永久删除「${assets[0]?.name ?? "图片"}」及其保存的生成提示词。若图片仍被任一画布引用，删除会整体取消。`,
+              `Permanently delete “${assets[0]?.name ?? "image"}” and its saved generation prompts. Deletion is cancelled if any canvas still references it.`,
+            )
+          : tx(
+              `将永久删除所选 ${assetIds.length} 张图片及其保存的生成提示词。只要其中一张仍被任一画布引用，整批删除都会取消。`,
+              `Permanently delete the selected ${assetIds.length} images and their saved generation prompts. The entire batch is cancelled if any canvas still references one of them.`,
+            ),
+      confirmLabel: batch ? tx("批量删除", "Delete selected") : tx("删除素材", "Delete"),
       tone: "danger",
     });
     if (!yes || busyRef.current || !mounted.current) return;
-    const operation = `remove-${asset.id}`;
+    const operation = batch ? "batch-remove" : `remove-${assetIds[0]}`;
     setOperation(operation);
+    setError(null);
     try {
       await workspaceQueue.run(async () => {
-        const next = await window.mingshen.removeImageStudioAsset(asset.id);
-        forgetAssetUrl(asset.id);
-        updateWorkspace((current) => mergeRemovedAsset(current, next, asset.id));
+        const result = await window.mingshen.removeImageStudioAssets(assetIds);
+        const removed = new Set(result.removedAssetIds);
+        for (const id of removed) forgetAssetUrl(id);
+        updateWorkspace((current) =>
+          mergeRemovedAssets(current, result.workspace, result.removedAssetIds),
+        );
+        showNotice(
+          removed.size > 1
+            ? tx(`已删除 ${removed.size} 张图片`, `${removed.size} images deleted`)
+            : tx("图片已删除", "Image deleted"),
+        );
+        if (result.warnings.length) setError(result.warnings.join("\n"));
       });
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (busyRef.current === operation) setOperation(null);
     }
+  };
+
+  const removeAsset = async (asset: ImageStudioAsset) => {
+    await removeAssetsWithConfirmation([asset], false);
+  };
+
+  const removeSelectedAssets = async () => {
+    const selectedIds = new Set(workspaceRef.current.selectedAssetIds);
+    await removeAssetsWithConfirmation(
+      workspaceRef.current.assets.filter((asset) => selectedIds.has(asset.id)),
+      true,
+    );
+  };
+
+  const exportSelectedAssets = async () => {
+    if (busyRef.current || !mounted.current) return;
+    const selectedIds = workspaceRef.current.selectedAssetIds.filter((id) =>
+      workspaceRef.current.assets.some((asset) => asset.id === id),
+    );
+    if (!selectedIds.length) return;
+    const operation = "batch-export";
+    const requestId = crypto.randomUUID();
+    const totalBytes = selectedIds.reduce(
+      (sum, id) => sum + (workspaceRef.current.assets.find((asset) => asset.id === id)?.size ?? 0),
+      0,
+    );
+    const unsubscribe = window.mingshen.onImageStudioExportProgress((progress) => {
+      if (progress.requestId === requestId && mounted.current) setExportProgress(progress);
+    });
+    setOperation(operation);
+    setExportProgress({
+      requestId,
+      completedAssets: 0,
+      totalAssets: selectedIds.length,
+      completedBytes: 0,
+      totalBytes,
+      phase: "packing",
+    });
+    setError(null);
+    try {
+      const path = await workspaceQueue.run(() =>
+        window.mingshen.exportImageStudioAssets(selectedIds, requestId),
+      );
+      if (path && mounted.current) {
+        const filename = path.split(/[\\/]/).at(-1) || "images.zip";
+        showNotice(tx(`已导出：${filename}`, `Exported: ${filename}`));
+      }
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      unsubscribe();
+      if (mounted.current) setExportProgress(null);
+      if (busyRef.current === operation) setOperation(null);
+    }
+  };
+
+  const addSelectedAssetsToCanvas = () => {
+    if (busyRef.current) return;
+    const selectedIds = new Set(workspaceRef.current.selectedAssetIds);
+    const assets = workspaceRef.current.assets.filter((asset) => selectedIds.has(asset.id));
+    const added = addAssetsToCanvas(assets);
+    if (added)
+      showNotice(
+        added < assets.length
+          ? tx(
+              `已加入 ${added}/${assets.length} 张；当前画布图层已达上限`,
+              `Added ${added}/${assets.length}; the canvas layer limit was reached`,
+            )
+          : added > 1
+            ? tx(`已加入 ${added} 张图片`, `${added} images added`)
+            : tx("已加入画布", "Added to canvas"),
+      );
   };
 
   const downloadAsset = async (asset: ImageStudioAsset) => {
@@ -918,6 +1239,81 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     }
   };
 
+  const importAssetPrompt = async (asset: ImageStudioAsset) => {
+    if (busyRef.current || !mounted.current) return;
+    const restored = imageStudioAssetPromptRestore(asset);
+    if (!restored) {
+      setError(
+        asset.source === "generated"
+          ? tx(
+              "该素材的生成提示词记录缺失或不完整，无法可靠恢复。当前正面和负面提示词均未更改；可使用反推提示词。",
+              "This asset's generation prompts are missing or incomplete and cannot be restored reliably. Your current positive and negative prompts are unchanged. You can use image-to-prompt instead.",
+            )
+          : tx(
+              "这是外部导入的图片，无法确认其生成提示词。当前正面和负面提示词均未更改；可使用反推提示词。",
+              "This image was imported externally, so its generation prompts cannot be verified. Your current positive and negative prompts are unchanged. You can use image-to-prompt instead.",
+            ),
+      );
+      return;
+    }
+    const before = workspaceRef.current;
+    const operation = `prompt-import-${asset.id}`;
+    setOperation(operation);
+    setError(null);
+    try {
+      const accepted = await confirm({
+        title: tx("覆盖当前工作区提示词？", "Replace workspace prompts?"),
+        description: restored.replacesNegativePrompt
+          ? restored.negativePrompt === ""
+            ? tx(
+                `将用「${asset.name}」生成时保存的正面提示词覆盖当前正面提示词。该素材生成时明确未使用负面提示词，确认后会清空当前负面提示词。取消将保留两项内容。`,
+                `Replace the positive prompt with the one saved for “${asset.name}”? This image was generated without a negative prompt, so confirming will also clear your current negative prompt. Cancel keeps both fields.`,
+              )
+            : tx(
+                `将用「${asset.name}」生成时保存的正面和负面提示词，覆盖当前工作区的两项提示词。取消将保留当前内容。`,
+                `Replace both workspace prompts with the positive and negative prompts saved when “${asset.name}” was generated? Cancel keeps your current text.`,
+              )
+          : tx(
+              `将用「${asset.name}」保存的正面提示词覆盖当前正面提示词。该素材没有可用的负面提示词，当前负面提示词会保留，不会清空。`,
+              `Replace the positive prompt with the one saved for “${asset.name}”? No negative prompt is available, so your current negative prompt will be kept, not cleared.`,
+            ),
+        confirmLabel: tx("覆盖并导入", "Replace and import"),
+      });
+      if (!accepted || !mounted.current) return;
+      const current = workspaceRef.current;
+      const currentAsset = current.assets.find((item) => item.id === asset.id);
+      const currentRestore = currentAsset ? imageStudioAssetPromptRestore(currentAsset) : null;
+      if (
+        current.prompt !== before.prompt ||
+        current.negativePrompt !== before.negativePrompt ||
+        !currentRestore ||
+        currentRestore.prompt !== restored.prompt ||
+        currentRestore.negativePrompt !== restored.negativePrompt ||
+        currentRestore.replacesNegativePrompt !== restored.replacesNegativePrompt
+      ) {
+        setError(
+          tx(
+            "确认期间工作区提示词或素材已更改，未覆盖任何内容。请重新导入并确认。",
+            "The workspace prompts or asset changed while confirmation was open. Nothing was replaced. Import again to confirm the current text.",
+          ),
+        );
+        return;
+      }
+      updateWorkspace((latest) => ({
+        ...latest,
+        prompt: restored.prompt,
+        negativePrompt: restored.negativePrompt ?? latest.negativePrompt,
+      }));
+      setPromptPreview(null);
+      setInspectorExpanded(true);
+      showNotice(tx("提示词已导入", "Prompts imported"));
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (busyRef.current === operation) setOperation(null);
+    }
+  };
+
   const generate = async () => {
     if (busyRef.current) return;
     const snapshot = workspaceRef.current;
@@ -928,6 +1324,18 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
     const imageModel = snapshot.imageModel;
     if (!snapshot.prompt.trim()) {
       setError(tx("提示词不能为空。", "The prompt cannot be empty."));
+      return;
+    }
+    const requestReferenceIds = snapshot.generation.referenceEnabled
+      ? selectImageStudioReferenceIds(snapshot.selectedAssetIds)
+      : [];
+    if (snapshot.generation.referenceEnabled && requestReferenceIds.length === 0) {
+      setError(
+        tx(
+          "请先勾选素材或上传参考图，或关闭“使用参考图”。",
+          "Select or upload a reference image, or turn off Use references.",
+        ),
+      );
       return;
     }
     setOperation("generate");
@@ -945,6 +1353,9 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
           negativePrompt: snapshot.negativePrompt,
           generation: snapshot.generation,
           addToActiveCanvas: true,
+          ...(snapshot.generation.referenceEnabled
+            ? { referenceAssetIds: requestReferenceIds }
+            : {}),
         });
         if (!mounted.current || activeRequestId.current !== requestId) return;
         updateWorkspace((current) => mergeGeneratedResult(current, result));
@@ -1049,13 +1460,14 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
   };
 
   const toggleSelectedAsset = (assetId: string) => {
+    if (busyRef.current) return;
     updateWorkspace((current) => {
       const selected = current.selectedAssetIds.includes(assetId);
       return {
         ...current,
         selectedAssetIds: selected
           ? current.selectedAssetIds.filter((id) => id !== assetId)
-          : [...current.selectedAssetIds, assetId].slice(0, 30),
+          : [...current.selectedAssetIds, assetId].slice(0, IMAGE_STUDIO_MAX_ASSETS),
       };
     });
   };
@@ -1085,8 +1497,10 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
         throw new Error(tx("画布引用的素材已丢失。", "A canvas asset is missing."));
       if (
         sourceAssets.length > 20 ||
-        sourceAssets.reduce((sum, asset) => sum + (asset?.size ?? 0), 0) >
-          IMAGE_STUDIO_MAX_IMPORT_BYTES
+        !withinImageStudioByteBudget(
+          sourceAssets.reduce((sum, asset) => sum + (asset?.size ?? 0), 0),
+          IMAGE_STUDIO_MAX_EXPORT_BYTES,
+        )
       )
         throw new Error(
           tx("画布工程超过导入上限。", "The canvas bundle exceeds the import limit."),
@@ -1377,11 +1791,23 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
       className="image-studio"
       aria-label={tx("生图工作台", "Image Studio")}
       data-testid="image-studio"
-      data-navigation-busy={Boolean(busy)}
-      data-navigation-unsaved={Boolean(promptPreview)}
+      data-navigation-busy={active && Boolean(busy)}
+      data-navigation-unsaved={active && Boolean(promptPreview)}
       aria-busy={canvasMutationBusy}
       inert={canvasMutationBusy}
+      onDragEnter={onImageDragEnter}
+      onDragOver={onImageDragOver}
+      onDragLeave={onImageDragLeave}
+      onDrop={onImageDrop}
     >
+      {imageDropActive && !busy ? (
+        <div className="image-studio__drop-overlay" role="status" data-testid="image-drop-overlay">
+          <span>
+            <ArrowUpFromLine aria-hidden="true" size={20} />
+            {tx("松开放入图片，导入素材库", "Drop images to add them to the library")}
+          </span>
+        </div>
+      ) : null}
       <header className="image-studio__header">
         <div className="image-studio__title">
           <span className="image-studio__mark">
@@ -1625,25 +2051,123 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
                     <span>
                       {selectedAssets.length
                         ? tx(
-                            `已选 ${selectedAssets.length} 帧`,
-                            `${selectedAssets.length} frames selected`,
+                            `已选 ${selectedAssets.length} 张`,
+                            `${selectedAssets.length} images selected`,
                           )
-                        : tx("按顺序选择动图帧", "Select frames in order")}
+                        : tx("未选择图片", "No images selected")}
                     </span>
-                    {selectedAssets.length ? (
+                    <div className="image-library__selection-actions">
                       <button
                         type="button"
                         className="icon-button"
+                        data-testid="image-assets-select-all"
+                        title={tx("全选当前搜索结果", "Select all matching images")}
+                        aria-label={tx("全选当前搜索结果", "Select all matching images")}
+                        disabled={busy !== null || !filteredAssets.length}
+                        onClick={() =>
+                          updateWorkspace((current) => ({
+                            ...current,
+                            selectedAssetIds: [
+                              ...new Set([
+                                ...current.selectedAssetIds,
+                                ...filteredAssets.map((asset) => asset.id),
+                              ]),
+                            ].slice(0, IMAGE_STUDIO_MAX_ASSETS),
+                          }))
+                        }
+                      >
+                        <CheckCheck aria-hidden="true" size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        data-testid="image-assets-clear-selection"
                         title={tx("清空选择", "Clear selection")}
                         aria-label={tx("清空选择", "Clear selection")}
+                        disabled={busy !== null || !selectedAssets.length}
                         onClick={() =>
                           updateWorkspace((current) => ({ ...current, selectedAssetIds: [] }))
                         }
                       >
-                        <X aria-hidden="true" size={14} />
+                        <X aria-hidden="true" size={16} />
                       </button>
-                    ) : null}
+                    </div>
                   </div>
+                  <fieldset className="image-library__batch-actions">
+                    <legend className="visually-hidden">
+                      {tx("素材批量操作", "Batch image actions")}
+                    </legend>
+                    <button
+                      type="button"
+                      data-testid="image-assets-export"
+                      title={tx("将所选原图导出为 ZIP", "Export selected originals as ZIP")}
+                      disabled={busy !== null || !selectedAssets.length}
+                      onClick={() => void exportSelectedAssets()}
+                    >
+                      <ArrowDownToLine aria-hidden="true" size={14} />
+                      {tx("导出", "Export")}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="image-assets-add"
+                      title={tx("将所选加入当前画布", "Add selected to current canvas")}
+                      disabled={busy !== null || !selectedAssets.length}
+                      onClick={addSelectedAssetsToCanvas}
+                    >
+                      <Layers3 aria-hidden="true" size={14} />
+                      {tx("入画布", "Add")}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="image-assets-delete"
+                      title={tx(
+                        "删除所选素材及保存的提示词",
+                        "Delete selected images and saved prompts",
+                      )}
+                      disabled={busy !== null || !selectedAssets.length}
+                      onClick={() => void removeSelectedAssets()}
+                    >
+                      <Trash2 aria-hidden="true" size={14} />
+                      {tx("删除", "Delete")}
+                    </button>
+                  </fieldset>
+                  {busy === "batch-export" && exportProgress ? (
+                    <div
+                      className="image-library__export-progress"
+                      role="status"
+                      aria-live="polite"
+                      data-testid="image-export-progress"
+                    >
+                      <div>
+                        <span>
+                          {exportProgress.phase === "finalizing"
+                            ? tx("正在完成 ZIP 文件", "Finalizing ZIP archive")
+                            : tx(
+                                `正在打包 ${exportProgress.completedAssets}/${exportProgress.totalAssets} 张`,
+                                `Packing ${exportProgress.completedAssets}/${exportProgress.totalAssets} images`,
+                              )}
+                        </span>
+                        <span>
+                          {(exportProgress.completedBytes / 1024 / 1024).toFixed(1)} /{" "}
+                          {(exportProgress.totalBytes / 1024 / 1024).toFixed(1)} MiB
+                        </span>
+                      </div>
+                      <progress
+                        max={100}
+                        value={
+                          exportProgress.phase === "complete"
+                            ? 100
+                            : exportProgress.phase === "finalizing"
+                              ? 96
+                              : Math.floor(
+                                  (95 * exportProgress.completedAssets) /
+                                    Math.max(1, exportProgress.totalAssets),
+                                )
+                        }
+                        aria-label={tx("图片导出进度", "Image export progress")}
+                      />
+                    </div>
+                  ) : null}
                   <div className="image-library__grid">
                     {filteredAssets.map((asset) => (
                       <AssetThumbnail
@@ -1656,6 +2180,7 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
                         }
                         onToggle={() => toggleSelectedAsset(asset.id)}
                         onAdd={() => addAssetToCanvas(asset)}
+                        onImportPrompt={() => void importAssetPrompt(asset)}
                         onDownload={() => void downloadAsset(asset)}
                         onDelete={() => void removeAsset(asset)}
                         downloadBusy={busy === `download-${asset.id}`}
@@ -2320,9 +2845,114 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
                 </div>
               </div>
             ) : null}
+            <div className="image-reference-control">
+              <div className="image-reference-control__header">
+                <label className="image-setting-toggle image-setting-toggle--wide image-reference-toggle">
+                  <span>
+                    <strong>{tx("使用参考图", "Use references")}</strong>
+                    <small>
+                      {tx(
+                        "按素材库勾选顺序取前 3 张，用于结构、风格或角色参考。",
+                        "Uses the first 3 selected assets for composition, style or character reference.",
+                      )}
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-testid="image-reference-toggle"
+                    checked={workspace.generation.referenceEnabled}
+                    disabled={busy !== null}
+                    onChange={(event) => {
+                      const referenceEnabled = event.target.checked;
+                      updateGeneration({ referenceEnabled });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--compact image-reference-control__upload"
+                  data-testid="image-reference-upload"
+                  disabled={busy !== null}
+                  onClick={() => referenceInputRef.current?.click()}
+                >
+                  <ArrowUpFromLine aria-hidden="true" size={13} />
+                  {tx("上传", "Upload")}
+                </button>
+                <input
+                  ref={referenceInputRef}
+                  hidden
+                  type="file"
+                  data-testid="image-reference-input"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  onChange={(event) => void importImages(event, true)}
+                />
+              </div>
+              {workspace.generation.referenceEnabled ? (
+                <>
+                  <div className="image-reference-preview" data-testid="image-reference-preview">
+                    <span className="visually-hidden">{tx("当前参考图", "Active references")}</span>
+                    {referenceAssets.length ? (
+                      referenceAssets.map((asset, index) => (
+                        <ReferenceAssetPreview
+                          key={asset.id}
+                          asset={asset}
+                          order={index + 1}
+                          disabled={busy !== null}
+                          onRemove={() => toggleSelectedAsset(asset.id)}
+                        />
+                      ))
+                    ) : (
+                      <button
+                        type="button"
+                        className="image-reference-preview__empty"
+                        disabled={busy !== null}
+                        onClick={() => {
+                          setAssetsExpanded(true);
+                          if (window.matchMedia("(max-width: 680px)").matches)
+                            setInspectorExpanded(false);
+                        }}
+                      >
+                        <Images aria-hidden="true" size={16} />
+                        <span>
+                          {tx(
+                            "从素材库勾选，或上传一张参考图",
+                            "Select from the library or upload a reference",
+                          )}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                  {referenceOverflow ? (
+                    <p className="image-reference-overflow" data-testid="image-reference-overflow">
+                      {tx(
+                        `已选 ${selectedAssets.length} 张，仅前 ${IMAGE_STUDIO_MAX_REFERENCE_IMAGES} 张会参与本次生成。`,
+                        `${selectedAssets.length} selected; only the first ${IMAGE_STUDIO_MAX_REFERENCE_IMAGES} will be used.`,
+                      )}
+                    </p>
+                  ) : null}
+                </>
+              ) : selectedAssets.length ? (
+                <button
+                  type="button"
+                  className="image-reference-hint"
+                  disabled={busy !== null}
+                  onClick={() => updateGeneration({ referenceEnabled: true })}
+                >
+                  <ImageIcon aria-hidden="true" size={14} />
+                  <span>
+                    {tx(
+                      `素材库已勾选 ${selectedAssets.length} 张，可启用参考图`,
+                      `${selectedAssets.length} library assets selected; enable references`,
+                    )}
+                  </span>
+                </button>
+              ) : null}
+            </div>
             <label className="field">
               <span>{tx("不希望出现", "Avoid")}</span>
               <input
+                data-testid="image-negative-prompt"
                 value={workspace.negativePrompt}
                 maxLength={2_000}
                 onChange={(event) => {
@@ -2364,7 +2994,17 @@ export function ImageStudio({ providers, onOpenProviderSettings }: ImageStudioPr
                 type="button"
                 className="btn btn--primary"
                 data-testid="image-generate"
-                disabled={!workspace.imageModel || !workspace.prompt.trim() || busy !== null}
+                disabled={
+                  !workspace.imageModel ||
+                  !workspace.prompt.trim() ||
+                  busy !== null ||
+                  (workspace.generation.referenceEnabled && !referenceAssetIds.length)
+                }
+                title={
+                  workspace.generation.referenceEnabled && !referenceAssetIds.length
+                    ? tx("请先勾选或上传参考图", "Select or upload a reference image first")
+                    : undefined
+                }
                 onClick={() => void generate()}
               >
                 {busy === "generate" ? (

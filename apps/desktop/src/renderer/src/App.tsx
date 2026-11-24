@@ -209,6 +209,7 @@ export function App() {
   );
   const [agentMode, setAgentMode] = useState<AgentMode>(readAgentMode);
   const [surface, setSurface] = useState<AppSurface>("conversation");
+  const [imageStudioVisited, setImageStudioVisited] = useState(false);
   const [surfaceError, setSurfaceError] = useState("");
   const draftHandoff = useRef(new ComposerDraftHandoff(composerDrafts));
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -1446,6 +1447,7 @@ export function App() {
     if (next !== "conversation" && !allowPlanNavigation(null)) return;
     sessionSelectionSequence.current.begin();
     setSurfaceError("");
+    if (next === "image-studio") setImageStudioVisited(true);
     setSurface(next);
   };
 
@@ -2190,9 +2192,16 @@ export function App() {
             />
           </div>
         ) : null}
-        {surface === "image-studio" ? (
-          <div className="app-studio-host" data-app-surface="image-studio">
+        {imageStudioVisited ? (
+          <div
+            className="app-studio-host"
+            data-app-surface="image-studio"
+            hidden={surface !== "image-studio"}
+            aria-hidden={surface !== "image-studio"}
+            inert={surface !== "image-studio"}
+          >
             <ImageStudio
+              active={surface === "image-studio"}
               providers={providers}
               onOpenProviderSettings={() => {
                 setSettingsSection("providers");

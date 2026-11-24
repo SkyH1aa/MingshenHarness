@@ -25,6 +25,7 @@ directories:
 files:
   - out/**
   - package.json
+  - resources/prompts/**/*
 extraResources:
   - from: node_modules/@img/sharp-win32-x64/README.md
     to: third-party-notices/sharp-win32-x64/app-local-README.md
@@ -47,10 +48,6 @@ extraResources:
     to: docs
     filter:
       - "*.md"
-  - from: resources/prompts
-    to: prompts
-    filter:
-      - "**/*"
   - from: resources/lsp
     to: lsp
     filter:

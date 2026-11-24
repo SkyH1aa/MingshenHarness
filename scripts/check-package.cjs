@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { builtinModules, createRequire } = require('node:module');
+const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { TENCENT_MEMORY_RESOURCES, checkTencentMemoryResources } = require('./tencent-memory-package.cjs');
@@ -757,6 +758,30 @@ function sourcePath(item) {
   return path.join(desktop, 'resources', item);
 }
 
+function packagedPath(root, promptRoot, item) {
+  if (!root) return sourcePath(item);
+  if (item.startsWith('prompts/')) {
+    assert.ok(promptRoot, 'Packaged prompt resources must be available for verification.');
+    return path.join(promptRoot, item.slice('prompts/'.length));
+  }
+  return path.join(root, item);
+}
+
+function listResourceFiles(root, local = '') {
+  const files = fs.readdirSync(root, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+    .flatMap(entry => {
+      assert.ok(!entry.isSymbolicLink(), `Linked packaged resource: ${path.join(root, entry.name)}`);
+      const relative = path.posix.join(local, entry.name);
+      return entry.isDirectory()
+        ? listResourceFiles(path.join(root, entry.name), relative)
+        : entry.isFile()
+          ? [relative]
+          : [];
+    });
+  return files.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
 function isEmptyPackageResourceAllowed(item) {
   return (
     /^prompts\/skills\/work-sources\/entries\/[a-z0-9-]+\/.+/.test(item) &&
@@ -764,12 +789,12 @@ function isEmptyPackageResourceAllowed(item) {
   );
 }
 
-function check(root) {
+function check(root, promptRoot) {
   if (!root) checkDesktopSurfaceSources(desktop);
   checkInstallerVisuals({ desktopDirectory: desktop });
   const version = require(path.join(desktop, 'package.json')).version;
   for (const item of required) {
-    const file = root ? path.join(root, item) : sourcePath(item);
+    const file = packagedPath(root, promptRoot, item);
     const metadata = fs.existsSync(file) ? fs.statSync(file) : null;
     assert.ok(
       metadata &&
@@ -784,7 +809,7 @@ function check(root) {
       assert.ok(fs.readFileSync(file, 'utf8').split(/\r?\n/).slice(0, 5).join('\n').includes(version), `Stale embedded document version: ${item}`);
   }
   const skillsRoot = root
-    ? path.join(root, 'prompts/skills')
+    ? path.join(promptRoot, 'skills')
     : path.join(desktop, 'resources/prompts/skills');
   const workSourceRoot = root ? null : path.resolve(desktop, '../../WorkAgentSkill');
   checkWorkSourceCatalog(skillsRoot, workSourceRoot);
@@ -793,10 +818,12 @@ function check(root) {
     root ? null : path.resolve(desktop, '../..'),
   );
   const designManifestPath = 'prompts/skills/work-visual-design/references/design-entry-manifest.json';
-  const designManifest = JSON.parse(fs.readFileSync(root ? path.join(root, designManifestPath) : sourcePath(designManifestPath), 'utf8'));
+  const designManifest = JSON.parse(fs.readFileSync(packagedPath(root, promptRoot, designManifestPath), 'utf8'));
   assert.equal(designManifest.entryCount, 82, 'Incomplete bundled design entry manifest');
   assert.equal(designManifest.entries.length, designManifest.entryCount, 'Missing design resource entries');
-  const designRoot = root ? path.join(root, 'prompts/skills/work-visual-design') : sourcePath('prompts/skills/work-visual-design');
+  const designRoot = root
+    ? path.join(promptRoot, 'skills/work-visual-design')
+    : sourcePath('prompts/skills/work-visual-design');
   const designTargets = new Set();
   for (const entry of designManifest.entries) {
     assert.equal(typeof entry.targetResource, 'string', 'Missing design target');
@@ -817,15 +844,80 @@ function check(root) {
     { vendor: path.resolve(desktop, '../../third_party/tencentdb-agent-memory') },
   );
 }
-module.exports = async context => {
+
+function extractAsarDirectory(asar, archive, packageDirectory, destination) {
+  const prefix = `${packageDirectory.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')}/`;
+  const entries = asar.listPackage(archive)
+    .map(entry => ({
+      archivePath: entry.replace(/^[\\/]+/, ''),
+      relativePath: entry.replaceAll('\\', '/').replace(/^\/+/, ''),
+    }))
+    .filter(({ relativePath }) => relativePath.startsWith(prefix));
+  assert.ok(entries.length > 0, `Packaged ASAR directory is missing: ${packageDirectory}`);
+
+  const files = [];
+  for (const entry of entries) {
+    const relative = entry.relativePath.slice(prefix.length);
+    if (!relative) continue;
+    const target = path.resolve(destination, relative);
+    const local = path.relative(destination, target);
+    assert.ok(
+      local && local !== '..' && !local.startsWith(`..${path.sep}`) && !path.isAbsolute(local),
+      `ASAR entry escapes verification root: ${entry.relativePath}`,
+    );
+    const metadata = asar.statFile(archive, entry.archivePath, false);
+    if (metadata.files) {
+      fs.mkdirSync(target, { recursive: true });
+      continue;
+    }
+    assert.ok(!metadata.link, `Linked ASAR resource is not allowed: ${entry.relativePath}`);
+    assert.ok(
+      !metadata.unpacked,
+      `Prompt resource must remain packed inside app.asar: ${entry.relativePath}`,
+    );
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, asar.extractFile(archive, entry.archivePath), { flag: 'wx' });
+    files.push(relative.replaceAll('\\', '/'));
+  }
+  return files.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
+async function afterPack(context) {
   const resources = path.join(context.appOutDir, 'resources');
-  check(resources);
-  for (const file of ['MingshenHarnessExperimental.exe', 'MingshenHarnessExperimental.exe.json'])
-    assert.ok(!fs.existsSync(path.join(context.appOutDir, file)), 'Experimental files must not be shipped.');
-  assert.ok(!fs.existsSync(path.join(resources, 'default_app.asar')), 'Electron sample application must not be shipped.');
   const builderEntry = require.resolve('app-builder-lib', { paths: [path.dirname(require.resolve('electron-builder', { paths: [desktop] }))] });
   const asar = require(require.resolve('@electron/asar', { paths: [path.dirname(builderEntry)] }));
   const archive = path.join(resources, 'app.asar');
+  assert.ok(fs.existsSync(archive), 'Packaged app.asar is missing.');
+  assert.ok(!fs.existsSync(path.join(resources, 'prompts')), 'Prompt resources must be embedded in app.asar, not extracted as extra resources.');
+
+  const temporaryPromptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingshen-packaged-prompts-'));
+  const promptRoot = path.join(temporaryPromptRoot, 'prompts');
+  try {
+    const packagedPromptFiles = extractAsarDirectory(asar, archive, 'resources/prompts', promptRoot);
+    const sourcePromptRoot = path.join(desktop, 'resources/prompts');
+    const sourcePromptFiles = listResourceFiles(sourcePromptRoot);
+    assert.deepEqual(packagedPromptFiles, sourcePromptFiles, 'Packaged prompt tree does not match its source.');
+    for (const relative of sourcePromptFiles) {
+      assert.equal(
+        createHash('sha256').update(fs.readFileSync(path.join(promptRoot, relative))).digest('hex'),
+        createHash('sha256').update(fs.readFileSync(path.join(sourcePromptRoot, relative))).digest('hex'),
+        `Stale packaged prompt resource: ${relative}`,
+      );
+    }
+    check(resources, promptRoot);
+  } finally {
+    const resolvedTemporary = path.resolve(temporaryPromptRoot);
+    assert.equal(
+      path.dirname(resolvedTemporary),
+      path.resolve(os.tmpdir()),
+      'Prompt verification cleanup escaped the temporary directory.',
+    );
+    fs.rmSync(resolvedTemporary, { recursive: true, force: true });
+  }
+
+  for (const file of ['MingshenHarnessExperimental.exe', 'MingshenHarnessExperimental.exe.json'])
+    assert.ok(!fs.existsSync(path.join(context.appOutDir, file)), 'Experimental files must not be shipped.');
+  assert.ok(!fs.existsSync(path.join(resources, 'default_app.asar')), 'Electron sample application must not be shipped.');
   const files = new Set(asar.listPackage(archive).map(file => file.replaceAll('\\', '/').replace(/^\//, '')));
   assert.ok(![...files].some(file => /(?:^|\/)mingshen\.db(?:-(?:wal|shm))?$/i.test(file)), 'User database and consent records must not be shipped.');
   assert.ok(![...files].some(file => /(?:^|\/)logs\/runtime(?:\.\d+)?\.jsonl$/i.test(file)), 'Private runtime logs must not be shipped.');
@@ -848,7 +940,8 @@ module.exports = async context => {
   });
   checkPackagedAuthoringRuntime(archive, unpacked, files, asar);
   console.log('Packaged application resource validation passed.');
-};
+}
+module.exports = afterPack;
 if (require.main === module) {
   checkElectronRuntime();
   check(null);
@@ -878,3 +971,5 @@ module.exports.checkImportedSkillSources = checkImportedSkillSources;
 module.exports.importedSkillTreeDescriptor = importedSkillTreeDescriptor;
 module.exports.inventoryWorkSkills = inventoryWorkSkills;
 module.exports.isEmptyPackageResourceAllowed = isEmptyPackageResourceAllowed;
+module.exports.extractAsarDirectory = extractAsarDirectory;
+module.exports.listResourceFiles = listResourceFiles;

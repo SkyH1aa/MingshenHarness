@@ -21,8 +21,13 @@ Function mingshenWelcomeCreate
   ; isUpdated helper here because it expands to a plugin call while this include
   ; is parsed, before electron-builder's extra plugin directory is guaranteed.
   ${GetParameters} $0
+  ; The app hands off with Electron's --updated form. Keep /updated for
+  ; manually launched update installers and legacy update clients.
+  ${GetOptions} $0 "--updated" $1
+  IfErrors 0 mingshenWelcomeSkip
   ${GetOptions} $0 "/updated" $1
   IfErrors mingshenWelcomeCreatePage
+mingshenWelcomeSkip:
   Abort
 mingshenWelcomeCreatePage:
 

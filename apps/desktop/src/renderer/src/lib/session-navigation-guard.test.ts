@@ -164,6 +164,14 @@ describe("session navigation guard", () => {
     });
   });
 
+  it("does not let a hidden background image request block session navigation", () => {
+    const { add, input } = fixture();
+    add("image-studio", { "data-navigation-busy": "false" });
+    expect(
+      sessionNavigationBlock({ ...input, targetSessionId: "next", leavingStudio: true }),
+    ).toBeNull();
+  });
+
   it.each(["image-studio", "creative-workstation"])(
     "protects unsaved %s content when leaving even for the selected session",
     (className) => {

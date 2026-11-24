@@ -18,6 +18,7 @@ import {
 } from "electron";
 import { COMPANION_IPC_CHANNELS } from "../shared/desktop-companion";
 import type { BootstrapData, ChatStreamEvent, SessionUpdateInput } from "../shared/domain";
+import { IMAGE_STUDIO_MAX_ASSETS } from "../shared/image-studio";
 import type { AppInfo } from "../shared/ipc";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { localizeError } from "../shared/localized-errors";
@@ -73,6 +74,7 @@ import {
   recordRuntimeError,
 } from "./diagnostics/runtime-log";
 import { ModelCatalogService } from "./providers/model-catalog-service";
+import { resolveRuntimeResourcePaths } from "./resource-paths";
 import { createSessionBatchGuard } from "./sessions/session-batch-guard";
 import { completeSessionUpdate, prepareSessionArchive } from "./sessions/session-update-completion";
 import { scheduleStartupIndexWarmup } from "./storage/startup-index-warmup";
@@ -1614,6 +1616,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.imageStudioRemoveAsset, (_event, assetId: unknown) =>
     requireServices().imageStudioService.removeAsset(assetId),
   );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemoveAssets, (_event, assetIds: unknown) =>
+    requireServices().imageStudioService.removeAssets(assetIds),
+  );
   ipcMain.handle(IPC_CHANNELS.imageStudioExportAsset, async (_event, assetId: unknown) => {
     const imageStudioService = requireServices().imageStudioService;
     if (typeof assetId !== "string") throw new Error("图片素材标识无效。");
@@ -1633,6 +1638,44 @@ function registerIpcHandlers(): void {
     await imageStudioService.exportAsset(assetId, result.filePath);
     return result.filePath;
   });
+  ipcMain.handle(
+    IPC_CHANNELS.imageStudioExportAssets,
+    async (event, assetIds: unknown, requestId: unknown) => {
+      const imageStudioService = requireServices().imageStudioService;
+      if (
+        !Array.isArray(assetIds) ||
+        assetIds.length < 1 ||
+        assetIds.length > IMAGE_STUDIO_MAX_ASSETS ||
+        assetIds.some((assetId) => typeof assetId !== "string")
+      )
+        throw new Error(`请选择 1 到 ${IMAGE_STUDIO_MAX_ASSETS} 张图片素材后再导出。`);
+      if (typeof requestId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(requestId))
+        throw new Error("图片导出请求标识无效。");
+      const workspace = imageStudioService.getWorkspace();
+      if (assetIds.some((id) => !workspace.assets.some((asset) => asset.id === id)))
+        throw new Error("所选图片素材已变化，请刷新素材库后重试。");
+      const options = {
+        title: "批量导出图片素材",
+        defaultPath: `MingshenHarness-images-${new Date().toISOString().slice(0, 10)}.zip`,
+        filters: [{ name: "ZIP", extensions: ["zip"] }],
+      };
+      const result = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, options)
+        : await dialog.showSaveDialog(options);
+      if (result.canceled || !result.filePath) return null;
+      const sender = event.sender;
+      await imageStudioService.exportAssets(
+        assetIds,
+        result.filePath,
+        (progress) => {
+          if (!sender.isDestroyed())
+            sender.send(IPC_CHANNELS.imageStudioExportProgress, { ...progress, requestId });
+        },
+        requestId,
+      );
+      return result.filePath;
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.imageStudioGenerate, (_event, input) =>
     requireServices().imageStudioService.generate(input),
   );
@@ -2754,13 +2797,17 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
             toastActivatorClsid: app.toastActivatorCLSID,
           });
       }
+      const runtimeResourcePaths = resolveRuntimeResourcePaths({
+        isPackaged: isPackagedBuild,
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath,
+      });
       services = createAppServices({
         databasePath: join(app.getPath("userData"), "mingshen.db"),
         extensionDirectory: join(app.getPath("userData"), "extensions"),
         userDataDirectory: app.getPath("userData"),
-        promptDirectory: isPackagedBuild
-          ? join(process.resourcesPath, "prompts")
-          : join(app.getAppPath(), "resources", "prompts"),
+        resourceDirectory: runtimeResourcePaths.resourceDirectory,
+        promptDirectory: runtimeResourcePaths.promptDirectory,
         appVersion: app.getVersion(),
         emit: (event) => {
           try {
@@ -3011,7 +3058,7 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
       try {
         await Promise.all([services?.dispose(), updates?.shutdown()]);
         await runtimeLogs?.flush();
-        if (updateInstaller) app.relaunch({ execPath: updateInstaller, args: [] });
+        if (updateInstaller) app.relaunch({ execPath: updateInstaller, args: ["--updated"] });
       } catch (cause) {
         recordRuntimeError("desktop.shutdown", cause);
         console.error("Shutdown failed; automatic installer launch was blocked:", cause);

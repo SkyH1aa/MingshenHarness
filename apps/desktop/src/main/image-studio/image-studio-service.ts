@@ -10,20 +10,26 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { extname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Zip, ZipPassThrough } from "fflate";
+import sharp from "sharp";
 import type { ModelConfig, ModelReference, ProviderView } from "../../shared/domain";
 import {
   emptyImageStudioWorkspace,
   IMAGE_STUDIO_MAX_ASSETS,
   IMAGE_STUDIO_MAX_DOCUMENTS,
+  IMAGE_STUDIO_MAX_EXPORT_BYTES,
   IMAGE_STUDIO_MAX_GENERATED_COUNT,
+  IMAGE_STUDIO_MAX_GENERATION_BYTES,
   IMAGE_STUDIO_MAX_IMPORT_BYTES,
   IMAGE_STUDIO_MAX_LAYERS,
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
   type ImageStudioAsset,
   type ImageStudioAssetData,
+  type ImageStudioAssetRemovalResult,
   type ImageStudioCanvas,
   type ImageStudioCanvasSummary,
+  type ImageStudioExportProgress,
   type ImageStudioGenerateInput,
   type ImageStudioGenerateResult,
   type ImageStudioImportFile,
@@ -33,8 +39,11 @@ import {
   type ImageStudioServiceResult,
   type ImageStudioWorkspace,
   imageStudioApiParameters,
+  normalizeImageStudioAssetPromptMetadata,
   normalizeImageStudioGenerationSettings,
+  selectImageStudioReferenceIds,
   validateImageStudioGenerationSettings,
+  withinImageStudioByteBudget,
 } from "../../shared/image-studio";
 import {
   isImageOutputModel,
@@ -60,9 +69,11 @@ const MAX_WORKSPACE_BYTES = 2 * 1024 * 1024;
 const MAX_CANVAS_PROJECT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_CHARS = 4_000;
 const MAX_TEXT_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_SINGLE_BYTES * 4) / 3) + 64 * 1024;
-const MAX_IMAGE_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_IMPORT_BYTES * 4) / 3) + 1024 * 1024;
+const MAX_IMAGE_RESPONSE_BYTES =
+  Math.ceil((IMAGE_STUDIO_MAX_GENERATION_BYTES * 4) / 3) + 1024 * 1024;
 const TEXT_HTTP_TIMEOUT_MS = 120_000;
 const IMAGE_HTTP_TIMEOUT_MS = 180_000;
+const MAX_BATCH_ASSETS = IMAGE_STUDIO_MAX_ASSETS;
 const SAFE_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SAFE_CANVAS_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -78,6 +89,7 @@ interface CanvasFileChange {
 }
 class CanvasRecoveryError extends Error {}
 class CanvasProjectNotFoundError extends Error {}
+class CanvasTrashRecoveryError extends Error {}
 
 interface TextModelResult {
   text: string;
@@ -155,6 +167,43 @@ function safeAssetName(value: unknown, fallbackExtension: string): string {
     .slice(0, 120);
   if (!normalized) return `image${fallbackExtension}`;
   return extname(normalized) ? normalized : `${normalized}${fallbackExtension}`;
+}
+
+function normalizeBatchAssetIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BATCH_ASSETS)
+    throw new Error(`每次请选择 1 到 ${MAX_BATCH_ASSETS} 张图片。`);
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const id of value) {
+    if (typeof id !== "string" || !SAFE_ASSET_ID.test(id)) throw new Error("图片素材标识无效。");
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (!ids.length) throw new Error(`每次请选择 1 到 ${MAX_BATCH_ASSETS} 张图片。`);
+  return ids;
+}
+
+function archiveExtensionForAsset(asset: ImageStudioAsset): string {
+  if (asset.mimeType === "image/jpeg") return ".jpg";
+  return `.${asset.mimeType.slice("image/".length)}`;
+}
+
+function uniqueArchiveEntryName(asset: ImageStudioAsset, used: Set<string>): string {
+  const extension = archiveExtensionForAsset(asset);
+  const safeName = safeAssetName(asset.name, extension);
+  const stem = safeName
+    .replace(/\.[^.]*$/, "")
+    .replace(/[. ]+$/, "")
+    .slice(0, 100);
+  const base = stem || "image";
+  for (let sequence = 1; ; sequence += 1) {
+    const candidate = `${base}${sequence === 1 ? "" : ` (${sequence})`}${extension}`;
+    const key = candidate.toLocaleLowerCase("en-US");
+    if (used.has(key)) continue;
+    used.add(key);
+    return candidate;
+  }
 }
 
 function fetchErrorMessage(
@@ -291,10 +340,12 @@ function validateTextPrompt(prompt: unknown): string {
   return prompt.trim();
 }
 
-function promptWithNegative(prompt: string, negativePrompt: unknown): string {
-  if (typeof negativePrompt !== "string" || !negativePrompt.trim()) return prompt;
-  const negative = negativePrompt.trim().slice(0, 2_000);
-  return `${prompt}\n\nAvoid these elements: ${negative}`;
+function normalizeNegativePrompt(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 2_000) : "";
+}
+
+function promptWithNegative(prompt: string, negativePrompt: string | null): string {
+  return negativePrompt ? `${prompt}\n\nAvoid these elements: ${negativePrompt}` : prompt;
 }
 
 function imageMimeFromDataUrl(dataUrl: string): string {
@@ -343,6 +394,59 @@ export class ImageStudioService {
     await this.assertStorageDirectory(this.canvasTrashDirectory);
   }
 
+  private async cleanCanvasTrash(): Promise<void> {
+    const entries = await readdir(this.canvasTrashDirectory, { withFileTypes: true });
+    const referencedCanvasIds = new Set(this.getWorkspace().documents.map((canvas) => canvas.id));
+    for (const entry of entries) {
+      const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.[0-9a-f-]{36}\.json$/i.exec(entry.name);
+      if (!match) continue;
+      const path = join(this.canvasTrashDirectory, entry.name);
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink())
+        throw new Error("画布回收区包含非普通文件，素材删除已取消。");
+      try {
+        this.assertOpen();
+        const canvasId = match[1];
+        if (canvasId && referencedCanvasIds.has(canvasId)) {
+          const source = this.canvasPath(canvasId);
+          let sourceInfo: Awaited<ReturnType<typeof lstat>> | null = null;
+          try {
+            sourceInfo = await lstat(source);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+              throw new CanvasTrashRecoveryError(
+                `无法确认画布「${canvasId}」的恢复目标，已保留回收文件：${this.errorMessage(error)}`,
+                { cause: error },
+              );
+          }
+          if (!sourceInfo) {
+            try {
+              this.assertOpen();
+              await rename(path, source);
+            } catch (error) {
+              throw new CanvasTrashRecoveryError(
+                `无法恢复仍被工作区引用的画布「${canvasId}」，工程仍保留在回收区：${path}`,
+                { cause: error },
+              );
+            }
+            continue;
+          }
+          if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink())
+            throw new CanvasTrashRecoveryError(
+              `画布「${canvasId}」的恢复目标不是普通文件，已保留回收文件：${path}`,
+            );
+        }
+        await unlink(path);
+      } catch (error) {
+        if (error instanceof CanvasTrashRecoveryError) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          throw new Error(`无法清理画布回收区文件，素材删除已取消：${this.errorMessage(error)}`, {
+            cause: error,
+          });
+      }
+    }
+  }
+
   getCanvasDirectoryPath(): string {
     return this.canvasDirectory;
   }
@@ -350,9 +454,17 @@ export class ImageStudioService {
   async loadWorkspace(): Promise<ImageStudioWorkspace> {
     return this.trackOperation(() =>
       this.trackCanvasOperation(async () => {
+        try {
+          await this.cleanCanvasTrash();
+        } catch (error) {
+          if (error instanceof CanvasTrashRecoveryError) throw error;
+          // A locked trash file must not prevent the current workspace from opening.
+        }
         await this.ensureCanvasLibrary();
         const workspace = await this.loadWorkspaceFromProjects();
-        return this.commitWorkspace(workspace, workspace.assets);
+        const loaded = this.commitWorkspace(workspace, workspace.assets);
+        this.backfillLegacyWorkspaceBackup(loaded);
+        return loaded;
       }),
     );
   }
@@ -523,7 +635,9 @@ export class ImageStudioService {
         await rename(source, trash);
         try {
           const workspace = this.commitWorkspace(loaded, loaded.assets);
-          await unlink(trash).catch(() => undefined);
+          await unlink(trash).catch(() => {
+            // Keep the recoverable trash entry; asset deletion retries cleanup before removing prompts.
+          });
           return workspace;
         } catch (error) {
           try {
@@ -541,13 +655,21 @@ export class ImageStudioService {
   }
 
   private commitWorkspace(input: unknown, assets: ImageStudioAsset[]): ImageStudioWorkspace {
+    const workspace = this.prepareWorkspaceForCommit(input, assets);
+    this.repository.setSetting(WORKSPACE_KEY, workspace);
+    return workspace;
+  }
+
+  private prepareWorkspaceForCommit(
+    input: unknown,
+    assets: ImageStudioAsset[],
+  ): ImageStudioWorkspace {
     this.assertOpen();
     this.assertWorkspaceLimits(input);
     const workspace = this.normalizeWorkspace(input, assets);
     const serialized = JSON.stringify(workspace);
     if (Buffer.byteLength(serialized) > MAX_WORKSPACE_BYTES)
       throw new Error("画布工程超过 2 MiB，请减少图层数量或拆分项目。");
-    this.repository.setSetting(WORKSPACE_KEY, workspace);
     return workspace;
   }
 
@@ -618,6 +740,7 @@ export class ImageStudioService {
 
   private async ensureCanvasLibrary(): Promise<void> {
     await this.initialize();
+    this.assertOpen();
     if (this.repository.getSetting(CANVAS_MIGRATION_KEY) === true) return;
     const original = this.repository.getSetting(WORKSPACE_KEY);
     const workspace = this.normalizeWorkspace(original, this.assets());
@@ -631,11 +754,21 @@ export class ImageStudioService {
       }
     }
     if (
-      original !== undefined &&
-      this.repository.getSetting(LEGACY_WORKSPACE_BACKUP_KEY) === undefined
+      this.repository.hasSetting(WORKSPACE_KEY) &&
+      !this.repository.hasSetting(LEGACY_WORKSPACE_BACKUP_KEY)
     )
       this.repository.setSetting(LEGACY_WORKSPACE_BACKUP_KEY, original);
     this.repository.setSetting(CANVAS_MIGRATION_KEY, true);
+  }
+
+  private backfillLegacyWorkspaceBackup(workspace: ImageStudioWorkspace): void {
+    this.assertOpen();
+    if (
+      this.repository.getSetting(CANVAS_MIGRATION_KEY) === true &&
+      this.repository.hasSetting(WORKSPACE_KEY) &&
+      !this.repository.hasSetting(LEGACY_WORKSPACE_BACKUP_KEY)
+    )
+      this.repository.setSetting(LEGACY_WORKSPACE_BACKUP_KEY, workspace);
   }
 
   private async loadWorkspaceFromProjects(
@@ -1027,6 +1160,125 @@ export class ImageStudioService {
     return this.trackOperation(() => this.queueAssetRead(assetId));
   }
 
+  exportAssets(
+    assetIds: unknown,
+    destination: string,
+    onProgress?: (progress: ImageStudioExportProgress) => void,
+    requestId: string = randomUUID(),
+  ): Promise<void> {
+    return this.trackOperation(async () => {
+      if (
+        typeof destination !== "string" ||
+        !destination.trim() ||
+        destination.length > 32_768 ||
+        !isAbsolute(destination)
+      )
+        throw new Error("ZIP 导出位置无效。");
+      const resolvedDestination = resolve(destination);
+      const [imageStudioDirectory, destinationParent] = await Promise.all([
+        realpath(this.studioDirectory),
+        realpath(dirname(resolvedDestination)),
+      ]);
+      const canonicalDestination = join(destinationParent, basename(resolvedDestination));
+      if (
+        canonicalDestination === imageStudioDirectory ||
+        isPathInside(imageStudioDirectory, canonicalDestination)
+      )
+        throw new Error("ZIP 不能导出到生图工作台数据目录或覆盖内部素材。");
+      const ids = normalizeBatchAssetIds(assetIds);
+      const byId = new Map(this.assets().map((asset) => [asset.id, asset]));
+      const selected: ImageStudioAsset[] = [];
+      for (const id of ids) {
+        const asset = byId.get(id);
+        if (!asset) throw new Error("图片素材不存在。");
+        selected.push(asset);
+      }
+      const totalBytes = selected.reduce((sum, asset) => sum + asset.size, 0);
+      if (!withinImageStudioByteBudget(totalBytes, IMAGE_STUDIO_MAX_EXPORT_BYTES))
+        throw new Error("本次 ZIP 导出的图片合计不能超过 500 MiB。");
+
+      const reportProgress = (
+        completedAssets: number,
+        completedBytes: number,
+        phase: ImageStudioExportProgress["phase"],
+      ) => {
+        try {
+          onProgress?.({
+            requestId,
+            completedAssets,
+            totalAssets: selected.length,
+            completedBytes,
+            totalBytes,
+            phase,
+          });
+        } catch {
+          // Renderer progress reporting must not interrupt a file export.
+        }
+      };
+
+      const temporaryPath = join(dirname(destination), `.mingshen-images-${randomUUID()}.zip.tmp`);
+      let file: Awaited<ReturnType<typeof open>> | null = null;
+      let completed = false;
+      try {
+        reportProgress(0, 0, "packing");
+        file = await open(temporaryPath, "wx", 0o600);
+        let writeFailure: Error | null = null;
+        let writeTail: Promise<void> = Promise.resolve();
+        let finalSeen = false;
+        const zip = new Zip((error, chunk, final) => {
+          if (error) {
+            writeFailure ??=
+              error instanceof Error ? error : new Error(`ZIP 生成失败：${String(error)}`);
+            return;
+          }
+          if (chunk?.length) {
+            const bytes = Uint8Array.from(chunk);
+            writeTail = writeTail
+              .then(async () => {
+                if (!file || writeFailure) return;
+                await file.writeFile(bytes);
+              })
+              .catch((cause: unknown) => {
+                writeFailure ??=
+                  cause instanceof Error ? cause : new Error(`ZIP 写入失败：${String(cause)}`);
+              });
+          }
+          if (final) finalSeen = true;
+        });
+        const usedNames = new Set<string>();
+        let completedBytes = 0;
+        for (const [index, asset] of selected.entries()) {
+          this.assertOpen();
+          const data = await this.queueAssetBytes(asset.id);
+          if (writeFailure) break;
+          const entry = new ZipPassThrough(uniqueArchiveEntryName(asset, usedNames));
+          zip.add(entry);
+          entry.push(data.bytes, true);
+          await writeTail;
+          if (writeFailure) break;
+          completedBytes += data.bytes.length;
+          reportProgress(index + 1, completedBytes, "packing");
+        }
+        if (writeFailure) throw writeFailure;
+        zip.end();
+        await writeTail;
+        if (writeFailure) throw writeFailure;
+        if (!finalSeen) throw new Error("ZIP 输出未完整结束。");
+        reportProgress(selected.length, completedBytes, "finalizing");
+        this.assertOpen();
+        await file.sync();
+        await file.close();
+        file = null;
+        await rename(temporaryPath, destination);
+        completed = true;
+        reportProgress(selected.length, completedBytes, "complete");
+      } finally {
+        await file?.close().catch(() => undefined);
+        if (!completed) await unlink(temporaryPath).catch(() => undefined);
+      }
+    });
+  }
+
   exportAsset(assetId: unknown, destinationPath: unknown): Promise<void> {
     return this.trackOperation(async () => {
       if (
@@ -1045,7 +1297,14 @@ export class ImageStudioService {
   }
 
   private queueAssetRead(assetId: unknown, signal?: AbortSignal): Promise<ImageStudioAssetData> {
-    const reading = this.assetReadQueue.then(() => this.readAssetData(assetId, signal));
+    return this.queueAssetBytes(assetId, signal).then((data) => ({
+      id: data.id,
+      dataUrl: `data:${data.mimeType};base64,${data.bytes.toString("base64")}`,
+    }));
+  }
+
+  private queueAssetBytes(assetId: unknown, signal?: AbortSignal) {
+    const reading = this.assetReadQueue.then(() => this.readAssetBytes(assetId, signal));
     this.assetReadQueue = reading.then(
       () => undefined,
       () => undefined,
@@ -1053,10 +1312,10 @@ export class ImageStudioService {
     return reading;
   }
 
-  private async readAssetData(
+  private async readAssetBytes(
     assetId: unknown,
     signal?: AbortSignal,
-  ): Promise<ImageStudioAssetData> {
+  ): Promise<{ id: string; mimeType: ImageStudioAsset["mimeType"]; bytes: Buffer<ArrayBuffer> }> {
     this.assertOpen();
     signal?.throwIfAborted();
     if (typeof assetId !== "string") throw new Error("图片素材标识无效。");
@@ -1069,7 +1328,7 @@ export class ImageStudioService {
     );
     signal?.throwIfAborted();
     const file = await open(guarded.path, "r");
-    let bytes: Buffer;
+    let bytes: Buffer<ArrayBuffer>;
     try {
       const stat = await file.stat();
       if (!stat.isFile() || stat.size < 1 || stat.size > IMAGE_STUDIO_MAX_SINGLE_BYTES)
@@ -1095,7 +1354,8 @@ export class ImageStudioService {
       throw new Error("图片素材尺寸与保存的记录不一致。");
     return {
       id: asset.id,
-      dataUrl: `data:${asset.mimeType};base64,${bytes.toString("base64")}`,
+      mimeType: asset.mimeType,
+      bytes,
     };
   }
 
@@ -1118,8 +1378,8 @@ export class ImageStudioService {
       return { file, data };
     });
     const total = parsed.reduce((sum, item) => sum + item.data.bytes.length, 0);
-    if (total > IMAGE_STUDIO_MAX_IMPORT_BYTES)
-      throw new Error("本次导入图片合计不能超过 100 MiB。");
+    if (!withinImageStudioByteBudget(total, IMAGE_STUDIO_MAX_IMPORT_BYTES))
+      throw new Error("本次导入图片合计不能超过 500 MiB。");
 
     const written: string[] = [];
     const temporaryFiles: string[] = [];
@@ -1139,9 +1399,13 @@ export class ImageStudioService {
           size: data.bytes.length,
           width: detected.width,
           height: detected.height,
-          source: file.source === "paste" || file.source === "generated" ? file.source : "imported",
+          source: file.source === "paste" ? "paste" : "imported",
           createdAt: new Date().toISOString(),
           prompt: null,
+          negativePrompt: null,
+          revisedPrompt: null,
+          promptOrigin: null,
+          promptMetadataVersion: null,
           model: null,
         };
         const path = this.assetPath(asset);
@@ -1177,40 +1441,120 @@ export class ImageStudioService {
     return this.trackOperation(() =>
       this.trackCanvasOperation(async () => {
         await this.ensureCanvasLibrary();
-        return this.removeAssetInternal(assetId);
+        const result = await this.removeAssetsInternal([assetId]);
+        return result.workspace;
       }),
     );
   }
 
-  private async removeAssetInternal(assetId: unknown): Promise<ImageStudioWorkspace> {
-    if (typeof assetId !== "string") throw new Error("图片素材标识无效。");
+  removeAssets(assetIds: unknown): Promise<ImageStudioAssetRemovalResult> {
+    return this.trackOperation(() =>
+      this.trackCanvasOperation(async () => {
+        await this.ensureCanvasLibrary();
+        return this.removeAssetsInternal(assetIds);
+      }),
+    );
+  }
+
+  private async removeAssetsInternal(assetIds: unknown): Promise<ImageStudioAssetRemovalResult> {
+    const ids = normalizeBatchAssetIds(assetIds);
+    await this.cleanCanvasTrash();
+    const workspace = this.getWorkspace();
+    const assetsById = new Map(workspace.assets.map((asset) => [asset.id, asset]));
+    const selected = ids.map((id) => assetsById.get(id));
+    if (selected.some((asset) => !asset)) throw new Error("图片素材不存在。");
+    const assets = selected as ImageStudioAsset[];
+    const targetIds = new Set(ids);
+
     const projects = await this.listCanvasProjects();
     const unreadable = projects.find((project) => !project.available);
     if (unreadable)
       throw new Error(`无法确认素材引用，因为画布「${unreadable.name}」不可读取；删除已取消。`);
-    const referencing = projects.find((project) => project.referencedAssetIds.includes(assetId));
-    if (referencing)
-      throw new Error(`图片仍被画布「${referencing.name}」引用。请先从画布移除该图层。`);
-    const workspace = this.getWorkspace();
-    const asset = workspace.assets.find((item) => item.id === assetId);
-    if (!asset) throw new Error("图片素材不存在。");
+    const projectIds = new Set(projects.map((project) => project.id));
+    const missingOpenProject = workspace.documents.find((document) => !projectIds.has(document.id));
+    if (missingOpenProject)
+      throw new Error(
+        `无法确认素材引用，因为画布「${missingOpenProject.name}」的工程文件不可读取；删除已取消。`,
+      );
+    const referencing = projects.find((project) =>
+      project.referencedAssetIds.some((id) => targetIds.has(id)),
+    );
+    if (referencing) throw new Error(`图片仍被画布「${referencing.name}」引用；批量删除已取消。`);
+    const pendingReference = workspace.documents.find((document) =>
+      document.layers.some((layer) => targetIds.has(layer.assetId)),
+    );
+    if (pendingReference)
+      throw new Error(`图片仍被画布「${pendingReference.name}」引用；批量删除已取消。`);
+
     const next: ImageStudioWorkspace = {
       ...workspace,
-      assets: workspace.assets.filter((item) => item.id !== assetId),
-      selectedAssetIds: workspace.selectedAssetIds.filter((id) => id !== assetId),
-      documents: workspace.documents.map((document) => ({
-        ...document,
-        layers: document.layers
-          .filter((layer) => layer.assetId !== assetId)
-          .map((layer, index) => ({ ...layer, zIndex: index })),
-        updatedAt: new Date().toISOString(),
-      })),
+      assets: workspace.assets.filter((asset) => !targetIds.has(asset.id)),
+      selectedAssetIds: workspace.selectedAssetIds.filter((id) => !targetIds.has(id)),
     };
-    this.commitWorkspace(next, next.assets);
-    await unlink(this.assetPath(asset)).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
+    const committed = this.prepareWorkspaceForCommit(next, next.assets);
+    const legacyBackup = this.removeAssetsFromLegacyBackup(targetIds);
+    this.repository.runInSavepoint(() => {
+      this.repository.setSetting(WORKSPACE_KEY, committed);
+      if (legacyBackup.found)
+        this.repository.setSetting(LEGACY_WORKSPACE_BACKUP_KEY, legacyBackup.value);
     });
-    return this.getWorkspace();
+
+    const warnings: string[] = [];
+    for (const asset of assets) {
+      try {
+        await unlink(this.assetPath(asset));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          warnings.push(
+            `素材「${asset.name}」已从素材库移除，但磁盘文件清理失败：${this.errorMessage(error)}`,
+          );
+        }
+      }
+    }
+    return {
+      workspace: this.getWorkspace(),
+      removedAssetIds: ids,
+      warnings,
+    };
+  }
+
+  private removeAssetsFromLegacyBackup(
+    targetIds: Set<string>,
+  ): { found: false } | { found: true; value: unknown } {
+    if (!this.repository.hasSetting(LEGACY_WORKSPACE_BACKUP_KEY)) return { found: false };
+    const stored = this.repository.getSetting(LEGACY_WORKSPACE_BACKUP_KEY);
+    if (stored === null) return { found: true, value: null };
+    const backup = asRecord(stored);
+    if (!backup || !Array.isArray(backup.assets))
+      throw new Error("无法核实旧版素材备份中的提示词，删除已取消。");
+    const documents = Array.isArray(backup.documents)
+      ? backup.documents.map((value) => {
+          const document = asRecord(value);
+          if (!document || !Array.isArray(document.layers)) return value;
+          return {
+            ...document,
+            layers: document.layers.filter((value) => {
+              const layer = asRecord(value);
+              return !(typeof layer?.assetId === "string" && targetIds.has(layer.assetId));
+            }),
+          };
+        })
+      : backup.documents;
+    const selectedAssetIds = Array.isArray(backup.selectedAssetIds)
+      ? backup.selectedAssetIds.filter((id) => typeof id !== "string" || !targetIds.has(id))
+      : backup.selectedAssetIds;
+    return {
+      found: true,
+      value: {
+        ...backup,
+        assets: backup.assets.filter((value) => {
+          const asset = asRecord(value);
+          return !(typeof asset?.id === "string" && targetIds.has(asset.id));
+        }),
+        selectedAssetIds,
+        documents,
+      },
+    };
   }
 
   generate(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult> {
@@ -1223,7 +1567,14 @@ export class ImageStudioService {
     const modelReference = optionalModelReference(input.model);
     if (!modelReference) throw new Error("请选择图片生成模型。");
     const generation = validateImageStudioGenerationSettings(input.generation);
-    const prompt = promptWithNegative(validateTextPrompt(input.prompt), input.negativePrompt);
+    const referenceIds = generation.referenceEnabled
+      ? selectImageStudioReferenceIds(input.referenceAssetIds)
+      : [];
+    if (generation.referenceEnabled && referenceIds.length === 0)
+      throw new Error("请先勾选素材或上传参考图，或关闭“使用参考图”。");
+    const workspacePrompt = validateTextPrompt(input.prompt);
+    const workspaceNegativePrompt = normalizeNegativePrompt(input.negativePrompt);
+    const prompt = promptWithNegative(workspacePrompt, workspaceNegativePrompt);
     const { provider, model } = this.resolveModel(modelReference);
     if (!isImageOutputModel(model))
       throw new Error("所选模型不是仅图片生成模型，请到设置中启用“图片生成模型”。");
@@ -1233,24 +1584,66 @@ export class ImageStudioService {
       );
 
     const apiKey = this.providerService.getActiveApiKey(provider.id);
-    const url = `${provider.baseUrl}/images/generations`;
+    const url = `${provider.baseUrl}/images/${referenceIds.length ? "edits" : "generations"}`;
     const body = {
       model: model.modelId,
       prompt,
       ...imageStudioApiParameters(generation),
     };
     return this.withRequest(input.requestId, IMAGE_HTTP_TIMEOUT_MS, async (signal) => {
+      const headers = buildAuthHeaders({
+        baseUrl: provider.baseUrl,
+        protocol: provider.protocol,
+        authMode: provider.authMode,
+        customHeaderName: provider.customHeaderName,
+        apiKey,
+      });
+      let requestBody: string | FormData = JSON.stringify(body);
+      if (referenceIds.length) {
+        const form = new FormData();
+        for (const [key, value] of Object.entries(body)) form.set(key, String(value));
+        for (const [index, id] of referenceIds.entries()) {
+          const data = await this.queueAssetBytes(id, signal);
+          let bytes: Uint8Array<ArrayBufferLike> = data.bytes;
+          let mimeType = data.mimeType;
+          if (mimeType === "image/gif" || mimeType === "image/webp") {
+            bytes = await sharp(bytes, {
+              failOn: "warning",
+              limitInputPixels: 40_000_000,
+              sequentialRead: true,
+              page: 0,
+              pages: 1,
+            })
+              .png()
+              .toBuffer();
+            if (bytes.byteLength > IMAGE_STUDIO_MAX_SINGLE_BYTES)
+              throw new Error("参考图转换为 PNG 后超过单图 25 MiB 限制，请缩小图片后重试。");
+            await detectImage(bytes, "image/png");
+            mimeType = "image/png";
+          }
+          signal.throwIfAborted();
+          this.assertOpen();
+          const extension = mimeType === "image/jpeg" ? "jpg" : "png";
+          form.append(
+            referenceIds.length === 1 ? "image" : "image[]",
+            new Blob(
+              [new Uint8Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength)],
+              { type: mimeType },
+            ),
+            `reference-${index + 1}.${extension}`,
+          );
+        }
+        // Fetch supplies the multipart boundary; the JSON content type would discard the images.
+        delete headers["content-type"];
+        requestBody = form;
+      }
+      signal.throwIfAborted();
+      this.assertOpen();
       const response = await fetch(url, {
         method: "POST",
         redirect: "error",
-        headers: buildAuthHeaders({
-          baseUrl: provider.baseUrl,
-          protocol: provider.protocol,
-          authMode: provider.authMode,
-          customHeaderName: provider.customHeaderName,
-          apiKey,
-        }),
-        body: JSON.stringify(body),
+        headers,
+        body: requestBody,
         signal,
       });
       const raw = await boundedResponseText(response, MAX_IMAGE_RESPONSE_BYTES);
@@ -1293,8 +1686,8 @@ export class ImageStudioService {
         await this.ensureCanvasLibrary();
         return this.importGeneratedAssets({
           generated,
-          prompt,
-          workspacePrompt: validateTextPrompt(input.prompt),
+          workspacePrompt,
+          workspaceNegativePrompt,
           model: modelReference,
           addToActiveCanvas: input.addToActiveCanvas === true,
           signal,
@@ -1403,8 +1796,8 @@ export class ImageStudioService {
       extension: string;
       revisedPrompt: string | null;
     }>;
-    prompt: string;
     workspacePrompt: string;
+    workspaceNegativePrompt: string;
     model: ModelReference;
     addToActiveCanvas: boolean;
     signal: AbortSignal;
@@ -1439,7 +1832,11 @@ export class ImageStudioService {
           height: generated.height,
           source: "generated",
           createdAt: now,
-          prompt: generated.revisedPrompt || input.prompt,
+          prompt: input.workspacePrompt,
+          negativePrompt: input.workspaceNegativePrompt,
+          revisedPrompt: generated.revisedPrompt?.trim().slice(0, 8_000) || null,
+          promptOrigin: "mingshen_generated",
+          promptMetadataVersion: 1,
           model: input.model,
         };
         const path = this.assetPath(asset);
@@ -1703,6 +2100,15 @@ export class ImageStudioService {
       )
         continue;
       seen.add(id);
+      const prompt = typeof record.prompt === "string" ? record.prompt.slice(0, 8_000) : null;
+      const negativePrompt =
+        typeof record.negativePrompt === "string" ? record.negativePrompt.slice(0, 2_000) : null;
+      const promptMetadata = normalizeImageStudioAssetPromptMetadata({
+        version: record.promptMetadataVersion,
+        origin: record.promptOrigin,
+        prompt,
+        negativePrompt,
+      });
       result.push({
         id,
         name: safeAssetName(
@@ -1716,7 +2122,12 @@ export class ImageStudioService {
         source:
           record.source === "generated" || record.source === "paste" ? record.source : "imported",
         createdAt: boundedString(record.createdAt, 64, new Date(0).toISOString()),
-        prompt: typeof record.prompt === "string" ? record.prompt.slice(0, 8_000) : null,
+        prompt,
+        negativePrompt: promptMetadata?.negativePrompt ?? negativePrompt,
+        revisedPrompt:
+          typeof record.revisedPrompt === "string" ? record.revisedPrompt.slice(0, 8_000) : null,
+        promptOrigin: promptMetadata?.origin ?? null,
+        promptMetadataVersion: promptMetadata?.version ?? null,
         model: optionalModelReference(record.model),
       });
     }
@@ -1792,7 +2203,7 @@ export class ImageStudioService {
     const selectedAssetIds = Array.isArray(record.selectedAssetIds)
       ? record.selectedAssetIds
           .filter((id): id is string => typeof id === "string" && assetIds.has(id))
-          .slice(0, 30)
+          .slice(0, IMAGE_STUDIO_MAX_ASSETS)
       : [];
     return {
       version: 1,

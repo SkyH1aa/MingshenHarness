@@ -207,6 +207,28 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoveAsset, assetId),
   exportImageStudioAsset: (assetId) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioExportAsset, assetId),
+  removeImageStudioAssets: (assetIds) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoveAssets, assetIds),
+  exportImageStudioAssets: (assetIds, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioExportAssets, assetIds, requestId),
+  onImageStudioExportProgress: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return;
+      const progress = value as Parameters<typeof listener>[0];
+      if (
+        typeof progress.requestId !== "string" ||
+        !Number.isInteger(progress.completedAssets) ||
+        !Number.isInteger(progress.totalAssets) ||
+        !Number.isFinite(progress.completedBytes) ||
+        !Number.isFinite(progress.totalBytes) ||
+        !["packing", "finalizing", "complete"].includes(progress.phase)
+      )
+        return;
+      listener(progress);
+    };
+    ipcRenderer.on(IPC_CHANNELS.imageStudioExportProgress, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.imageStudioExportProgress, handler);
+  },
   generateImageStudioImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGenerate, input),
   polishImageStudioPrompt: (input) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioPolishPrompt, input),

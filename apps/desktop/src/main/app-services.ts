@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatStreamEvent } from "../shared/domain";
 import type { InteractiveTerminalEvent } from "../shared/terminal";
@@ -26,6 +26,7 @@ import { ApprovalBroker } from "./permissions/approval-broker";
 import { PermissionStore } from "./permissions/permission-store";
 import { QuestionBroker } from "./permissions/question-broker";
 import { ProviderService } from "./providers/provider-service";
+import { resolveExternalResourcePath } from "./resource-paths";
 import { ScheduledTaskService } from "./schedules/scheduled-task-service";
 import { HeadlessServerService } from "./server/headless-server-service";
 import { ProjectNavigationService } from "./sessions/project-navigation-service";
@@ -92,6 +93,7 @@ export interface AppServices {
 
 export function createAppServices(input: {
   databasePath: string;
+  resourceDirectory: string;
   promptDirectory: string;
   extensionDirectory: string;
   userDataDirectory: string;
@@ -193,7 +195,7 @@ export function createAppServices(input: {
     projectConfigService,
   );
   const lspDiagnosticsService = new LspDiagnosticsService(
-    join(dirname(input.promptDirectory), "lsp"),
+    resolveExternalResourcePath(input.resourceDirectory, "lsp"),
   );
   const projectToolingService = new ProjectToolingService(
     lspDiagnosticsService,
@@ -215,7 +217,7 @@ export function createAppServices(input: {
   const permissions = new PermissionStore();
   const toolRegistry = new ToolRegistry(
     new NativeSandboxService(
-      join(dirname(input.promptDirectory), "native", "codex-sandbox.exe"),
+      resolveExternalResourcePath(input.resourceDirectory, "native", "codex-sandbox.exe"),
       join(input.userDataDirectory, "native-sandbox"),
     ),
   );
@@ -234,6 +236,7 @@ export function createAppServices(input: {
     agentProfileService,
     sessionBuiltinCapabilityService,
     customCommandService,
+    resourceDirectory: input.resourceDirectory,
     promptDirectory: input.promptDirectory,
     appVersion: input.appVersion,
     toolRegistry,

@@ -3,10 +3,13 @@ import type { ModelReference } from "./domain";
 export const IMAGE_STUDIO_MAX_ASSETS = 200;
 export const IMAGE_STUDIO_MAX_DOCUMENTS = 40;
 export const IMAGE_STUDIO_MAX_LAYERS = 120;
-export const IMAGE_STUDIO_MAX_IMPORT_BYTES = 100 * 1024 * 1024;
+export const IMAGE_STUDIO_MAX_IMPORT_BYTES = 500 * 1024 * 1024;
+export const IMAGE_STUDIO_MAX_EXPORT_BYTES = 500 * 1024 * 1024;
+export const IMAGE_STUDIO_MAX_GENERATION_BYTES = 100 * 1024 * 1024;
 export const IMAGE_STUDIO_MAX_SINGLE_BYTES = 25 * 1024 * 1024;
 export const IMAGE_STUDIO_MAX_GIF_FRAMES = 30;
 export const IMAGE_STUDIO_MAX_GENERATED_COUNT = 10;
+export const IMAGE_STUDIO_MAX_REFERENCE_IMAGES = 3;
 export const IMAGE_STUDIO_MIN_DIMENSION = 256;
 export const IMAGE_STUDIO_MAX_DIMENSION = 3_840;
 
@@ -34,6 +37,7 @@ export interface ImageStudioGenerationSettings {
   aspectRatio: ImageStudioAspectRatio;
   transparentBackground: boolean;
   imageCount: number;
+  referenceEnabled: boolean;
 }
 
 export const DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS: ImageStudioGenerationSettings = {
@@ -45,6 +49,7 @@ export const DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS: ImageStudioGenerationSett
   aspectRatio: "1:1",
   transparentBackground: false,
   imageCount: 1,
+  referenceEnabled: false,
 };
 
 const IMAGE_QUALITIES: readonly ImageStudioQuality[] = [
@@ -71,6 +76,14 @@ const IMAGE_ASPECT_RATIOS: readonly ImageStudioAspectRatio[] = [
 ];
 
 export type ImageStudioAssetSource = "generated" | "imported" | "paste";
+export type ImageStudioAssetPromptOrigin = "mingshen_generated";
+
+export interface ImageStudioAssetPromptMetadata {
+  version: 1;
+  origin: ImageStudioAssetPromptOrigin;
+  prompt: string;
+  negativePrompt: string | null;
+}
 
 export interface ImageStudioAsset {
   id: string;
@@ -82,6 +95,10 @@ export interface ImageStudioAsset {
   source: ImageStudioAssetSource;
   createdAt: string;
   prompt: string | null;
+  negativePrompt: string | null;
+  revisedPrompt: string | null;
+  promptOrigin: ImageStudioAssetPromptOrigin | null;
+  promptMetadataVersion: 1 | null;
   model: ModelReference | null;
 }
 
@@ -144,7 +161,7 @@ export interface ImageStudioAssetData {
 export interface ImageStudioImportFile {
   name: string;
   dataUrl: string;
-  source?: ImageStudioAssetSource;
+  source?: Exclude<ImageStudioAssetSource, "generated">;
 }
 
 export interface ImageStudioGenerateInput {
@@ -154,6 +171,7 @@ export interface ImageStudioGenerateInput {
   negativePrompt?: string;
   generation: ImageStudioGenerationSettings;
   addToActiveCanvas?: boolean;
+  referenceAssetIds?: string[];
 }
 
 export interface ImageStudioPolishInput {
@@ -188,6 +206,84 @@ export interface ImageStudioGenerateResult {
 export interface ImageStudioServiceResult {
   text: string;
   model: ModelReference;
+}
+
+export interface ImageStudioAssetRemovalResult {
+  workspace: ImageStudioWorkspace;
+  removedAssetIds: string[];
+  warnings: string[];
+}
+
+export interface ImageStudioExportProgress {
+  requestId: string;
+  completedAssets: number;
+  totalAssets: number;
+  completedBytes: number;
+  totalBytes: number;
+  phase: "packing" | "finalizing" | "complete";
+}
+
+export function withinImageStudioByteBudget(totalBytes: number, budgetBytes: number): boolean {
+  return (
+    Number.isSafeInteger(totalBytes) &&
+    totalBytes >= 0 &&
+    Number.isSafeInteger(budgetBytes) &&
+    budgetBytes >= 0 &&
+    totalBytes <= budgetBytes
+  );
+}
+
+export function normalizeImageStudioAssetPromptMetadata(
+  value: unknown,
+): ImageStudioAssetPromptMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== 1 ||
+    record.origin !== "mingshen_generated" ||
+    typeof record.prompt !== "string" ||
+    !record.prompt.trim() ||
+    record.prompt.length > 4_000 ||
+    (record.negativePrompt !== null &&
+      (typeof record.negativePrompt !== "string" || record.negativePrompt.length > 2_000))
+  )
+    return null;
+  return {
+    version: 1,
+    origin: "mingshen_generated",
+    prompt: record.prompt.trim(),
+    negativePrompt: typeof record.negativePrompt === "string" ? record.negativePrompt.trim() : null,
+  };
+}
+
+export function imageStudioAssetPromptMetadata(
+  asset: ImageStudioAsset,
+): ImageStudioAssetPromptMetadata | null {
+  if (asset.source !== "generated") return null;
+  return normalizeImageStudioAssetPromptMetadata({
+    version: asset.promptMetadataVersion,
+    origin: asset.promptOrigin,
+    prompt: asset.prompt,
+    negativePrompt: asset.negativePrompt,
+  });
+}
+
+export interface ImageStudioAssetPromptRestore {
+  prompt: string;
+  negativePrompt: string | null;
+  replacesNegativePrompt: boolean;
+}
+
+export function imageStudioAssetPromptRestore(
+  asset: ImageStudioAsset,
+): ImageStudioAssetPromptRestore | null {
+  const metadata = imageStudioAssetPromptMetadata(asset);
+  if (!metadata) return null;
+  return {
+    prompt: metadata.prompt,
+    negativePrompt: metadata.negativePrompt,
+    replacesNegativePrompt: metadata.negativePrompt !== null,
+  };
 }
 
 export function emptyImageStudioWorkspace(): ImageStudioWorkspace {
@@ -244,7 +340,19 @@ export function normalizeImageStudioGenerationSettings(
       typeof record.imageCount === "number" && Number.isFinite(record.imageCount)
         ? Math.min(IMAGE_STUDIO_MAX_GENERATED_COUNT, Math.max(1, Math.round(record.imageCount)))
         : defaults.imageCount,
+    referenceEnabled: record.referenceEnabled === true,
   };
+}
+
+export function selectImageStudioReferenceIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > IMAGE_STUDIO_MAX_ASSETS ||
+    value.some((id) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id))
+  )
+    throw new Error(`参考图素材标识无效，每次最多选择 ${IMAGE_STUDIO_MAX_ASSETS} 张素材。`);
+  return [...new Set(value as string[])].slice(0, IMAGE_STUDIO_MAX_REFERENCE_IMAGES);
 }
 
 export function validateImageStudioGenerationSettings(
@@ -260,6 +368,7 @@ export function validateImageStudioGenerationSettings(
     !IMAGE_ASPECT_RATIOS.includes(record.aspectRatio as ImageStudioAspectRatio) ||
     typeof record.alignTo16 !== "boolean" ||
     typeof record.transparentBackground !== "boolean" ||
+    (record.referenceEnabled !== undefined && typeof record.referenceEnabled !== "boolean") ||
     !Number.isInteger(record.width) ||
     !Number.isInteger(record.height) ||
     !Number.isInteger(record.imageCount) ||

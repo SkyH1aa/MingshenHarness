@@ -121,14 +121,23 @@ export function mergeRemovedAsset(
   server: ImageStudioWorkspace,
   assetId: string,
 ): ImageStudioWorkspace {
+  return mergeRemovedAssets(current, server, [assetId]);
+}
+
+export function mergeRemovedAssets(
+  current: ImageStudioWorkspace,
+  server: ImageStudioWorkspace,
+  assetIds: string[],
+): ImageStudioWorkspace {
+  const removed = new Set(assetIds);
   return {
     ...current,
     assets: server.assets,
-    selectedAssetIds: current.selectedAssetIds.filter((id) => id !== assetId),
+    selectedAssetIds: current.selectedAssetIds.filter((id) => !removed.has(id)),
     documents: current.documents.map((document) => ({
       ...document,
       layers: document.layers
-        .filter((layer) => layer.assetId !== assetId)
+        .filter((layer) => !removed.has(layer.assetId))
         .map((layer, index) => ({ ...layer, zIndex: index })),
     })),
   };

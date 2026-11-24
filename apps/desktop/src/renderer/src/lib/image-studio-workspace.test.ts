@@ -36,6 +36,10 @@ function asset(id: string): ImageStudioAsset {
     source: "imported",
     createdAt: "2026-01-01",
     prompt: null,
+    negativePrompt: null,
+    revisedPrompt: null,
+    promptOrigin: null,
+    promptMetadataVersion: null,
     model: null,
   };
 }

@@ -89,6 +89,45 @@ test("NSIS keeps the existing app icons and uses generated brand art for assiste
     assert.ok(fs.statSync(path.join(build, filename)).size > 0, `Missing build resource: ${filename}`);
 });
 
+test("NSIS retains retryable 7z extraction and packages prompts inside app.asar", () => {
+  const config = yaml.parse(fs.readFileSync(path.join(desktop, "electron-builder.yml"), "utf8"));
+  assert.equal(config.asar, true);
+  assert.equal(Object.hasOwn(config.nsis, "useZip"), false);
+  assert.equal(Object.hasOwn(config.nsis, "differentialPackage"), false);
+  assert.ok(
+    config.files.includes("resources/prompts/**/*"),
+    "Prompt and Skill resources must be packaged inside app.asar",
+  );
+  assert.ok(
+    !config.extraResources.some(entry => entry?.from === "resources/prompts"),
+    "Prompt and Skill resources must not be extracted as extra resources",
+  );
+
+  const extractionTemplate = path.resolve(
+    __dirname,
+    "../node_modules/app-builder-lib/templates/nsis/include/extractAppPackage.nsh",
+  );
+  const extraction = fs.readFileSync(extractionTemplate, "utf8");
+  assert.match(
+    extraction,
+    /!macro decompress[\s\S]*?!else[\s\S]*?extractUsing7za "\$PLUGINSDIR\\app-\$packageArch\.7z"[\s\S]*?!endif/,
+    "electron-builder must use its default staged 7z extraction branch",
+  );
+  assert.match(extraction, /CopyFiles \/SILENT "\$PLUGINSDIR\\7z-out\\\*" \$OUTDIR/);
+  assert.match(extraction, /\$R1 < 5/);
+});
+
+test("update handoff carries both Electron and legacy NSIS update flags", () => {
+  const include = fs.readFileSync(path.join(build, "installer.nsh"), "utf8");
+  assert.match(include, /\$\{GetOptions\} \$0 "--updated" \$1/);
+  assert.match(include, /\$\{GetOptions\} \$0 "\/updated" \$1/);
+  const main = fs.readFileSync(path.join(desktop, "src/main/index.ts"), "utf8");
+  assert.match(
+    main,
+    /app\.relaunch\(\{ execPath: updateInstaller, args: \["--updated"\] \}\)/,
+  );
+});
+
 test("custom NSIS welcome page compiles in an isolated UI-only fixture", t => {
   const makensis = findMakensis();
   if (!makensis) {

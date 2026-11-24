@@ -79,7 +79,9 @@ import type {
 } from "./draft-assist";
 import type {
   ImageStudioAssetData,
+  ImageStudioAssetRemovalResult,
   ImageStudioCanvasSummary,
+  ImageStudioExportProgress,
   ImageStudioGenerateInput,
   ImageStudioGenerateResult,
   ImageStudioImportFile,
@@ -242,6 +244,9 @@ export const IPC_CHANNELS = {
   imageStudioImport: "image-studio:import",
   imageStudioRemoveAsset: "image-studio:remove-asset",
   imageStudioExportAsset: "image-studio:export-asset",
+  imageStudioRemoveAssets: "image-studio:remove-assets",
+  imageStudioExportAssets: "image-studio:export-assets",
+  imageStudioExportProgress: "image-studio:export-progress",
   imageStudioGenerate: "image-studio:generate",
   imageStudioPolishPrompt: "image-studio:polish-prompt",
   imageStudioReversePrompt: "image-studio:reverse-prompt",
@@ -593,6 +598,9 @@ export interface MingshenDesktopApi {
   importImageStudioAssets(files: ImageStudioImportFile[]): Promise<ImageStudioWorkspace>;
   removeImageStudioAsset(assetId: string): Promise<ImageStudioWorkspace>;
   exportImageStudioAsset(assetId: string): Promise<string | null>;
+  removeImageStudioAssets(assetIds: string[]): Promise<ImageStudioAssetRemovalResult>;
+  exportImageStudioAssets(assetIds: string[], requestId: string): Promise<string | null>;
+  onImageStudioExportProgress(listener: (progress: ImageStudioExportProgress) => void): () => void;
   generateImageStudioImage(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult>;
   polishImageStudioPrompt(input: ImageStudioPolishInput): Promise<ImageStudioServiceResult>;
   reverseImageStudioPrompt(input: ImageStudioReversePromptInput): Promise<ImageStudioServiceResult>;

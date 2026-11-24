@@ -1,6 +1,6 @@
 # Mingshen Harness 开发交接与维护记录
 
-最后核对日期：2026-11-23（Asia/Shanghai）。适用工作区版本：1.3.6。
+最后核对日期：2026-11-24（Asia/Shanghai）。适用工作区版本：1.3.6。
 
 本文供其他智能体、开发者和新对话接续工作，记录开发经过、已确认约束、实际代码位置、验证边界和打包方法。它不是功能全部完成、无漏洞或安装包已验收的证明。任何接续工作先核对当前源码、用户最新指令和 `git status`，不要直接照搬早期计划。
 
@@ -12,7 +12,7 @@
 4. 先阅读 [1.3.6 验证记录](docs/VALIDATION_1.3.6.md)和 [1.3.5 验证记录](docs/VALIDATION_1.3.5.md)；历史行为参考 [1.3.4 验证记录](docs/VALIDATION_1.3.4.md)、[1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
 5. 完成后记录改了什么、执行了什么、结果及剩余边界；变更协议、打包、数据结构或安全边界时同步本文和对应文档。
 
-当前工作区目标版本为 1.3.6。生图本地画布库、测试启动接续、有效图片尺寸偏差保存，以及逐次模型请求插件注入的前后位置/标识格式选项均已完成源码联动。最新最终串行 Vitest 于2026-11-23完成，203个测试文件结果（200通过、3跳过）、2,767项通过、15项跳过、0失败；类型检查、Lint、构建、资源预检、创作工作台20组和插件接口27项隔离Electron smoke均通过。正式1.3.6 NSIS/ZIP已按用户要求在本地生成并核验；尚未安装或验收升级/卸载。当前包元数据见第86节和[1.3.6验证记录](docs/VALIDATION_1.3.6.md)，第82至85节中未生成包的描述是打包前历史状态。1.3.4 的可靠性修复、创作工作面、ChatAgent 联网开关、工作站模板、技能版本去重及运行中引导继续保留；1.3.5 新增简约主题收紧、启动展示和可选桌面宠物，具体历史行为以源码与[1.3.5验证记录](docs/VALIDATION_1.3.5.md)为准。1.3.4 的最终证据仍见[1.3.4验证记录](docs/VALIDATION_1.3.4.md)，不能把历史验证数字当作本轮新增功能的验收。1.3.3 已提高本地扩展和技能市场的文件数量上限到20,000；用户确认五项边界后，主界面 Code/Work/Chat 三模式、schema9、独立 Chat 分组、按需技能、Office 专精工具、失败保护、输出恢复及局部检查点已进入源码，见第54节及[调研与实装记录](docs/AGENT_MODES_RESEARCH_1.3.3.md)。第53节“待确认/未实现”是此前阶段记录，已由本轮确认和实现取代。支持无占位符 DOCX 旧稿的局部文字/区段替换、段落排版及表格列宽，保留未修改部件并校验源文件 SHA，见第52节及[文档工具说明](docs/DOCUMENT_TOOLS.md)；光轨企业工作台的表面层级、信息密度、焦点态与状态动效，以及输入框在普通键入或中文输入时自行跳到格式预览的修复，见第51节。1.3.3 的实际证据及边界见[1.3.3验证记录](docs/VALIDATION_1.3.3.md)。1.3.2 新增 Gemini / DeepSeek 模型体系与缓存续接适配，见第41节、[供应商缓存说明](docs/PROVIDER_CACHING.md)及[1.3.2验证记录](docs/VALIDATION_1.3.2.md)；表格单元格富内容和原生可编辑公式见第42节；第四种供应商协议 Google Gemini 原生 GenerateContent 及 schema8 数据迁移见第43节，原有历史迁移保留。1.3.1 修复文件栏滚动、光轨会话标题与按钮重叠，以及未配置诊断器的虚假成功记录，见第33节；光轨对话偏移、详情开合及长历史性能见第34节；输入框Markdown/LaTeX粘贴显示及设置开关见第35节；跨会话及正常重启保留待发送草稿见第36节；原生Word公式、Markdown、图表及模板填充见第37节和 [文档工具说明](docs/DOCUMENT_TOOLS.md)；设置中按文件夹批量归档、恢复和删除会话见第38节；供应商长按排序及各模型入口星标分组见第39节。历史证据及边界见 [1.3.1 验证记录](docs/VALIDATION_1.3.1.md)，不要将前轮数字当作新增功能验证。
+当前工作区目标版本为 1.3.6。生图画布库、参考图、后台生图、素材提示词恢复及批量素材管理均已完成；删除素材会同步清理绑定提示词记录，当前工作区提示词保持不变。手动导入/拖放和批量 ZIP 导出分别采用独立的 500 MiB 合计预算，导出有素材数/字节进度。Windows 安装把内置提示词树放入 app.asar 并逐项 SHA 复核，保留默认 7z 暂存解压与复制重试。最新完整串行 Vitest：205个测试文件，202通过、3环境跳过；2,827项通过、15项跳过、0失败。根 Node 脚本163项、类型检查、Biome 529文件、生产构建和13,871项资源预检通过；批量 ZIP Electron 场景验证了进度条、5阶段 IPC、ZIP 内容与源图 SHA。完整工作台 smoke 两次在后续异步界面等待处超时，不记作全绿，细节见[1.3.6验证记录](docs/VALIDATION_1.3.6.md)。随包文档冻结后的 1.3.6 NSIS/ZIP 已于2026-11-24重建并独立核验，精确数据见第90节。安装、升级和卸载未验收，未发布、未提交；发布 SQL 已准备但 HTTPS 下载链接仍是执行前须替换的占位符，没有执行云 SQL。1.3.4、1.3.5及更早版本的功能、验证和历史边界仍以源码及各版本验证记录为准；本交接后续章节保留完整历史。
 
 1.3.0 包含内置 DOCX/PPTX/PDF、按 profile 配置子模型、原生 Responses 状态、图片工具、管道命令、分页读取/受控并发、父会话验证转交与 Token Saver 质量默认值；随后补充模型首次预填、K/M 数值输入、供应商连接编辑和 TencentDB 记忆库。最新工作区记忆设置及模型语义提取见第30节，取代历史离线规则摘录；官方提示词逐字对齐与真实请求核验见第31节。第二套“光轨”界面保留默认“简约”，按已确认预览重构为独立工作台，独立结构见第26节，最新材质打磨及主界面模型/供应商标签见第27节；第24节为首次接入历史。选择自动保存、重载或重启生效，共用全部业务功能。运行信息展开/收起、完整诊断与命令详情见第25节，并在独立结构中回归。各轮实际结果和未验证边界见 [1.3.0 验证记录](docs/VALIDATION_1.3.0.md)。主会话窗口15%的压缩输出预算及触顶恢复、TencentDB 本地记忆核心及项目二选一、工具参数流与 UTF-16 读写修复、缓存前缀优化与诊断、供应商缓存配置、同模型压缩复用、提问/修改冲突通知、Token Saver、执行链、项目记忆、自动重试及剪贴板图片附件见 [1.2.9 验证记录](docs/VALIDATION_1.2.9.md)；下方历史版本结果不能替代本轮验证。
 
@@ -45,7 +45,7 @@
 - 不擅自重建项目、迁移框架、移动模块、创建替代仓库或改变包管理器。
 - 不执行 `git reset --hard`、`git checkout --`、`git clean -fd` 等丢弃现有工作的命令；不把已有未跟踪源码当临时文件删除。
 - 未经明确请求不提交、推送、发布 GitHub Release、不执行云端 SQL、不生成或安装正式安装包。`--dir` 解包验证与正式 NSIS 安装包是两个不同操作。
-- 用户最新指定版本为 **1.3.6**；1.3.6 NSIS/ZIP 已于2026-11-23按用户要求在本地生成并核验，SHA-256和大小见第86节。尚未安装或验收升级/卸载，也未发布；没有公开ZIP直链，未生成发布SQL。后续仍须获得明确要求才进行安装或发布。
+- 用户最新指定版本为 **1.3.6**；最新 NSIS/ZIP 已于2026-11-24 在随包文档冻结后本地重建并核验，SHA-256和大小见第90节。1.3.6 发布 SQL 已生成，但公开 HTTPS 下载链接仍为待替换占位；SQL 未执行。尚未安装或验收升级/卸载，也未上传或发布。后续仍须获得明确要求才进行安装或发布。
 - 保留用户已确定的水青色原子图标。不要替换成旧红色 M 或 Electron 默认图标。
 - 不将真实 API Key、OAuth Secret、Token、Cookie、个人数据库、日志、截图或会话内容加入代码、文档和测试夹具。历史对话中的测试 Key 不得再次使用。
 - 不通过关闭防护、加白名单、改系统 ACL、删除 DLL、修改官方二进制或跳过哈希校验来“修复”打包与隔离。
@@ -2106,3 +2106,69 @@ Crow5报告仅为公开资料对比；没有安装对手产品、跑性能基准
 另有393,070字节的EXE blockmap、96字节ZIP SHA sidecar及216字节JSON元数据。独立检查确认EXE的FileVersion/ProductVersion均为1.3.6；ZIP仅含根条目`MingshenHarness-1.3.6-x64.exe`，条目大小和SHA-256与发布目录中的EXE一致，ZIP sidecar和JSON中的字节数/SHA与ZIP实测一致。
 
 未运行安装器，安装、升级、卸载未验收；未提供公开ZIP直链，故未生成Release SQL、未上传或发布、未执行云SQL、未提交或推送。后续发版时须使用维护者提供的真实直链，并以实际部署schema为准生成发布SQL。
+
+## 87. 2026-11-23 / 1.3.6 文档冻结后的最终安装包
+
+参考图、拖放导入和后台生图最终源码已完成全量回归。随后更新 README、双语使用手册/更新日志、Release 草案、验证记录及本交接总览；`electron-builder.yml` 会把 `docs/*.md` 随安装器分发，因此随包文档不直接嵌入本次包的精确 SHA/大小，避免文件哈希自引用和文档变更造成旧校验值。精确包数据以旁置 `.sha256`、`.json` 和本节实测记录为准。文档冻结后于仓库根目录运行 ` .\package-win.cmd --check` 与 ` .\package-win.cmd`，均退出0；生产构建、Electron/Windows原生运行时准备、13,871项资源/生产依赖预检、afterPack 检查、NSIS 与更新 ZIP 均成功。
+
+`apps/desktop/release-artifacts/` 本次实测产物：
+
+| 文件 | 字节数 | SHA-256 / 检查 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.6-x64.exe` | 379,043,314 | `2174b31a5ae14428c61e47f5f8bb278663bd4576b2b9122e191e7a38c137ebdc` |
+| `MingshenHarness-1.3.6-x64.zip` | 378,110,650 | `d67e7e4da1a88ae8b55c0be131627876dd240635ac5db642cbd9997aca3792f8` |
+| `MingshenHarness-1.3.6-x64.exe.blockmap` | 393,109 | electron-builder 产物 |
+| `MingshenHarness-1.3.6-x64.zip.sha256` | 96 | ZIP SHA 与实测一致 |
+| `MingshenHarness-1.3.6-x64.zip.json` | 216 | 版本、文件名、字节数、SHA 与实测一致 |
+
+独立复核确认 EXE 的 `FileVersion` 和 `ProductVersion` 均为 `1.3.6`。ZIP 仅含根条目 `MingshenHarness-1.3.6-x64.exe`；条目大小为379,043,314字节、条目 SHA-256 与外部 EXE 完全一致。ZIP 文件 SHA-256 与 sidecar、JSON 完全一致。当前安装器未签名，符合现有仓库配置。完整串行 Vitest 最终结果为204个测试文件、201通过/3环境跳过、2,787项通过/15项跳过/0失败，报告 `.impeccable/review/v136-final-background-vitest.json`；根 Node 脚本160项通过，类型检查、Biome 527文件、生产构建、创作工作台25组隔离 Electron smoke、`git diff --check` 和打包预检通过。
+
+尚未运行安装器，安装、升级、卸载未验收；无公开ZIP直链，因此未发布、未生成发布SQL、未执行云端SQL、未提交或推送。
+
+## 88. 2026-11-24 / 1.3.6 生图素材批量管理与安装布局优化
+
+版本保持1.3.6。Image Studio 素材栏现支持全选当前搜索结果、清空选择、批量加入当前画布、合并导出 ZIP 及确认后批量删除；最多选择200项，ZIP 图片合计上限100 MiB，ZIP不携带提示词sidecar。删除先检查所有画布引用，任一图片仍被打开或保存的工程引用则整批取消；SQLite savepoint 同步移除工作区素材和旧迁移备份内对应的生成提示词、选中ID及图层引用，不改当前正负提示词。
+
+迁移备份缺失时现在只在加载工作区成功后补建，不会在之后的素材操作中突然写入。画布删除时若进程在移入`.trash`后、SQLite提交前中断，启动清理会依当前工作区的画布ID恢复较新的工程文件；目标锁定、损坏或不安全时中止加载并保留回收文件，不会用旧快照覆盖。服务测试覆盖备份时序、正常恢复与恢复失败。
+
+Windows打包把内置`resources/prompts/**`放入`app.asar`，将需逐个安装复制的提示词/Skill来源文件减少一万三千余项。需要文件路径的LSP、沙箱和Plugin SDK仍外置；保留默认NSIS 7z暂存解压与文件复制重试。打包后校验从ASAR回读提示词目录，逐项比对文件清单与SHA-256。此布局减少独立小文件复制工作，但未测得用户设备的实际耗时，不能承诺固定安装分钟数。
+
+验证：全量串行Vitest 205文件（202通过、3环境跳过）、2,826项通过、15项跳过、0失败，JSON`.impeccable/review/v136-batch-final.json`；根Node脚本163项通过；`pnpm typecheck`、Biome529文件、生产构建（main172模块/preload3/renderer2363模块）、桌面入口资源检查、`pnpm package:check`及`package-win.cmd --check`的13,871项/版本1.3.6分别通过。批量素材 Electron smoke 28场景通过（见验证页）；主进程生图服务52/52通过。文档更新完成后重新生成并核验新版NSIS/ZIP，精确元数据见第89节。安装、升级、卸载未验收。未提交、未发布、未执行云SQL。
+
+## 89. 2026-11-24 / 1.3.6 批量素材与安装布局最终包
+
+本节记录文档冻结后的最终安装包，覆盖第82至88节中更早的1.3.6包产物和待完成状态，不覆盖源码验证历史。素材栏批量选择、ZIP导出、批量加入画布及批量删除已完成；提示词与素材记录/旧工作区备份同步清理，但当前正负提示词不变。无法清理已从素材记录移除的图片文件时，服务返回警告，磁盘可能留下孤立文件。安装优化将提示词/Skill资源树放入`app.asar`，保留默认NSIS 7z暂存和复制重试；没有启用ZIP直解。实际用户机器安装耗时尚未测量。
+
+文档冻结后，仓库根目录执行` .\package-win.cmd --check`及` .\package-win.cmd`，均退出0。资源预检核对13,871项、生产依赖闭包与版本1.3.6；生产构建、afterPack从ASAR回读并逐项SHA校验、NSIS安装器及更新ZIP成功生成。NSIS按仓库设置未签名，提示没有代码签名证书属于当前预期配置。正式包位于`apps/desktop/release-artifacts/`：
+
+| 文件 | 字节数 | SHA-256 / 校验 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.6-x64.exe` | 374,174,841 | `e8d67d28ddede3c4ebb57541ea9cd70f88140b2832209f91cc443e416cb6514b` |
+| `MingshenHarness-1.3.6-x64.zip` | 374,131,585 | `5b9308933798260015944e8ad5302f2ca902191f076ac5c2efd2c387cffa8217` |
+| `MingshenHarness-1.3.6-x64.exe.blockmap` | 389,171 | electron-builder产物 |
+| `MingshenHarness-1.3.6-x64.zip.sha256` | 96 | 与ZIP独立SHA-256一致 |
+| `MingshenHarness-1.3.6-x64.zip.json` | 216 | 版本、文件名、大小、SHA与实测一致 |
+
+独立核对确认EXE的FileVersion/ProductVersion均为1.3.6。ZIP仅含一个根条目`MingshenHarness-1.3.6-x64.exe`，条目大小374,174,841字节，条目SHA-256与外部EXE完全一致；ZIP `.sha256`与JSON均匹配实测SHA和374,131,585字节大小。最新版源码最终串行Vitest结果为205文件（202通过、3环境跳过）、2,826项通过、15项跳过、0失败；主进程生图服务52/52通过；Electron smoke 28场景、55截图、466几何、10次本地合成请求、0异常和0服务错误；类型检查、Biome 529文件、生产构建、根Node脚本163项、打包预检和`git diff --check`通过，详见[1.3.6验证记录](docs/VALIDATION_1.3.6.md)。
+
+未运行安装器，安装、升级、卸载未验收；没有公开ZIP直链，未生成/执行发布SQL、未上传发布、未提交或推送。先前1.3.6包SHA与大小只作历史留档，不应用于此次交付。
+
+## 90. 2026-11-24 / 1.3.6 图片预算与最终发布包
+
+导入与导出采用独立预算：PNG/JPEG/WebP/GIF手动导入或拖放每张最多25 MiB、每批最多20张、合计500 MiB；批量ZIP导出最多200项，源图片合计500 MiB。导出以请求ID隔离IPC进度，显示素材计数和累计字节；拒绝超限请求，不创建临时ZIP。图片生成响应仍保留独立100 MiB上限。文档已冻结后打包，所以随包的`docs/*.md`不含本包自己的SHA/大小。
+
+最终检查：完整串行Vitest退出0，205个文件结果，202通过、3环境跳过，2,827项通过、15项跳过、0失败，395.38秒；JSON`.impeccable/review/v136-import-export-500mib-vitest-final.json`。预算/导出服务定向测试88/88通过；根Node脚本18文件163/163通过，29.52秒；`pnpm typecheck`退出0；`pnpm lint`的Biome529文件通过；`package-win.cmd --check`核对13,871项资源、生产依赖闭包和版本1.3.6通过。正式`package-win.cmd`退出0，生产构建、afterPack从ASAR回读提示词资源并逐项SHA校验、NSIS及更新ZIP生成成功。
+
+完整创作/生图Electron smoke两次没有全绿：批量ZIP功能段本身在两次执行中均通过，核对了进度条、五阶段IPC顺序、字节值、ZIP中的PNG与所选源图SHA。其后第一次在`.impeccable/review/v136-creative-image-1795509233106/failure.json`等待布局用缩略图`img.complete`超时（脚本第693行）；第二次在`.impeccable/review/v136-creative-image-1795509498218/failure.json`等待画布PNG下载捕获超时（第1608行）。结果没有Renderer异常或服务夹具错误，但尚未确认这些等待失败是否纯属测试同步问题；不得将整套Electron smoke写作通过。未分配真实500 MiB图片，也未测试磁盘耗尽、杀毒软件锁定或真实供应商。
+
+文档冻结后在仓库根目录执行` .\package-win.cmd --check`和` .\package-win.cmd`，均退出0；Windows x64 NSIS按现有配置未签名。`apps/desktop/release-artifacts/`中本轮实测最终产物：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.6-x64.exe` | 374,179,291 | `e29f51595a0be6725752649adbd41aebed27c1f0802a7496a0b77b1951501b70` |
+| `MingshenHarness-1.3.6-x64.zip` | 374,137,004 | `c9c4b120115e2f66510e9201bf9cfac4a341b667d4e5a9cec98176066254d130` |
+| `MingshenHarness-1.3.6-x64.exe.blockmap` | 389,350 | electron-builder产物 |
+| `MingshenHarness-1.3.6-x64.zip.sha256` | 96 | 与实测ZIP SHA一致 |
+| `MingshenHarness-1.3.6-x64.zip.json` | 216 | 版本、文件名、字节数、SHA与实测一致 |
+
+独立PowerShell检查确认EXE的FileVersion/ProductVersion均为1.3.6；ZIP只含根条目`MingshenHarness-1.3.6-x64.exe`，ZIP内EXE的大小与SHA和外置EXE完全一致；ZIP `.sha256`及JSON的版本、文件名、字节数、SHA均与实测相符。发布SQL为`supabase/publish-release-1.3.6.sql`，使用上述ZIP SHA和374,137,004字节；直链使用合法HTTPS示例占位符`https://example.invalid/REPLACE_WITH_PUBLIC_HTTPS_ZIP_URL`，必须替换成真实公开GitHub Release直链后才可执行。没有安装/验收安装、升级、卸载；没有执行云端SQL、上传或发布；未提交或推送。

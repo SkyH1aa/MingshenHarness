@@ -181,6 +181,7 @@ interface ChatServiceOptions {
   agentProfileService: AgentProfileService;
   sessionBuiltinCapabilityService?: SessionBuiltinCapabilityService;
   customCommandService: CustomCommandService;
+  resourceDirectory?: string;
   promptDirectory: string;
   appVersion: string;
   toolRegistry: ToolRegistry;
@@ -5164,6 +5165,7 @@ export class ChatService {
           args,
           this.options.promptDirectory,
           this.options.extensionService,
+          this.options.resourceDirectory ?? resolve(this.options.promptDirectory, ".."),
         );
         const extensionId = await this.options.extensionService.getEnabledPluginExtensionIdForSkill(
           input.session.id,
@@ -8468,6 +8470,7 @@ export class ChatService {
           { name: id },
           this.options.promptDirectory,
           this.options.extensionService,
+          this.options.resourceDirectory ?? resolve(this.options.promptDirectory, ".."),
         );
         if (usedCharacters + content.length > PINNED_SKILL_PROMPT_BUDGET_CHARS) {
           deferred.push(id);

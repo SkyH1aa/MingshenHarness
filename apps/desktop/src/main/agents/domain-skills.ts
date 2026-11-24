@@ -4,6 +4,7 @@ import { TextDecoder } from "node:util";
 import { z } from "zod";
 import type { SessionView } from "../../shared/domain";
 import type { ExtensionService } from "../extensions/extension-service";
+import { resolveDeveloperSdkPath } from "../resource-paths";
 
 const MAX_BUILTIN_RESOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_WORK_SOURCE_CATALOG_BYTES = 4 * 1024 * 1024;
@@ -828,6 +829,7 @@ export async function loadDomainSkill(
   raw: unknown,
   promptDirectory: string,
   extensions: ExtensionService,
+  resourceDirectory = resolve(promptDirectory, ".."),
 ): Promise<string> {
   if (session.agentMode === "chat") throw new Error("CHAT_TOOL_DENIED: Skills are unavailable.");
   const args = skillRequestSchema.parse(raw);
@@ -879,7 +881,7 @@ export async function loadDomainSkill(
     : "";
   const developerSdk =
     skill && ["skill-creator", "plugin-creator", "harness-plugin-api"].includes(id)
-      ? `\nOptional user-only SDK CLI reference: ${resolve(promptDirectory, "..", "sdk", "plugin-dev", "mingshen-plugin.mjs")}\nThis host path may be unavailable to sandboxed commands or PATH, and the Agent must not rely on node/run_command to read it. For plugin source inside the current workspace, use local_plugin inspect/validate as the authoritative runtime preflight. SDK output is advisory and does not replace local_plugin validation. Installation and lifecycle changes remain explicit user actions in Settings.`
+      ? `\nOptional user-only SDK CLI reference: ${resolveDeveloperSdkPath(resourceDirectory)}\nThis host path may be unavailable to sandboxed commands or PATH, and the Agent must not rely on node/run_command to read it. For plugin source inside the current workspace, use local_plugin inspect/validate as the authoritative runtime preflight. SDK output is advisory and does not replace local_plugin validation. Installation and lifecycle changes remain explicit user actions in Settings.`
       : "";
   return `Built-in skill: ${args.name}\nResource: ${loaded.displayPath}\nCharacters: ${page.offset}-${page.end}/${loaded.content.length}${sourceDetails ? `\n${sourceDetails}` : ""}${developerSdk}\n\n${page.content}${page.end < loaded.content.length ? `\nContinue with char_offset:${page.end}.` : ""}`;
 }
