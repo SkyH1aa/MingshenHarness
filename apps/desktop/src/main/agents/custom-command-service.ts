@@ -4,10 +4,12 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { CustomCommandView, ExtensionView } from "../../shared/domain";
+import type { ManagedCapability } from "../../shared/managed-policy";
 import {
   loadLocalPluginCommandDeclarations,
   type PluginCommandFile,
 } from "../extensions/local-plugin-commands";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
 import { safeFilePath } from "../workspace/safe-file-path";
 
@@ -186,7 +188,26 @@ function commandArguments(value: string): string[] {
 }
 
 export class CustomCommandService {
-  constructor(private readonly repository?: PluginCommandRepository) {}
+  private managedPolicy: ManagedPolicyService | null;
+
+  constructor(
+    private readonly repository?: PluginCommandRepository,
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
+
+  private capabilityDecision(capability: ManagedCapability): "allow" | "ask" | "deny" {
+    if (!this.managedPolicy) return "allow";
+    this.managedPolicy.assertOperational(`自定义命令的 ${capability}`);
+    const decision = this.managedPolicy.evaluateCapability(capability).decision;
+    if (decision === "deny") this.managedPolicy.assertCapability(capability);
+    return decision;
+  }
 
   private async pluginCommands(): Promise<CommandCandidate[]> {
     if (!this.repository) return [];
@@ -289,8 +310,9 @@ export class CustomCommandService {
     const fileReferences = [...prompt.matchAll(/(?:^|\s)@([^\s]+)/g)]
       .map((entry) => entry[1]?.trim())
       .filter((entry): entry is string => Boolean(entry));
+    const fileReadDecision = fileReferences.length ? this.capabilityDecision("file.read") : "allow";
     for (const reference of [...new Set(fileReferences)]) {
-      if (!allowFileReferences || !workspacePath) {
+      if (!allowFileReferences || !workspacePath || fileReadDecision !== "allow") {
         prompt += `\n\n[Reference ${reference}: use the approved read_file tool to read this file.]`;
         continue;
       }
@@ -301,6 +323,11 @@ export class CustomCommandService {
       } catch {
         prompt += `\n\n[Reference not found: ${reference}]`;
       }
+    }
+    if (shellCommands.length) {
+      // Ask is deferred until the root run binds the accepted runId and performs the
+      // actual manual approval immediately before command execution.
+      this.capabilityDecision("command.execute");
     }
     return { command, prompt, shellCommands };
   }

@@ -172,6 +172,8 @@ export interface ImageStudioGenerateInput {
   generation: ImageStudioGenerationSettings;
   addToActiveCanvas?: boolean;
   referenceAssetIds?: string[];
+  /** Canvas captured at submission time; null keeps the result asset-only. */
+  targetDocumentId?: string | null;
 }
 
 export interface ImageStudioPolishInput {
@@ -201,6 +203,31 @@ export interface ImageStudioGenerateResult {
   generatedAssets: ImageStudioAsset[];
   workspace: ImageStudioWorkspace;
   warnings: ImageStudioGenerationWarning[];
+  remoteImages?: ImageStudioRemoteImage[];
+  remoteWarnings?: string[];
+}
+
+export interface ImageStudioRemoteImage {
+  id: string;
+  expiresAt: string;
+}
+
+export interface ImageStudioRemoteImageInput {
+  id: string;
+  requestId: string;
+}
+
+export interface ImageStudioRemotePreview {
+  id: string;
+  dataUrl: string;
+  sourceHost: string;
+  mimeType: ImageStudioAsset["mimeType"];
+  width: number;
+  height: number;
+  size: number;
+  prompt: string;
+  negativePrompt: string;
+  revisedPrompt: string | null;
 }
 
 export interface ImageStudioServiceResult {

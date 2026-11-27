@@ -106,6 +106,49 @@ describe("provider prompt caching persistence and transport", () => {
     }
   });
 
+  it("does not retain cache settings for OpenAI Images providers", () => {
+    const { database, repository } = setup("openai_responses");
+    const store = vi.fn(() => {
+      database
+        .prepare("insert into secrets (id, ciphertext, created_at) values (?, ?, ?)")
+        .run("images-secret", new Uint8Array([1]), "2026-11-25");
+      return { secretRef: "images-secret", maskedHint: "***images" };
+    });
+    const service = new ProviderService(repository, {
+      store,
+      remove: vi.fn(),
+    } as unknown as SecretStore);
+    const input = {
+      name: "Images gateway",
+      baseUrl: "https://images.invalid/v1",
+      protocol: "openai_images" as const,
+      authMode: "bearer" as const,
+      apiKey: "fixture",
+      keyLabel: "Fixture",
+      neverReveal: true,
+    };
+
+    try {
+      expect(() =>
+        service.createProvider({
+          ...input,
+          promptCaching: { mode: "off", ttl: "5m" },
+        }),
+      ).toThrow("不支持提示缓存");
+      expect(store).not.toHaveBeenCalled();
+
+      const created = service.createProvider(input);
+      expect(store).toHaveBeenCalledTimes(1);
+      expect(repository.hasSetting(providerPromptCachingKey(created.id))).toBe(false);
+      expect(() => service.setPromptCaching(created.id, { mode: "auto", ttl: "5m" })).toThrow(
+        "不支持提示缓存",
+      );
+      expect(repository.hasSetting(providerPromptCachingKey(created.id))).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it("defaults old providers safely, persists validated settings and removes them on deletion", () => {
     const { database, repository, provider, service } = setup("openai_responses");
     try {

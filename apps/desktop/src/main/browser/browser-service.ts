@@ -10,6 +10,7 @@ import type {
   ChatStreamEvent,
   ToolResultImage,
 } from "../../shared/domain";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import { statGuardedPath } from "../workspace/guarded-workspace-io";
 import { safeFilePath } from "../workspace/safe-file-path";
 import { normalizeBrowserUrl } from "./browser-url";
@@ -35,6 +36,7 @@ interface BrowserToolResult {
 
 export class BrowserService {
   private readonly sessions = new Map<string, BrowserSession>();
+  private managedPolicy: ManagedPolicyService | null = null;
 
   constructor(
     private readonly captureRoot: string,
@@ -42,11 +44,22 @@ export class BrowserService {
     private readonly getWorkspacePath: (sessionId: string) => string | null = () => null,
   ) {}
 
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
+
   async open(
     sessionId: string,
     provider: BrowserProvider,
     url = "about:blank",
+    options: { approved?: boolean } = { approved: true },
   ): Promise<BrowserStatus> {
+    const networkRequested = !url.trim().toLowerCase().startsWith("file:") && url !== "about:blank";
+    this.managedPolicy?.assertOperational("内嵌浏览器");
+    this.managedPolicy?.assertCapability("browser.use", options);
+    if (networkRequested) this.managedPolicy?.assertCapability("network.request", options);
+    if (url.trim().toLowerCase().startsWith("file:"))
+      this.managedPolicy?.assertCapability("file.read", options);
     const normalizedUrl = await normalizeBrowserUrl(url, this.getWorkspacePath(sessionId));
     const localFileRoot = normalizedUrl.startsWith("file:")
       ? this.getWorkspacePath(sessionId)
@@ -226,14 +239,22 @@ export class BrowserService {
     toolName: string,
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    options: { approved?: boolean } = {},
   ): Promise<BrowserToolResult> {
     try {
       signal?.throwIfAborted();
+      if (toolName !== "browser_close") {
+        this.managedPolicy?.assertOperational(`浏览器工具 ${toolName}`);
+        this.managedPolicy?.assertCapability("browser.use", options);
+        this.managedPolicy?.assertCapability("network.request", options);
+      }
       switch (toolName) {
         case "browser_open": {
           const provider = args.provider === "chrome" ? "chrome" : "edge";
           const url = typeof args.url === "string" ? args.url.trim() : "about:blank";
-          const status = await this.open(sessionId, provider, url);
+          const status = await this.open(sessionId, provider, url, {
+            ...(options.approved === undefined ? {} : { approved: options.approved }),
+          });
           return {
             output: `已在内嵌 ${provider === "edge" ? "Edge 兼容" : "Chrome 兼容"}浏览器中打开\n${status.title || "新标签页"}\n${status.url || "about:blank"}`,
             isError: false,

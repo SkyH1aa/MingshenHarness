@@ -2419,6 +2419,33 @@ pre {
   color: var(--danger);
 }
 
+.notification-read-all {
+  position: relative;
+}
+
+.notification-read-all--active {
+  color: var(--success);
+}
+
+.notification-read-all__count {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  display: inline-grid;
+  min-width: 15px;
+  height: 15px;
+  place-items: center;
+  padding: 0 3px;
+  border: 2px solid var(--surface);
+  border-radius: 8px;
+  color: #fff;
+  background: var(--danger);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .link-button {
   padding: 0;
   border: 0;
@@ -6488,6 +6515,31 @@ pre {
   }
 }
 
+@media (max-width: 600px) {
+  .desktop-caption .app-topbar > .brand {
+    display: none;
+  }
+
+  .desktop-caption .app-topbar .topbar-actions {
+    gap: 0;
+  }
+
+  .desktop-caption .app-topbar .topbar-actions .icon-button {
+    width: 26px;
+    height: 30px;
+  }
+
+  .desktop-caption .app-topbar .topbar-actions .layout-picker {
+    gap: 0;
+    padding: 1px;
+  }
+
+  .desktop-caption .app-topbar .topbar-actions .layout-picker button {
+    width: 24px;
+    height: 26px;
+  }
+}
+
 /* Embedded browser */
 
 .browser-dock {
@@ -8437,6 +8489,7 @@ button.message-attachment:hover {
 .plan-edit-row input, .plan-edit-row select { width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font-size: 12px; }
 .plan-edit-row__dependencies { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
 .plan-edit-row__dependencies input { width: 120px; padding: 3px 6px; }
+.plan-edit-row__claim { grid-column: 1 / -1; color: var(--accent); font-size: 11px; overflow-wrap: anywhere; }
 .plan-edit-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .plan-edit-actions > :first-child { margin-right: auto; }
 .agent-task-tree__row { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }

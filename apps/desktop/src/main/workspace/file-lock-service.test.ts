@@ -12,11 +12,14 @@ describe("cross-agent file leases", () => {
     const owner = { runId: "a", sessionId: "a", label: "A" };
     const first = await service.acquire([root], true, owner, signal, async () => false);
     const second = await service.acquire([root], true, owner, signal, async () => false);
+    expect(service.hasRun("a")).toBe(true);
     first();
     await expect(
       service.acquire([root], true, { ...owner, runId: "b" }, signal, async () => false),
     ).rejects.toThrow("Writer retained");
+    expect(service.hasRun("a")).toBe(true);
     second();
+    expect(service.hasRun("a")).toBe(false);
     await expect(
       service.acquire([root], true, { ...owner, runId: "b" }, signal, async () => false),
     ).resolves.toBeTypeOf("function");

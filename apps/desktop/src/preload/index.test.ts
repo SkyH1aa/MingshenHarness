@@ -51,6 +51,20 @@ describe("image asset export preload", () => {
     expect(electron.invoke).toHaveBeenCalledWith(IPC_CHANNELS.imageStudioExportAsset, "asset-id");
     expect(electron.invoke.mock.calls[0]).toHaveLength(2);
   });
+
+  it("opens a pending remote image by its opaque identifier without passing a URL", async () => {
+    const api = electron.exposed.get("mingshen") as MingshenDesktopApi;
+    electron.invoke.mockReset().mockResolvedValue(undefined);
+    const input = { id: "remote-image-id", requestId: "open-remote-request" };
+
+    await api.openImageStudioRemoteImage(input);
+
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith(
+      IPC_CHANNELS.imageStudioRemoteOpenExternal,
+      input,
+    );
+    expect(electron.invoke.mock.calls[0]).toHaveLength(2);
+  });
 });
 
 describe("composer flush preload", () => {

@@ -13,6 +13,7 @@ import {
   type CapabilityDiscoveryRecord,
   mergeCapabilityDiscoveryRecords,
 } from "../agents/domain-skills";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
 import { safeFilePath } from "../workspace/safe-file-path";
 import { loadLocalPluginCommandDeclarations } from "./local-plugin-commands";
@@ -824,10 +825,19 @@ function invalidPluginValidation(rootPath: string, error: unknown): LocalPluginV
 }
 
 export class ExtensionService {
+  private managedPolicy: ManagedPolicyService | null;
+
   constructor(
     private readonly repository: Repository,
     private readonly extensionRoot: string,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
 
   list(): ExtensionView[] {
     return this.repository.listExtensions();
@@ -904,6 +914,8 @@ export class ExtensionService {
     sourceDirectory: string,
     expected?: ExpectedPluginImport,
   ): Promise<ExtensionView> {
+    this.managedPolicy?.assertOperational("插件更新");
+    this.managedPolicy?.assertCapability("plugin.install", { approved: true });
     const current = this.repository.getExtension(extensionId);
     if (current?.type !== "plugin") {
       throw new Error("要更新的插件不存在。");
@@ -958,8 +970,16 @@ export class ExtensionService {
   }
 
   setEnabled(extensionId: string, enabled: boolean): void {
-    if (!this.repository.getExtension(extensionId)) {
+    const extension = this.repository.getExtension(extensionId);
+    if (!extension) {
       throw new Error("扩展不存在。");
+    }
+    if (enabled) {
+      this.managedPolicy?.assertOperational("扩展启用");
+      this.managedPolicy?.assertCapability(
+        extension.type === "plugin" ? "plugin.use" : "skill.use",
+        { approved: true },
+      );
     }
     this.repository.setExtensionEnabled(extensionId, enabled);
   }
@@ -977,8 +997,16 @@ export class ExtensionService {
       throw new Error("会话不存在。");
     }
     if (session.agentMode === "chat") throw new Error("ChatAgent does not load extensions.");
-    if (!this.repository.getExtension(extensionId)) {
+    const extension = this.repository.getExtension(extensionId);
+    if (!extension) {
       throw new Error("扩展不存在。");
+    }
+    if (enabled) {
+      this.managedPolicy?.assertOperational("会话扩展启用");
+      this.managedPolicy?.assertCapability(
+        extension.type === "plugin" ? "plugin.use" : "skill.use",
+        { approved: true },
+      );
     }
     this.repository.setSessionExtension(sessionId, extensionId, enabled);
   }
@@ -1008,6 +1036,7 @@ export class ExtensionService {
     skills: string[];
     mcpServers: string[];
   }> {
+    this.managedPolicy?.assertOperational("扩展上下文");
     const session = this.repository.getSession(sessionId);
     if (!session || session.agentMode === "chat") return { text: "", skills: [], mcpServers: [] };
     const extensionIds = this.repository.listSessionExtensionIds(sessionId);
@@ -1125,7 +1154,13 @@ export class ExtensionService {
     return result;
   }
 
-  async getPluginUseContext(sessionId: string, extensionId: string): Promise<PluginUseContext> {
+  async getPluginUseContext(
+    sessionId: string,
+    extensionId: string,
+    options: { approved?: boolean } = {},
+  ): Promise<PluginUseContext> {
+    this.managedPolicy?.assertOperational("插件按需加载");
+    this.managedPolicy?.assertCapability("plugin.use", options);
     const session = this.repository.getSession(sessionId);
     if (!session) throw new Error("会话不存在。");
     if (session.agentMode === "chat" || session.parentSessionId)
@@ -1246,7 +1281,11 @@ export class ExtensionService {
     sessionId: string,
     input: CapabilityDiscoveryInput,
     builtinRecords: readonly CapabilityDiscoveryRecord[] = [],
+    options: { approved?: boolean } = {},
   ): Promise<string> {
+    this.managedPolicy?.assertOperational("能力发现");
+    if (input.kind !== "plugin") this.managedPolicy?.assertCapability("skill.use", options);
+    if (input.kind !== "skill") this.managedPolicy?.assertCapability("plugin.use", options);
     const session = this.repository.getSession(sessionId);
     if (!session) throw new Error("会话不存在。");
     if (session.agentMode === "chat")
@@ -1333,7 +1372,10 @@ export class ExtensionService {
     name: string,
     resource?: string,
     offset = 0,
+    options: { approved?: boolean } = {},
   ): Promise<string> {
+    this.managedPolicy?.assertOperational("技能按需加载");
+    this.managedPolicy?.assertCapability("skill.use", options);
     const entries = await this.listSessionSkills(sessionId);
     const matches = entries.filter((entry) => entry.id === name || entry.name === name);
     if (matches.length !== 1)
@@ -1366,6 +1408,13 @@ export class ExtensionService {
     discovered: DiscoveredExtension[],
     expected?: ExpectedPluginImport,
   ): Promise<ExtensionImportResult> {
+    for (const extension of discovered) {
+      this.managedPolicy?.assertOperational("扩展安装");
+      this.managedPolicy?.assertCapability(
+        extension.type === "plugin" ? "plugin.install" : "skill.install",
+        { approved: true },
+      );
+    }
     const imported: ExtensionView[] = [];
     const warnings: string[] = [];
     let skipped = 0;

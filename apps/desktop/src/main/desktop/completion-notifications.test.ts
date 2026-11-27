@@ -318,6 +318,25 @@ describe("Task completion notifications", () => {
     expect(restored.state().badgeCount).toBe(1);
     restored.dispose();
   });
+  it("marks every conversation read and clears the taskbar badge and overlays together", () => {
+    const f = fixture();
+    f.complete("b");
+    f.complete("c");
+    expect(f.service.state().unread).toHaveLength(2);
+    expect(mock.badge).toHaveBeenLastCalledWith(2);
+
+    const state = f.service.markAllRead();
+
+    expect(state).toMatchObject({ unread: [], badgeCount: 0 });
+    expect(f.settings.get("desktop.completions")).toEqual([]);
+    expect(mock.badge).toHaveBeenLastCalledWith(0);
+    expect(f.window.setOverlayIcon).toHaveBeenLastCalledWith(null, "");
+    expect(mock.notifications).toHaveLength(2);
+    for (const notification of mock.notifications)
+      expect(notification.close).toHaveBeenCalledTimes(1);
+    expect(f.service.markAllRead()).toMatchObject({ unread: [], badgeCount: 0 });
+    f.service.dispose();
+  });
   it("marks the selected background conversation unread until the window is focused", () => {
     const f = fixture();
     f.service.setActiveSession("a");

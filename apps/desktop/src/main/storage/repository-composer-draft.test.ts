@@ -124,7 +124,7 @@ describe("SQLite composer drafts", () => {
         });
         expect(repo.getSetting(`composer.draft.${first.id}`)).not.toHaveProperty("attachments");
         expect(repo.getSetting("fixture.unrelated")).toEqual({ keep: true });
-        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(9);
+        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(11);
         expect(disk.prepare("pragma integrity_check").get()?.integrity_check).toBe("ok");
       }
     } finally {

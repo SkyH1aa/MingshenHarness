@@ -18,6 +18,7 @@ const fingerprintSchema = z.object({
     "anthropic_messages",
     "openai_responses",
     "openai_chat_completions",
+    "openai_images",
     "gemini_generate_content",
   ]),
   endpoint: digest,

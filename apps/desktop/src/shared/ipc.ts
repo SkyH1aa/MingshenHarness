@@ -86,6 +86,8 @@ import type {
   ImageStudioGenerateResult,
   ImageStudioImportFile,
   ImageStudioPolishInput,
+  ImageStudioRemoteImageInput,
+  ImageStudioRemotePreview,
   ImageStudioReversePromptInput,
   ImageStudioServiceResult,
   ImageStudioWorkspace,
@@ -103,12 +105,15 @@ import type {
   LocalReviewRequest,
   LocalReviewSnapshot,
 } from "./local-review";
+import type { EffectiveManagedPolicy, ManagedPolicyLayer } from "./managed-policy";
 import type {
   ModelCatalogPreferences,
   MoveCatalogProviderInput,
   SetCatalogModelStarInput,
 } from "./model-catalog";
 import type { ModelRetrySettings } from "./model-retry";
+import type { ModelWatchdogSettings } from "./model-watchdog";
+import type { OfficeDeliveryReceipt, OfficeDeliverySettings } from "./office-delivery";
 import type {
   ProjectMemoryConfiguration,
   ProjectMemoryConfigurationInput,
@@ -174,6 +179,12 @@ export const IPC_CHANNELS = {
   projectMemoryEnabled: "memory:enabled",
   modelRetryGet: "models:retry-get",
   modelRetrySet: "models:retry-set",
+  runtimeGovernanceGet: "runtime:governance-get",
+  modelWatchdogSet: "models:watchdog-set",
+  managedPolicyUserSet: "runtime:managed-policy-user-set",
+  officeDeliverySettingsSet: "office:delivery-settings-set",
+  officeDeliveriesList: "office:deliveries-list",
+  officeDeliveryContinue: "office:delivery-continue",
   uiPreferencesGet: "ui:preferences-get",
   uiPreferencesSave: "ui:preferences-save",
   uiReloadInterface: "ui:reload-interface",
@@ -199,6 +210,7 @@ export const IPC_CHANNELS = {
   completionState: "notifications:state",
   completionConfigure: "notifications:configure",
   completionActiveSession: "notifications:active-session",
+  completionMarkAllRead: "notifications:mark-all-read",
   completionEvent: "notifications:event",
   completionDraftAck: "notifications:draft-ack",
   policyRead: "policy:read",
@@ -248,6 +260,10 @@ export const IPC_CHANNELS = {
   imageStudioExportAssets: "image-studio:export-assets",
   imageStudioExportProgress: "image-studio:export-progress",
   imageStudioGenerate: "image-studio:generate",
+  imageStudioRemotePreview: "image-studio:remote-preview",
+  imageStudioRemoteOpenExternal: "image-studio:remote-open-external",
+  imageStudioRemoteSave: "image-studio:remote-save",
+  imageStudioRemoteDiscard: "image-studio:remote-discard",
   imageStudioPolishPrompt: "image-studio:polish-prompt",
   imageStudioReversePrompt: "image-studio:reverse-prompt",
   imageStudioCancel: "image-studio:cancel",
@@ -445,6 +461,23 @@ export interface MingshenDesktopApi {
   editCommand(command: "copy" | "cut" | "paste" | "selectAll"): Promise<void>;
   getModelRetrySettings(): Promise<ModelRetrySettings>;
   setModelRetrySettings(settings: ModelRetrySettings): Promise<ModelRetrySettings>;
+  getRuntimeGovernance(): Promise<{
+    watchdog: ModelWatchdogSettings;
+    managedPolicy: {
+      effective: EffectiveManagedPolicy;
+      user: ManagedPolicyLayer | null;
+    };
+    office: OfficeDeliverySettings;
+  }>;
+  setModelWatchdogSettings(settings: ModelWatchdogSettings): Promise<ModelWatchdogSettings>;
+  saveManagedUserPolicy(layer: ManagedPolicyLayer | null): Promise<void>;
+  setOfficeDeliverySettings(settings: OfficeDeliverySettings): Promise<OfficeDeliverySettings>;
+  listOfficeDeliveries(sessionId: string): Promise<OfficeDeliveryReceipt[]>;
+  continueOfficeDelivery(input: {
+    sessionId: string;
+    deliveryId: string;
+    startPage?: number;
+  }): Promise<OfficeDeliveryReceipt>;
   getUiPreferences(): Promise<UiPreferences>;
   saveUiPreferences(preferences: UiPreferences): Promise<void>;
   reloadInterface(): Promise<void>;
@@ -457,6 +490,7 @@ export interface MingshenDesktopApi {
     settings: CompletionNotificationSettings,
   ): Promise<CompletionNotificationState>;
   setActiveNotificationSession(sessionId: string | null): Promise<void>;
+  markAllCompletionNotificationsRead(): Promise<CompletionNotificationState>;
   onCompletionNotifications(listener: (state: CompletionNotificationState) => void): () => void;
   getRuntimeDependencies(): Promise<{
     native: boolean;
@@ -602,6 +636,14 @@ export interface MingshenDesktopApi {
   exportImageStudioAssets(assetIds: string[], requestId: string): Promise<string | null>;
   onImageStudioExportProgress(listener: (progress: ImageStudioExportProgress) => void): () => void;
   generateImageStudioImage(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult>;
+  previewImageStudioRemoteImage(
+    input: ImageStudioRemoteImageInput,
+  ): Promise<ImageStudioRemotePreview>;
+  openImageStudioRemoteImage(input: ImageStudioRemoteImageInput): Promise<void>;
+  saveImageStudioRemoteImage(
+    input: ImageStudioRemoteImageInput,
+  ): Promise<ImageStudioGenerateResult>;
+  discardImageStudioRemoteImages(ids: string[]): Promise<void>;
   polishImageStudioPrompt(input: ImageStudioPolishInput): Promise<ImageStudioServiceResult>;
   reverseImageStudioPrompt(input: ImageStudioReversePromptInput): Promise<ImageStudioServiceResult>;
   cancelImageStudioRequest(requestId: string): Promise<void>;
@@ -643,7 +685,7 @@ export interface MingshenDesktopApi {
     listener: (change: { sessionId: string; revision: string | null }) => void,
   ): () => void;
   rewriteAndSendChat(input: ChatRewriteInput): Promise<{ runId: string }>;
-  stopChat(sessionId: string): Promise<void>;
+  stopChat(sessionId: string, runId?: string): Promise<void>;
   listQueuedPrompts(sessionId: string): Promise<QueuedPromptView[]>;
   addQueuedPrompt(input: QueuedPromptAddInput): Promise<QueuedPromptView>;
   updateQueuedPrompt(input: QueuedPromptUpdateInput): Promise<QueuedPromptView>;

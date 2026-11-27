@@ -122,9 +122,10 @@ test("update handoff carries both Electron and legacy NSIS update flags", () => 
   assert.match(include, /\$\{GetOptions\} \$0 "--updated" \$1/);
   assert.match(include, /\$\{GetOptions\} \$0 "\/updated" \$1/);
   const main = fs.readFileSync(path.join(desktop, "src/main/index.ts"), "utf8");
+  assert.match(main, /const preparedInstaller = updateInstaller;/);
   assert.match(
     main,
-    /app\.relaunch\(\{ execPath: updateInstaller, args: \["--updated"\] \}\)/,
+    /assertUpdateInstallerLaunch\(preparedUserPolicy, preparedInstallerApproved\);\s*app\.relaunch\(\{ execPath: preparedInstaller, args: \["--updated"\] \}\)/,
   );
 });
 

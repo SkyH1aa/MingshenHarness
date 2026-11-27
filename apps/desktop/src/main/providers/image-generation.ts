@@ -4,9 +4,12 @@ import {
   IMAGE_STUDIO_MAX_SINGLE_BYTES,
   type ImageStudioAsset,
 } from "../../shared/image-studio";
+import type { ImageGenerationRemotePayload } from "./image-result-download";
 import { detectImage } from "./image-validation";
 
 const MAX_BASE64_CHARACTERS = Math.ceil((IMAGE_STUDIO_MAX_SINGLE_BYTES * 4) / 3) + 8;
+
+export type { ImageGenerationRemotePayload } from "./image-result-download";
 
 export interface ImageGenerationPayload {
   base64: string;
@@ -16,6 +19,25 @@ export interface ImageGenerationPayload {
   width: number;
   height: number;
   extension: string;
+}
+
+export type ImageGenerationCandidateWarningCode =
+  | "invalid_result"
+  | "invalid_base64"
+  | "invalid_image"
+  | "url_too_long"
+  | "base64_budget_exceeded";
+
+export interface ImageGenerationCandidateWarning {
+  imageIndex: number;
+  code: ImageGenerationCandidateWarningCode;
+  message: string;
+}
+
+export interface ImageGenerationCandidateParseResult {
+  resultCount: number;
+  candidates: Array<ImageGenerationPayload | ImageGenerationRemotePayload>;
+  warnings: ImageGenerationCandidateWarning[];
 }
 
 const MAX_GENERATION_BYTES = IMAGE_STUDIO_MAX_GENERATION_BYTES;
@@ -101,4 +123,112 @@ export async function parseImageGenerationResponses(
     });
   }
   return results;
+}
+
+export async function parseImageGenerationCandidates(
+  payload: unknown,
+): Promise<Array<ImageGenerationPayload | ImageGenerationRemotePayload>> {
+  return (await parseImageGenerationCandidatesDetailed(payload)).candidates;
+}
+
+export async function parseImageGenerationCandidatesDetailed(
+  payload: unknown,
+): Promise<ImageGenerationCandidateParseResult> {
+  const record = asRecord(payload);
+  if (!Array.isArray(record?.data) || record.data.length === 0)
+    throw new Error("供应商没有返回图片结果。");
+  if (record.data.length > IMAGE_STUDIO_MAX_GENERATED_COUNT)
+    throw new Error(`供应商返回的图片数量超过 ${IMAGE_STUDIO_MAX_GENERATED_COUNT} 张上限。`);
+
+  const candidates: Array<ImageGenerationPayload | ImageGenerationRemotePayload> = [];
+  const warnings: ImageGenerationCandidateWarning[] = [];
+  let totalBase64Bytes = 0;
+  for (const [index, value] of record.data.entries()) {
+    const imageIndex = index + 1;
+    const item = asRecord(value);
+    if (!item) {
+      warnings.push({
+        imageIndex,
+        code: "invalid_result",
+        message: `第 ${imageIndex} 个图片结果格式无效，已跳过。`,
+      });
+      continue;
+    }
+    const revisedPrompt =
+      typeof item.revised_prompt === "string" ? item.revised_prompt.slice(0, 8_000) : null;
+    let base64Failure: ImageGenerationCandidateWarning | null = null;
+    if (typeof item.b64_json === "string" && item.b64_json.trim()) {
+      let bytes: Buffer | null = null;
+      try {
+        bytes = decodeStrictBase64Image(item.b64_json);
+      } catch {
+        base64Failure = {
+          imageIndex,
+          code: "invalid_base64",
+          message: `第 ${imageIndex} 个图片结果的 Base64 格式无效，已跳过该结果。`,
+        };
+      }
+      if (bytes) {
+        if (totalBase64Bytes + bytes.length <= MAX_GENERATION_BYTES) {
+          try {
+            const image = await detectImage(bytes);
+            totalBase64Bytes += bytes.length;
+            candidates.push({
+              base64: bytes.toString("base64"),
+              mimeType: image.mimeType,
+              width: image.width,
+              height: image.height,
+              extension: image.extension,
+              byteLength: bytes.length,
+              revisedPrompt,
+            });
+            continue;
+          } catch {
+            base64Failure = {
+              imageIndex,
+              code: "invalid_image",
+              message: `第 ${imageIndex} 个图片结果的图片内容无效，已跳过该结果。`,
+            };
+          }
+        } else {
+          base64Failure = {
+            imageIndex,
+            code: "base64_budget_exceeded",
+            message: `第 ${imageIndex} 个图片结果会使 Base64 合计大小超过 100 MiB，已跳过。`,
+          };
+        }
+      }
+    }
+
+    if (typeof item.url === "string" && item.url.trim()) {
+      if (item.url.length <= 8_192) {
+        if (base64Failure) warnings.push(base64Failure);
+        candidates.push({
+          url: item.url,
+          revisedPrompt,
+        });
+        continue;
+      }
+      if (base64Failure) warnings.push(base64Failure);
+      warnings.push({
+        imageIndex,
+        code: "url_too_long",
+        message: `第 ${imageIndex} 个图片结果的 URL 过长，无法安全预览，已跳过。`,
+      });
+      continue;
+    }
+
+    warnings.push(
+      base64Failure ?? {
+        imageIndex,
+        code: "invalid_result",
+        message: `第 ${imageIndex} 个图片结果既没有有效 Base64，也没有可预览的 URL，已跳过。`,
+      },
+    );
+  }
+  return {
+    resultCount: record.data.length,
+    candidates,
+    warnings,
+  };
 }

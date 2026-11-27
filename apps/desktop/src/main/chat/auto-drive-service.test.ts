@@ -66,6 +66,7 @@ const model = {
 
 const plan = {
   revision: 2,
+  generation: 1,
   paused: false,
   updatedAt: "",
   breakpoints: [],

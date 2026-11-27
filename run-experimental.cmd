@@ -74,7 +74,7 @@ if defined PNPM_COREPACK (
 if errorlevel 1 goto :error
 
 :launch
-echo Starting Mingshen Harness 1.3.6 experimental build...
+echo Starting Mingshen Harness 1.3.7 experimental build...
 "%NODE_EXE%" scripts\prepare-experimental-runtime.cjs --launch
 if errorlevel 1 goto :error
 exit /b 0

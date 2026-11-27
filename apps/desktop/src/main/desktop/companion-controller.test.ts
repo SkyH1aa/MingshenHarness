@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatStreamEvent, SessionView } from "../../shared/domain";
+import type { RuntimeRunStatus } from "../../shared/runtime";
 import type { Repository } from "../storage/repository";
 import {
   type CompanionBounds,
@@ -161,6 +162,30 @@ function fixture(
 
 function event(input: ChatStreamEvent): ChatStreamEvent {
   return input;
+}
+
+function runtimeEvent(sessionId: string, runId: string, status: RuntimeRunStatus): ChatStreamEvent {
+  return event({
+    type: "runtime_run_updated",
+    sessionId,
+    runId,
+    run: {
+      runId,
+      sessionId,
+      status,
+      source: "chat",
+      createdAt: "2026-11-27T00:00:00.000Z",
+      startedAt: status === "accepted" ? null : "2026-11-27T00:00:01.000Z",
+      updatedAt: "2026-11-27T00:00:02.000Z",
+      completedAt: ["completed", "failed", "interrupted", "blocked_policy"].includes(status)
+        ? "2026-11-27T00:00:03.000Z"
+        : null,
+      terminalReason: null,
+      policyRevision: "1",
+      delegatedRunId: null,
+      lastEventId: 1,
+    },
+  });
 }
 
 describe("desktop companion controller", () => {
@@ -461,6 +486,96 @@ describe("desktop companion controller", () => {
     expect(f.controller.getState().mood).toBe("success");
     vi.advanceTimersByTime(4_000);
     expect(f.controller.getState().mood).toBe("idle");
+    f.controller.dispose();
+  });
+
+  it("uses persistent runtime status as the authoritative companion task state", () => {
+    const f = fixture();
+    f.controller.show();
+
+    f.controller.handleChatEvent(runtimeEvent("s", "r", "preparing"));
+    expect(f.controller.getState().tasks).toMatchObject([
+      { sessionId: "s", runId: "r", status: "thinking" },
+    ]);
+
+    f.controller.handleChatEvent(runtimeEvent("s", "r", "waiting_approval"));
+    expect(f.controller.getState()).toMatchObject({
+      mood: "waiting",
+      tasks: [{ sessionId: "s", runId: "r", status: "waiting" }],
+    });
+
+    f.controller.handleChatEvent(event({ type: "run_started", sessionId: "s", runId: "r" }));
+    expect(f.controller.getState()).toMatchObject({
+      mood: "waiting",
+      tasks: [{ sessionId: "s", runId: "r", status: "waiting" }],
+    });
+
+    f.controller.handleChatEvent(runtimeEvent("s", "r", "running"));
+    expect(f.controller.getState()).toMatchObject({
+      mood: "working",
+      tasks: [{ sessionId: "s", runId: "r", status: "working" }],
+    });
+    f.controller.handleChatEvent(
+      event({
+        type: "activity",
+        activity: {
+          id: "activity",
+          sessionId: "s",
+          runId: "r",
+          toolName: "read_file",
+          kind: "read",
+          title: "Read",
+          detail: "fixture",
+          status: "running",
+          startedAt: "2026-11-27T00:00:02.000Z",
+          completedAt: null,
+          durationMs: null,
+          fileChange: null,
+        },
+      }),
+    );
+    expect(f.controller.getState()).toMatchObject({
+      mood: "working",
+      tasks: [{ sessionId: "s", runId: "r", status: "working" }],
+    });
+
+    f.controller.handleChatEvent(runtimeEvent("s", "r", "completed"));
+    expect(f.controller.getState()).toMatchObject({ mood: "success", tasks: [] });
+    f.controller.handleChatEvent(event({ type: "run_started", sessionId: "s", runId: "r" }));
+    expect(f.controller.getState().tasks).toEqual([]);
+    f.controller.dispose();
+  });
+
+  it.each([
+    ["failed", "error"],
+    ["blocked_policy", "error"],
+    ["interrupted", "idle"],
+  ] as const)("maps runtime %s to the %s companion terminal mood", (status, mood) => {
+    const f = fixture();
+    f.controller.show();
+    f.controller.handleChatEvent(runtimeEvent("s", "r", "running"));
+    f.controller.handleChatEvent(runtimeEvent("s", "r", status));
+
+    expect(f.controller.getState()).toMatchObject({
+      mood,
+      tasks: [],
+      taskPanelOpen: false,
+    });
+    f.controller.dispose();
+  });
+
+  it("does not let a terminal runtime event or late legacy event replace a newer run", () => {
+    const f = fixture();
+    f.controller.show();
+    f.controller.handleChatEvent(runtimeEvent("s", "r1", "running"));
+    f.controller.handleChatEvent(runtimeEvent("s", "r2", "running"));
+
+    f.controller.handleChatEvent(runtimeEvent("s", "r1", "completed"));
+    f.controller.handleChatEvent(event({ type: "run_started", sessionId: "s", runId: "r1" }));
+
+    expect(f.controller.getState().tasks).toMatchObject([
+      { sessionId: "s", runId: "r2", status: "thinking" },
+    ]);
     f.controller.dispose();
   });
 

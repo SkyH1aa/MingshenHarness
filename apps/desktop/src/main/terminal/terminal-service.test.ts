@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionView } from "../../shared/domain";
 import type { InteractiveTerminalEvent } from "../../shared/terminal";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import { type PtyExitEvent, type TerminalPtySpawnInput, TerminalService } from "./terminal-service";
 
 class FakePty {
@@ -88,6 +89,7 @@ describe("TerminalService", () => {
       exitTimeoutMs?: number;
       terminationTimeoutMs?: number;
       exitAfterTermination?: boolean;
+      managedPolicy?: ManagedPolicyService;
     } = {},
   ) {
     const session = options.session ?? sessionView(workspace);
@@ -116,6 +118,7 @@ describe("TerminalService", () => {
         ? { terminationTimeoutMs: options.terminationTimeoutMs }
         : {}),
       platform: "win32",
+      ...(options.managedPolicy ? { managedPolicy: options.managedPolicy } : {}),
       environment: {
         PATH: "C:\\Windows\\System32",
         OPENAI_API_KEY: "must-not-be-inherited",
@@ -167,6 +170,73 @@ describe("TerminalService", () => {
     await service.stop(11, terminal.id);
     expect(service.list(11, "session-1")).toEqual([]);
     expect(events.at(-1)?.event).toEqual({ type: "removed", terminalId: terminal.id });
+  });
+
+  it("rejects terminal creation before spawning a process when managed policy denies it", async () => {
+    const assertCapability = vi.fn((capability: string) => {
+      if (capability === "terminal.interactive") throw new Error("POLICY_BLOCKED");
+    });
+    const managedPolicy = {
+      assertOperational: vi.fn(),
+      assertCapability,
+      assertPermissionMode: vi.fn(),
+      assertExecutionMode: vi.fn(),
+    } as unknown as ManagedPolicyService;
+    const { service, factory } = setup({ managedPolicy });
+
+    await expect(
+      service.create(11, { sessionId: "session-1", cols: 100, rows: 30 }),
+    ).rejects.toThrow("POLICY_BLOCKED");
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("requires command execution authorization before spawning a PTY", async () => {
+    const assertCapability = vi.fn((capability: string, options?: { approved?: boolean }) => {
+      if (capability !== "command.execute") return;
+      expect(options).toBeUndefined();
+      throw new Error("POLICY_APPROVAL_REQUIRED");
+    });
+    const managedPolicy = {
+      assertOperational: vi.fn(),
+      assertCapability,
+      assertPermissionMode: vi.fn(),
+      assertExecutionMode: vi.fn(),
+    } as unknown as ManagedPolicyService;
+    const { service, factory } = setup({ managedPolicy });
+
+    await expect(service.create(11, { sessionId: "session-1" })).rejects.toThrow(
+      "POLICY_APPROVAL_REQUIRED",
+    );
+    expect(factory).not.toHaveBeenCalled();
+    expect(assertCapability).toHaveBeenCalledWith("command.execute");
+  });
+
+  it("rechecks command execution authorization before writing terminal input", async () => {
+    let denyCommand = false;
+    const assertCapability = vi.fn((capability: string, options?: { approved?: boolean }) => {
+      if (capability !== "command.execute") return;
+      expect(options).toBeUndefined();
+      if (denyCommand) throw new Error("POLICY_APPROVAL_REQUIRED");
+    });
+    const managedPolicy = {
+      assertOperational: vi.fn(),
+      assertCapability,
+      assertPermissionMode: vi.fn(),
+      assertExecutionMode: vi.fn(),
+    } as unknown as ManagedPolicyService;
+    const { service, factory, pty } = setup({ managedPolicy });
+
+    const terminal = await service.create(11, { sessionId: "session-1" });
+    denyCommand = true;
+
+    expect(() => service.input(11, terminal.id, "Get-ChildItem\r")).toThrow(
+      "POLICY_APPROVAL_REQUIRED",
+    );
+    expect(factory).toHaveBeenCalledOnce();
+    expect(pty.writes).toEqual([]);
+    expect(
+      assertCapability.mock.calls.filter(([capability]) => capability === "command.execute"),
+    ).toEqual([["command.execute"], ["command.execute"]]);
   });
 
   it.each([

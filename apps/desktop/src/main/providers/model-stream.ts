@@ -8,6 +8,13 @@ import type {
   ToolResultImage,
 } from "../../shared/domain";
 import { normalizeModelRetrySettings } from "../../shared/model-retry";
+import {
+  isMeaningfulModelStreamProgress,
+  isModelWatchdogTimeout,
+  ModelRequestWatchdog,
+  type ModelWatchdogSettings,
+  normalizeModelWatchdogSettings,
+} from "../../shared/model-watchdog";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
 import {
   extractedAttachmentText,
@@ -115,6 +122,7 @@ export interface StreamTurnInput {
   onRequestPrepared?: (request: PreparedModelRequest) => void;
   onBeforeRequest?: () => void;
   beforeEachRequest?: BeforeModelRequestHook;
+  /** Fixed retry budget for this streamModelTurn call; progress events never replenish it. */
   retry?: {
     maxRetries: number;
     onRetry: (state: {
@@ -125,6 +133,10 @@ export interface StreamTurnInput {
     }) => void;
     onRecovered?: () => void;
   };
+  /** Per-attempt first-response and stream-idle limits. Omitted uses the production defaults. */
+  watchdog?: ModelWatchdogSettings;
+  /** Internal transport lifecycle callback used by the outer watchdog; not part of request state. */
+  onWireRequestStarted?: () => void;
 }
 
 export interface RequestUserContext {
@@ -806,6 +818,19 @@ function toolPayload(
   }));
 }
 
+function assertTextRequestProtocol(protocol: ProviderProtocol): void {
+  if (protocol === "openai_images") {
+    throw new Error("OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求。");
+  }
+}
+
+function isTransientUnsignalledAbort(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted || !error || typeof error !== "object") return false;
+  const name = "name" in error ? String(error.name) : "";
+  const message = "message" in error ? String(error.message) : "";
+  return name === "AbortError" || /^(?:the |this )?operation was aborted\.?$/i.test(message.trim());
+}
+
 function buildGeminiContents(
   input: StreamTurnInput,
   allowPendingToolCalls = false,
@@ -952,6 +977,7 @@ function anthropicThinkingConfig(
 }
 
 function buildBaseWireRequest(input: StreamTurnInput, forEstimation: boolean): WireRequest {
+  assertTextRequestProtocol(input.provider.protocol);
   const maxOutputTokens = input.maxOutputTokens ?? input.model.maxOutputTokens;
   const reasoningEnabled = Boolean(input.reasoningLevel) && input.reasoningLevel !== "none";
   const tools = toolPayload(input.provider.protocol, input.tools);
@@ -1109,6 +1135,8 @@ function buildBaseWireRequest(input: StreamTurnInput, forEstimation: boolean): W
 
       return { path: "/chat/completions", body: withPromptCachingHints(input, body) };
     }
+    case "openai_images":
+      throw new Error("OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求。");
   }
 }
 
@@ -2051,10 +2079,11 @@ async function* decodeOpenAiChat(
 }
 
 export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<ModelStreamEvent> {
+  assertTextRequestProtocol(input.provider.protocol);
   const maxRetries = input.retry ? normalizeModelRetrySettings(input.retry).maxRetries : 0;
+  const watchdogSettings = normalizeModelWatchdogSettings(input.watchdog);
   let consecutiveRetries = 0;
   let recovering = false;
-  const progressHighWater = new Map<string, string>();
   const recovered = () => {
     if (!recovering) return;
     recovering = false;
@@ -2062,7 +2091,10 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
   };
   for (let request = 1; ; request++) {
     input.signal.throwIfAborted();
-    const progress = new Map<string, string>();
+    const attempt = linkedAbortController(input.signal);
+    const watchdog = new ModelRequestWatchdog(watchdogSettings, (error) => {
+      attempt.controller.abort(error);
+    });
     const measured: RequestUsage = {
       inputTokens: null,
       outputTokens: null,
@@ -2095,11 +2127,16 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
       const estimatedInputTokens = estimateModelInputTokens(effectiveInput);
       const requestInput = {
         ...effectiveInput,
+        signal: attempt.controller.signal,
         baseSystemPrompt: input.baseSystemPrompt ?? input.systemPrompt,
         maxOutputTokens: Math.min(
           input.maxOutputTokens ?? input.model.maxOutputTokens,
           input.model.contextWindow - estimatedInputTokens - 256,
         ),
+        onWireRequestStarted: () => {
+          watchdog.start();
+          input.onWireRequestStarted?.();
+        },
       };
       if (requestInput.maxOutputTokens < 1)
         throw new ModelInputBudgetError(estimatedInputTokens, input.model.contextWindow);
@@ -2116,40 +2153,15 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
           ] as const)
             if (typeof event[key] === "number") measured[key] = event[key];
         }
-        let key = "";
-        let chunk = "";
-        if (event.type === "text_delta" || event.type === "reasoning_delta") {
-          key = event.type;
-          chunk = event.text;
-        } else if (event.type === "tool_call_arguments_delta") {
-          key = `tool:${event.index}:arguments`;
-          chunk = event.delta;
-        } else if (event.type === "tool_call_arguments") {
-          key = `tool:${event.index}:arguments`;
-          progress.set(key, "");
-          chunk = event.arguments;
-        } else if (event.type === "tool_call_started" && event.name !== "unknown_tool") {
-          key = `tool:${event.index}:name`;
-          chunk = event.name;
-        }
-        if (chunk) {
-          const prefix = progress.get(key) ?? "";
-          const total = prefix + chunk;
-          progress.set(key, total);
-          // Replayed prefixes and usage/heartbeat frames do not establish recovery.
-          const previous = progressHighWater.get(key) ?? "";
-          if (chunk.trim() && previous.slice(prefix.length, total.length) !== chunk) {
-            progressHighWater.set(key, total);
-            consecutiveRetries = 0;
-            recovered();
-          }
-        }
+        if (isMeaningfulModelStreamProgress(event)) watchdog.progress();
         yield event;
       }
       measured.completed = true;
       recovered();
       return;
     } catch (cause) {
+      watchdog.stop();
+      attempt.dispose();
       if (!input.signal.aborted || input.signal.reason?.name === "TimeoutError")
         recordRuntimeError(
           "model.request",
@@ -2163,23 +2175,34 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
           [input.apiKey],
         );
       input.signal.throwIfAborted();
+      const timeout =
+        watchdog.timeout ??
+        (isModelWatchdogTimeout(cause) ? cause : null) ??
+        (isModelWatchdogTimeout(attempt.controller.signal.reason)
+          ? attempt.controller.signal.reason
+          : null);
+      const failure = timeout
+        ? new ModelRequestError(timeout.message, true, null, { cause: timeout })
+        : cause;
       if (
-        !(cause instanceof ModelRequestError) ||
-        !cause.retryable ||
+        !(failure instanceof ModelRequestError) ||
+        !failure.retryable ||
         consecutiveRetries >= maxRetries
       )
-        throw cause;
+        throw failure;
       consecutiveRetries++;
       recovering = true;
-      const delayMs = retryDelayMs(consecutiveRetries, cause.retryAfterMs);
+      const delayMs = retryDelayMs(consecutiveRetries, failure.retryAfterMs);
       input.retry?.onRetry({
         attempt: consecutiveRetries,
         maxRetries,
         delayMs,
-        error: redactSecrets(cause.message, [input.apiKey]),
+        error: redactSecrets(failure.message, [input.apiKey]),
       });
       await waitForRetry(delayMs, input.signal);
     } finally {
+      watchdog.stop();
+      attempt.dispose();
       try {
         input.onRequestUsage?.(measured);
       } catch (cause) {
@@ -2190,6 +2213,20 @@ export async function* streamModelTurn(input: StreamTurnInput): AsyncGenerator<M
       }
     }
   }
+}
+
+function linkedAbortController(parent: AbortSignal): {
+  controller: AbortController;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const forward = () => controller.abort(parent.reason);
+  if (parent.aborted) forward();
+  else parent.addEventListener("abort", forward, { once: true });
+  return {
+    controller,
+    dispose: () => parent.removeEventListener("abort", forward),
+  };
 }
 
 async function* streamModelTurnInternal(
@@ -2259,6 +2296,7 @@ async function* streamModelTurnInternal(
 
   let response: Response;
   try {
+    input.onWireRequestStarted?.();
     response = await fetch(`${input.provider.baseUrl}${request.path}`, {
       method: "POST",
       headers,
@@ -2267,15 +2305,24 @@ async function* streamModelTurnInternal(
       redirect: "error",
     });
   } catch (error) {
+    if (isModelWatchdogTimeout(input.signal.reason))
+      throw new ModelRequestError(input.signal.reason.message, true, null, {
+        cause: input.signal.reason,
+      });
     const cause = error instanceof Error ? error : new Error(String(error));
+    const errorDetail = `${cause.message} ${String((cause.cause as { code?: string })?.code ?? "")}`;
+    const retryable =
+      !input.signal.aborted &&
+      (isTransientUnsignalledAbort(cause, input.signal) ||
+        !/certificate|cert_|self.signed|redirect|unable_to_(?:verify|get_issuer)|ERR_INVALID_URL|ERR_INVALID_PROTOCOL|ERR_UNESCAPED_CHARACTERS/i.test(
+          errorDetail,
+        ));
     throw new ModelRequestError(
       redactSecrets(
         `Model request failed\nProvider: ${input.provider.name}\nEndpoint: ${input.provider.baseUrl}${request.path}\n${cause.message}\n${cause.cause ? JSON.stringify(cause.cause, Object.getOwnPropertyNames(cause.cause)) : ""}`,
         [input.apiKey],
       ),
-      !/certificate|cert_|self.signed|redirect|unable_to_(?:verify|get_issuer)|ERR_INVALID_URL|ERR_INVALID_PROTOCOL|ERR_UNESCAPED_CHARACTERS/i.test(
-        `${cause.message} ${String((cause.cause as { code?: string })?.code ?? "")}`,
-      ),
+      retryable,
       null,
       { cause },
     );
@@ -2283,6 +2330,10 @@ async function* streamModelTurnInternal(
 
   if (!response.ok) {
     const body = await response.text().catch(() => "[Failed to read error response body]");
+    if (isModelWatchdogTimeout(input.signal.reason))
+      throw new ModelRequestError(input.signal.reason.message, true, null, {
+        cause: input.signal.reason,
+      });
     const usage = yieldUsage(parseJson(body), input.provider.protocol);
     if (usage) yield usage;
     throw new ModelRequestError(
@@ -2313,17 +2364,24 @@ async function* streamModelTurnInternal(
       case "openai_chat_completions":
         yield* decodeOpenAiChat(response, input);
         break;
+      case "openai_images":
+        throw new Error("OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求。");
     }
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : String(error), [
       input.apiKey,
     ]);
+    if (isModelWatchdogTimeout(input.signal.reason))
+      throw new ModelRequestError(input.signal.reason.message, true, null, {
+        cause: input.signal.reason,
+      });
     if (error instanceof ModelOutputLimitError) throw new ModelOutputLimitError(message);
     if (error instanceof ModelRequestError)
       throw new ModelRequestError(message, error.retryable, error.retryAfterMs);
     // Transport reads may fail after yielding partial content. No tools run until completion.
     if (
       error instanceof TypeError ||
+      isTransientUnsignalledAbort(error, input.signal) ||
       (error instanceof Error &&
         /ECONNRESET|ETIMEDOUT|terminated|network|fetch failed/i.test(error.message))
     )
@@ -2333,6 +2391,7 @@ async function* streamModelTurnInternal(
 }
 
 export function getProtocolPath(protocol: ProviderProtocol, modelId?: string): string {
+  assertTextRequestProtocol(protocol);
   switch (protocol) {
     case "gemini_generate_content":
       return geminiModelPath(modelId ?? "");
@@ -2342,5 +2401,7 @@ export function getProtocolPath(protocol: ProviderProtocol, modelId?: string): s
       return "/responses";
     case "openai_chat_completions":
       return "/chat/completions";
+    case "openai_images":
+      throw new Error("OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求。");
   }
 }

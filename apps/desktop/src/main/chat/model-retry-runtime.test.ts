@@ -110,6 +110,26 @@ describe("runtime model retry boundaries", () => {
   it("retries only the failed model turn, never replays a completed tool and discards partial tool calls", async () => {
     vi.useFakeTimers();
     const f = fixture();
+    f.internal.availableTools.mockResolvedValue([
+      {
+        name: "read_file",
+        description: "Read a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "write_file",
+        description: "Write a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
+    ]);
     const bodies: string[] = [];
     const fetcher = vi.fn(async (_url: string, options: RequestInit) => {
       bodies.push(String(options.body));
@@ -152,6 +172,10 @@ describe("runtime model retry boundaries", () => {
       expect(fetcher).toHaveBeenCalledTimes(3);
       expect(f.internal.executeToolCall).toHaveBeenCalledTimes(1);
       expect(bodies[1]).toBe(bodies[2]);
+      for (const body of bodies.slice(1)) {
+        expect(body).toContain('"name":"read_file"');
+        expect(body).toContain('"name":"write_file"');
+      }
       const stored = JSON.stringify(f.repository.getMessages(f.session.id));
       expect(stored).toContain("Recovered final answer");
       expect(stored).toContain("File operation completed once");
@@ -169,6 +193,73 @@ describe("runtime model retry boundaries", () => {
       expect(activities.findLast((activity) => activity.toolName === "model_retry")?.status).toBe(
         "completed",
       );
+    } finally {
+      f.database.close();
+    }
+  });
+  it("fails finitely when every attempt emits partial output, without executing or losing tools", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.chat.setModelRetrySettings({ maxRetries: 2 });
+    f.internal.availableTools.mockResolvedValue([
+      {
+        name: "read_file",
+        description: "Read a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "write_file",
+        description: "Write a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
+    ]);
+    let attempt = 0;
+    const bodies: string[] = [];
+    const fetcher = vi.fn(async (_url: string, options: RequestInit) => {
+      bodies.push(String(options.body));
+      attempt++;
+      return sse(
+        { type: "response.output_text.delta", delta: `Partial answer ${attempt}` },
+        {
+          type: "response.output_item.added",
+          item: {
+            type: "function_call",
+            call_id: `incomplete-call-${attempt}`,
+            name: "write_file",
+            arguments: `{"path":"unfinished-${attempt}.md","content":"partial`,
+          },
+        },
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const pending = f.run();
+      await vi.runAllTimersAsync();
+      await pending;
+
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(bodies).toHaveLength(3);
+      for (const body of bodies) {
+        expect(body).toContain('"name":"read_file"');
+        expect(body).toContain('"name":"write_file"');
+      }
+      expect(f.internal.executeToolCall).not.toHaveBeenCalled();
+      expect(f.events.filter((event) => event.type === "model_attempt_reset")).toHaveLength(2);
+      expect(f.events.find((event) => event.type === "run_failed")).toMatchObject({
+        error: expect.stringContaining("最终模型响应未完成"),
+      });
+      expect(f.repository.getSession(f.session.id)?.status).toBe("error");
+      const stored = JSON.stringify(f.repository.getMessages(f.session.id));
+      expect(stored).not.toContain("Partial answer");
+      expect(stored).not.toContain("incomplete-call");
     } finally {
       f.database.close();
     }
@@ -210,7 +301,7 @@ describe("runtime model retry boundaries", () => {
       f.database.close();
     }
   });
-  it("resets visible reconnection counts across multiple outages and tool rounds without replaying tools", async () => {
+  it("gives each model round one bounded retry budget without replaying completed tools", async () => {
     vi.useFakeTimers();
     const f = fixture();
     f.chat.setModelRetrySettings({ maxRetries: 2 });
@@ -232,11 +323,6 @@ describe("runtime model retry boundaries", () => {
         );
       if (request === 6)
         return sse({ type: "response.output_text.delta", delta: "Failed partial output" });
-      if (request === 8)
-        return sse(
-          { type: "response.output_text.delta", delta: "Final recovered answer" },
-          { type: "response.completed" },
-        );
       return new Response("Unavailable", { status: 503, headers: { "retry-after-ms": "0" } });
     });
     vi.stubGlobal("fetch", fetcher);
@@ -244,7 +330,7 @@ describe("runtime model retry boundaries", () => {
       const pending = f.run();
       await vi.runAllTimersAsync();
       await pending;
-      expect(fetcher).toHaveBeenCalledTimes(8);
+      expect(fetcher).toHaveBeenCalledTimes(6);
       expect(f.internal.executeToolCall).toHaveBeenCalledTimes(1);
       const reconnecting = f.events
         .filter((event) => event.type === "activity")
@@ -255,14 +341,11 @@ describe("runtime model retry boundaries", () => {
         "正在自动尝试重连（2/2）",
         "正在自动尝试重连（1/2）",
         "正在自动尝试重连（2/2）",
-        "正在自动尝试重连（1/2）",
-        "正在自动尝试重连（2/2）",
       ]);
       const stored = JSON.stringify(f.repository.getMessages(f.session.id));
-      expect(stored).toContain("Final recovered answer");
       expect(stored).not.toContain("Failed partial output");
-      expect(f.events.some((event) => event.type === "run_failed")).toBe(false);
-      expect(f.repository.getSession(f.session.id)?.status).toBe("idle");
+      expect(f.events.some((event) => event.type === "run_failed")).toBe(true);
+      expect(f.repository.getSession(f.session.id)?.status).toBe("error");
     } finally {
       f.database.close();
     }

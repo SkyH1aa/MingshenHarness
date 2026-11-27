@@ -6,10 +6,16 @@ import type {
   ProviderView,
 } from "../../shared/domain";
 import { imageOutputProviders, textOutputProviders } from "../../shared/model-capabilities";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import type { SecretStore } from "../storage/secret-store";
-import { parseImageGenerationResponse, parseImageGenerationResponses } from "./image-generation";
+import {
+  parseImageGenerationCandidates,
+  parseImageGenerationCandidatesDetailed,
+  parseImageGenerationResponse,
+  parseImageGenerationResponses,
+} from "./image-generation";
 import { ProviderService } from "./provider-service";
 
 const TINY_PNG_BASE64 =
@@ -21,6 +27,22 @@ type CompleteModelInput = ModelCreateInput &
 afterEach(() => {
   vi.unstubAllGlobals();
   for (const database of databases.splice(0)) database.close();
+});
+
+describe("ProviderService managed policy guard", () => {
+  it("blocks network requests before reading the provider key", () => {
+    const { provider, service } = setup();
+    const assertProvider = vi.fn(() => {
+      throw new Error("POLICY_BLOCKED");
+    });
+    service.setManagedPolicy({
+      assertOperational: vi.fn(),
+      assertProvider,
+    } as unknown as ManagedPolicyService);
+
+    expect(() => service.getActiveApiKey(provider.id)).toThrow("POLICY_BLOCKED");
+    expect(assertProvider).toHaveBeenCalledWith(provider.id, undefined, {});
+  });
 });
 
 function setup(protocol: ProviderProtocol = "openai_chat_completions") {
@@ -146,6 +168,109 @@ describe("image generation response", () => {
     ).rejects.toThrow("10 张上限");
   });
 
+  it("keeps mixed Base64 and remote URL candidates without fetching the URL", async () => {
+    const result = await parseImageGenerationCandidates({
+      data: [
+        { b64_json: TINY_PNG_BASE64, revised_prompt: "Local" },
+        {
+          url: "https://cdn.example.test/generated.webp?token=opaque",
+          revised_prompt: "Remote",
+        },
+      ],
+    });
+    expect(result).toMatchObject([
+      { mimeType: "image/png", revisedPrompt: "Local" },
+      {
+        url: "https://cdn.example.test/generated.webp?token=opaque",
+        revisedPrompt: "Remote",
+      },
+    ]);
+  });
+
+  it("keeps remote URL candidates lossless and leaves security checks to preview", async () => {
+    await expect(
+      parseImageGenerationCandidates({
+        data: [{ url: "https://CDN.EXAMPLE.TEST:443/image.png#fragment" }],
+      }),
+    ).resolves.toEqual([
+      {
+        url: "https://CDN.EXAMPLE.TEST:443/image.png#fragment",
+        revisedPrompt: null,
+      },
+    ]);
+    await expect(
+      parseImageGenerationCandidates({ data: [{ url: "http://cdn.example.test/image.png" }] }),
+    ).resolves.toEqual([
+      {
+        url: "http://cdn.example.test/image.png",
+        revisedPrompt: null,
+      },
+    ]);
+    await expect(
+      parseImageGenerationCandidates({
+        data: [
+          { b64_json: TINY_PNG_BASE64, revised_prompt: "Preserved" },
+          { url: "not a URL", revised_prompt: "Preview later" },
+        ],
+      }),
+    ).resolves.toMatchObject([
+      { mimeType: "image/png", revisedPrompt: "Preserved" },
+      { url: "not a URL", revisedPrompt: "Preview later" },
+    ]);
+    await expect(
+      parseImageGenerationCandidates({
+        data: [{ url: `https://cdn.example.test/${"a".repeat(8_192)}` }],
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("reports per-item failures without losing valid mixed candidates or leaking source values", async () => {
+    const result = await parseImageGenerationCandidatesDetailed({
+      data: [
+        { b64_json: TINY_PNG_BASE64, revised_prompt: "Keep" },
+        {
+          b64_json: "not-base64",
+          url: "https://cdn.example.test/fallback.png?signature=opaque",
+          revised_prompt: "Fallback",
+        },
+        { url: `https://cdn.example.test/${"a".repeat(8_192)}` },
+        { url: "not a URL", revised_prompt: "Preview warning later" },
+      ],
+    });
+
+    expect(result.resultCount).toBe(4);
+    expect(result.candidates).toMatchObject([
+      { mimeType: "image/png", revisedPrompt: "Keep" },
+      {
+        url: "https://cdn.example.test/fallback.png?signature=opaque",
+        revisedPrompt: "Fallback",
+      },
+      { url: "not a URL", revisedPrompt: "Preview warning later" },
+    ]);
+    expect(result.warnings).toEqual([
+      expect.objectContaining({ imageIndex: 2, code: "invalid_base64" }),
+      expect.objectContaining({ imageIndex: 3, code: "url_too_long" }),
+    ]);
+    expect(JSON.stringify(result.warnings)).not.toContain("not-base64");
+    expect(JSON.stringify(result.warnings)).not.toContain("signature=opaque");
+  });
+
+  it("returns warnings instead of throwing when every individual candidate is invalid", async () => {
+    await expect(
+      parseImageGenerationCandidatesDetailed({
+        data: [{ b64_json: "not-base64" }, { url: "" }, null],
+      }),
+    ).resolves.toMatchObject({
+      resultCount: 3,
+      candidates: [],
+      warnings: [
+        { imageIndex: 1, code: "invalid_base64" },
+        { imageIndex: 2, code: "invalid_result" },
+        { imageIndex: 3, code: "invalid_result" },
+      ],
+    });
+  });
+
   it.each([
     [{ data: [{ url: "https://untrusted.invalid/image.png" }] }],
     [{ data: [{ b64_json: "https://untrusted.invalid/image.png" }] }],
@@ -172,6 +297,16 @@ describe("image model output filtering", () => {
       "mixed",
     ]);
     expect(imageOutputProviders(sources)[0]?.models.map((item) => item.id)).toEqual(["image"]);
+    expect(
+      textOutputProviders([
+        {
+          ...sources[0],
+          id: "images-protocol",
+          protocol: "openai_images",
+          models: [model("malformed-text", ["text"])],
+        } as ProviderView,
+      ]),
+    ).toEqual([]);
   });
 });
 
@@ -181,13 +316,13 @@ describe("image model protocol validation", () => {
     (protocol) => {
       const { provider: savedProvider, service } = setup(protocol);
       expect(() => service.createModel(modelInput(savedProvider.id))).toThrow(
-        "OpenAI Chat Completions 或 OpenAI Responses",
+        "OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses",
       );
       expect(service.getProvider(savedProvider.id).models).toEqual([]);
     },
   );
 
-  it.each(["openai_chat_completions", "openai_responses"] as const)(
+  it.each(["openai_chat_completions", "openai_responses", "openai_images"] as const)(
     "allows image output on %s",
     (protocol) => {
       const { provider: savedProvider, service } = setup(protocol);
@@ -197,10 +332,38 @@ describe("image model protocol validation", () => {
     },
   );
 
+  it("defaults omitted output modalities to image for the OpenAI Images protocol", () => {
+    const { provider: savedProvider, service } = setup("openai_images");
+    const { outputModalities: _outputModalities, ...withoutOutput } = modelInput(savedProvider.id);
+
+    const created = service.createModel(withoutOutput).models[0];
+    if (!created) throw new Error("Image model missing.");
+    expect(created.outputModalities).toEqual(["image"]);
+
+    const updated = service
+      .updateModel({
+        id: created.id,
+        modelId: created.modelId,
+        displayName: "Updated image model",
+        contextWindow: created.contextWindow,
+        maxOutputTokens: created.maxOutputTokens,
+        inputModalities: created.inputModalities,
+        toolCalls: created.toolCalls,
+        parallelToolCalls: created.parallelToolCalls,
+        reasoningLevels: created.reasoningLevels,
+        anthropicNoneBehavior: created.anthropicNoneBehavior,
+      })
+      .models.find((model) => model.id === created.id);
+    expect(updated).toMatchObject({
+      displayName: "Updated image model",
+      outputModalities: ["image"],
+    });
+  });
+
   it("rejects mixed text and image output on an incompatible provider", () => {
     const { provider: savedProvider, service } = setup("anthropic_messages");
     expect(() => service.createModel(modelInput(savedProvider.id, ["text", "image"]))).toThrow(
-      "OpenAI Chat Completions 或 OpenAI Responses",
+      "OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses",
     );
     expect(service.getProvider(savedProvider.id).models).toEqual([]);
   });
@@ -229,14 +392,94 @@ describe("image model protocol validation", () => {
         reasoningLevels: saved.reasoningLevels,
         anthropicNoneBehavior: saved.anthropicNoneBehavior,
       }),
-    ).toThrow("OpenAI Chat Completions 或 OpenAI Responses");
+    ).toThrow("OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses");
     expect(repository.getModel(saved.id)?.outputModalities).toEqual(["text"]);
+  });
+
+  it("keeps the OpenAI Images protocol image-only and closes tool capabilities", () => {
+    const { repository, provider: savedProvider, service } = setup("openai_images");
+
+    expect(() =>
+      service.createModel({
+        ...modelInput(savedProvider.id, ["text"]),
+        modelId: "text-model",
+      }),
+    ).toThrow("仅支持纯图片输出模型");
+    expect(() =>
+      service.createModel({
+        ...modelInput(savedProvider.id, ["text", "image"]),
+        modelId: "mixed-model",
+      }),
+    ).toThrow("仅支持纯图片输出模型");
+    expect(() =>
+      service.createModel({
+        ...modelInput(savedProvider.id),
+        modelId: "tool-model",
+        toolCalls: true,
+      }),
+    ).toThrow("不支持工具调用");
+
+    const imageModel = service.createModel(modelInput(savedProvider.id)).models[0];
+    if (!imageModel) throw new Error("Image model missing.");
+    expect(() =>
+      service.updateModel({
+        id: imageModel.id,
+        modelId: imageModel.modelId,
+        displayName: imageModel.displayName,
+        contextWindow: imageModel.contextWindow,
+        maxOutputTokens: imageModel.maxOutputTokens,
+        inputModalities: imageModel.inputModalities,
+        outputModalities: ["text", "image"],
+        toolCalls: false,
+        parallelToolCalls: false,
+        reasoningLevels: [],
+        anthropicNoneBehavior: "disabled",
+      }),
+    ).toThrow("仅支持纯图片输出模型");
+    expect(repository.getModel(imageModel.id)?.outputModalities).toEqual(["image"]);
+  });
+
+  it("rejects switching a provider with text models to OpenAI Images", () => {
+    const { provider: savedProvider, service } = setup("openai_responses");
+    service.createModel({
+      ...modelInput(savedProvider.id, ["text"]),
+      modelId: "text-model",
+    });
+
+    expect(() =>
+      service.updateProvider({
+        providerId: savedProvider.id,
+        name: savedProvider.name,
+        baseUrl: savedProvider.baseUrl,
+        protocol: "openai_images",
+        authMode: savedProvider.authMode,
+        customHeaderName: savedProvider.customHeaderName,
+      }),
+    ).toThrow("仅支持纯图片输出模型");
+    expect(service.getProvider(savedProvider.id).protocol).toBe("openai_responses");
+  });
+
+  it("rejects switching an OpenAI Images provider to a protocol without image output", () => {
+    const { provider: savedProvider, service } = setup("openai_images");
+    service.createModel(modelInput(savedProvider.id));
+
+    expect(() =>
+      service.updateProvider({
+        providerId: savedProvider.id,
+        name: savedProvider.name,
+        baseUrl: "https://images.invalid/v1",
+        protocol: "anthropic_messages",
+        authMode: savedProvider.authMode,
+        customHeaderName: savedProvider.customHeaderName,
+      }),
+    ).toThrow("OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses");
+    expect(service.getProvider(savedProvider.id).protocol).toBe("openai_images");
   });
 });
 
 describe("image connection test", () => {
-  it("uses Images generations and validates b64_json without downloading a URL", async () => {
-    const { provider: savedProvider, repository, service } = setup();
+  it("uses Images generations and validates b64_json", async () => {
+    const { provider: savedProvider, repository, service } = setup("openai_images");
     const created = service.createModel(modelInput(savedProvider.id));
     const imageModel = created.models[0];
     if (!imageModel) throw new Error("Image model missing.");
@@ -267,19 +510,57 @@ describe("image connection test", () => {
     expect(repository.getModel(imageModel.id)?.outputModalities).toEqual(["image"]);
   });
 
-  it("returns a failed test for URL-only output and never requests that URL", async () => {
+  it("rejects malformed text models saved under the OpenAI Images protocol before fetching", async () => {
+    const { repository, provider: savedProvider, service } = setup("openai_images");
+    repository.insertModel({
+      ...modelInput(savedProvider.id, ["text"]),
+      modelId: "legacy-text-model",
+    });
+    const malformed = repository.getProvider(savedProvider.id)?.models[0];
+    if (!malformed) throw new Error("Malformed model fixture missing.");
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(service.testConnection(savedProvider.id, malformed.id)).rejects.toThrow(
+      "仅支持纯图片输出模型",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("accepts URL-only output without downloading it and directs the user to Image Studio", async () => {
     const { provider: savedProvider, service } = setup();
     const imageModel = service.createModel(modelInput(savedProvider.id)).models[0];
     if (!imageModel) throw new Error("Image model missing.");
     const fetcher = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json({ data: [{ url: "https://untrusted.invalid/generated.png" }] }),
+      Response.json({ data: [{ url: "https://cdn.example.test/generated.png" }] }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+
+    const result = await service.testConnection(savedProvider.id, imageModel.id);
+
+    expect(result).toMatchObject({
+      ok: true,
+      error: null,
+      responseText: "已检测到远程图片结果。连接测试不会下载图片，请在生图工作台预览并确认保存。",
+      responseBody: expect.stringContaining("[URL omitted]"),
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://images.invalid/v1/images/generations");
+  });
+
+  it("rejects an unsafe URL-only result without downloading it", async () => {
+    const { provider: savedProvider, service } = setup();
+    const imageModel = service.createModel(modelInput(savedProvider.id)).models[0];
+    if (!imageModel) throw new Error("Image model missing.");
+    const fetcher = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json({ data: [{ url: "https://127.0.0.1/generated.png" }] }),
     );
     vi.stubGlobal("fetch", fetcher);
 
     const result = await service.testConnection(savedProvider.id, imageModel.id);
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("不接受仅返回 URL");
+    expect(result.error).toBe("连接测试未检测到可用的图片结果。");
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0]?.[0]).toBe("https://images.invalid/v1/images/generations");
   });
@@ -293,7 +574,7 @@ describe("image connection test", () => {
     vi.stubGlobal("fetch", fetcher);
 
     await expect(service.testConnection(savedProvider.id, imageModel.id)).rejects.toThrow(
-      "OpenAI Chat Completions 或 OpenAI Responses",
+      "OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses",
     );
     expect(fetcher).not.toHaveBeenCalled();
   });

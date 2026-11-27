@@ -126,6 +126,21 @@ export function toolDetailsForActivity(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+export function collectActiveToolDetails(
+  activities: ActivityEvent[],
+  tools: ToolDetailsIndex,
+): Set<ToolDetails> {
+  const active = new Set<ToolDetails>();
+  for (const activity of activities) {
+    if (activity.status !== "running") continue;
+    const call = toolDetailsForActivity(activity, tools);
+    // Once a result is persisted, the normal message card is the source of
+    // truth. Keep it visible while a persistent command continues polling.
+    if (call && call.output === undefined) active.add(call);
+  }
+  return active;
+}
+
 export function activityDetailsText(activity: ActivityEvent, tools: ToolDetailsIndex): string {
   const call = toolDetailsForActivity(activity, tools);
   return [

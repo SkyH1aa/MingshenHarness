@@ -2,11 +2,53 @@ import type { SessionTodo } from "./domain";
 
 export interface SessionPlan {
   revision: number;
+  generation: number;
   paused: boolean;
   reviewRequired?: boolean;
   updatedAt: string;
   steps: SessionTodo[];
   breakpoints: string[];
+  activeClaims?: PlanStepClaimView[];
+}
+
+export type PlanClaimStatus = "active" | "stale" | "cancel_requested" | "completed" | "released";
+
+export interface PlanStepClaimView {
+  id: string;
+  sessionId: string;
+  generation: number;
+  stepId: string;
+  ownerSessionId: string;
+  ownerRunId: string;
+  agentProfileId: string | null;
+  status: PlanClaimStatus;
+  leaseUntil: string;
+  heartbeatAt: string;
+  attempt: number;
+  revision: number;
+  claimVersion: number;
+  summary: string;
+  evidence: string[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface BeginPlanStepInput {
+  sessionId: string;
+  runId: string;
+  ownerSessionId: string;
+  agentProfileId?: string | null;
+  stepId: string;
+  revision: number;
+}
+
+export interface SettlePlanStepInput {
+  claimId: string;
+  ownerRunId: string;
+  status: "completed" | "released" | "stale" | "cancel_requested";
+  summary?: string;
+  evidence?: string[];
 }
 
 export interface ExecutionCheckpoint {

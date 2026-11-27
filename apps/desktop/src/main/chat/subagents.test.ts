@@ -450,7 +450,7 @@ describe("Subagent concurrency", () => {
         providerId: childProvider.id,
         modelId: childModel.modelId,
       });
-      expect(call[5]).toEqual({ allowSubagentPromptContext: true });
+      expect(call[5]).toEqual({ allowSubagentPromptContext: true, policyApproved: true });
     }
     expect(internal.runActivatedPlugins.has("child-run")).toBe(false);
     expect(internal.availablePluginMcpServerIds(child.id, "child-run")).toEqual(new Set());
@@ -801,6 +801,7 @@ describe("Subagent concurrency", () => {
       expect.any(Function),
       {},
       [],
+      { policyApproved: true },
     );
     expect(emit).not.toHaveBeenCalled();
   });

@@ -263,7 +263,7 @@ describe("model catalog preferences", () => {
         .prepare("select * from app_settings where key != ? order by key")
         .all(MODEL_CATALOG_PREFERENCES_KEY),
     ).toEqual(settings);
-    expect(database.prepare("pragma user_version").get()?.user_version).toBe(9);
+    expect(database.prepare("pragma user_version").get()?.user_version).toBe(11);
     expect(database.prepare("pragma integrity_check").get()?.integrity_check).toBe("ok");
   });
 
@@ -347,7 +347,7 @@ describe("model catalog preferences", () => {
         preferences = new ModelCatalogService(repo);
         expect(preferences.getPreferences()).toEqual(expected);
         expect(repo.listProviders()).toEqual(catalog);
-        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(9);
+        expect(disk.prepare("pragma user_version").get()?.user_version).toBe(11);
         expect(disk.prepare("pragma integrity_check").get()?.integrity_check).toBe("ok");
       }
     } finally {

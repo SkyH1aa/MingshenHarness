@@ -18,6 +18,7 @@ export type CoordinationVerificationStatus =
 
 export interface CoordinationTaskView {
   id: string;
+  planStepId: string | null;
   label: string;
   agentProfileId: string;
   scope: string;
@@ -30,6 +31,7 @@ export interface CoordinationTaskView {
 
 export interface CoordinationQaView {
   status: CoordinationQaStatus;
+  planStepId: string | null;
   agentProfileId: string;
   childSessionId: string | null;
   criteria: string;

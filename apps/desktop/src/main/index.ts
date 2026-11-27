@@ -22,6 +22,12 @@ import { IMAGE_STUDIO_MAX_ASSETS } from "../shared/image-studio";
 import type { AppInfo } from "../shared/ipc";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { localizeError } from "../shared/localized-errors";
+import { MANAGED_POLICY_USER_SETTING } from "../shared/managed-policy";
+import { normalizeModelWatchdogSettings } from "../shared/model-watchdog";
+import {
+  normalizeOfficeDeliverySettings,
+  OFFICE_DELIVERY_SETTINGS_KEY,
+} from "../shared/office-delivery";
 import type { QuickChatAction, QuickChatState } from "../shared/quick-chat";
 import type { SessionBatchTarget } from "../shared/session-catalog";
 import {
@@ -66,13 +72,19 @@ import {
   StartupRevealGate,
   StartupVisibilityConfirmation,
 } from "./desktop/startup-reveal-gate";
+import { assertUpdateInstallerLaunch } from "./desktop/update-launch-policy";
 import { UpdateService } from "./desktop/update-service";
 import { createUpdateFetcher } from "./desktop/update-transport";
+import {
+  consumeReportedIpcConsoleError,
+  instrumentIpcHandler,
+} from "./diagnostics/ipc-diagnostics";
 import {
   installRuntimeLog,
   RuntimeLogService,
   recordRuntimeError,
 } from "./diagnostics/runtime-log";
+import { normalizeManagedPolicyLayer } from "./policy/managed-policy-service";
 import { ModelCatalogService } from "./providers/model-catalog-service";
 import { resolveRuntimeResourcePaths } from "./resource-paths";
 import { createSessionBatchGuard } from "./sessions/session-batch-guard";
@@ -127,6 +139,7 @@ let companionRestored = false;
 let completions: CompletionNotifications | null = null;
 let runtimeLogs: RuntimeLogService | null = null;
 let updateInstaller: string | null = null;
+let updateInstallerApproved = false;
 const guardedBrowserPartitions = new Set<string>();
 const companionSessionNavigation = new CompanionSessionNavigationRequests();
 
@@ -209,6 +222,7 @@ function createStartupSurface(): StartupPresentationSurface {
   window.setAlwaysOnTop(true, "screen-saver");
   window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  observeRendererDiagnostics(window, "startup");
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.on("render-process-gone", () => startupPresentation?.fail());
@@ -265,6 +279,7 @@ function createCompanionWindow(bounds: CompanionBounds): BrowserWindow {
     },
   });
   companionWindow = window;
+  observeRendererDiagnostics(window, "companion");
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.on("will-navigate", (event) => event.preventDefault());
@@ -386,6 +401,7 @@ function createQuickChatWindow(): BrowserWindow {
     },
   });
   window.setAlwaysOnTop(quickChat?.pinned ?? false, "floating");
+  observeRendererDiagnostics(window, "quick-chat");
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.on("will-navigate", (event) => event.preventDefault());
@@ -412,7 +428,7 @@ function createQuickChatWindow(): BrowserWindow {
       .catch((cause) => recordRuntimeError("quick-chat.state", cause));
   });
   window.on("close", (event) => {
-    if (disposed || disposal) return;
+    if (disposed || disposal || quickChatWindow !== window) return;
     event.preventDefault();
     void hideQuickChat().catch((cause) => recordRuntimeError("quick-chat.hide", cause));
   });
@@ -716,10 +732,7 @@ function createMainWindow(): BrowserWindow {
       recordRuntimeError("renderer.load", description, { code: String(code) });
     }
   });
-  window.webContents.on("console-message", (_event, level, message) => {
-    if (level === 3 || level === 2)
-      runtimeLogs?.record("renderer.console", message, {}, level === 3 ? "error" : "warn");
-  });
+  observeRendererDiagnostics(window, "renderer");
   window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
     delete webPreferences.preload;
     webPreferences.nodeIntegration = false;
@@ -782,6 +795,21 @@ function createMainWindow(): BrowserWindow {
   return window;
 }
 
+function observeRendererDiagnostics(window: BrowserWindow, surface: string): void {
+  window.webContents.on("console-message", (event) => {
+    if (event.level === "error" || event.level === "warning")
+      runtimeLogs?.record(
+        `${surface}.console`,
+        event.message,
+        {},
+        event.level === "error" ? "error" : "warn",
+      );
+  });
+  window.webContents.on("preload-error", (_event, _path, cause) => {
+    recordRuntimeError(`${surface}.preload`, cause);
+  });
+}
+
 function requireServices(): AppServices {
   if (!services) {
     throw new Error("Application services are not ready.");
@@ -814,6 +842,7 @@ function registerIpcHandlers(): void {
         recordRuntimeError("dependencies.install", progress.detail, { operation: progress.name });
       mainWindow?.webContents.send(IPC_CHANNELS.runtimeProgress, progress);
     },
+    requireServices().managedPolicy,
   );
   updates = new UpdateService(
     (status, notify) => mainWindow?.webContents.send(IPC_CHANNELS.updateEvent, { status, notify }),
@@ -822,102 +851,85 @@ function registerIpcHandlers(): void {
       cacheDirectory: join(app.getPath("userData"), "updates"),
       fetchPackage: createUpdateFetcher(),
       activeTasks: () => services?.chatService.activeConversationCount() ?? 0,
-      handoff: async (installer) => {
+      handoff: async (installer, options) => {
         await flushApplicationDrafts("save");
         if (disposal || !services?.chatService.prepareForUpdate()) return false;
         updateInstaller = installer;
+        updateInstallerApproved = options.approved;
         // app.relaunch below runs the installer only after services and SQLite close.
         setImmediate(() => app.quit());
         return true;
       },
     },
+    requireServices().managedPolicy,
   );
   const originalHandle = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = (channel, listener) =>
-    originalHandle(channel, async (event, ...args) => {
-      const quickSender = Boolean(
-        quickChatWindow &&
-          !quickChatWindow.isDestroyed() &&
-          event.sender.id === quickChatWindow.webContents.id,
-      );
-      const companionSender = Boolean(
-        companionWindow &&
-          !companionWindow.isDestroyed() &&
-          event.sender.id === companionWindow.webContents.id,
-      );
-      const companionChannels: string[] = [
-        COMPANION_IPC_CHANNELS.getState,
-        COMPANION_IPC_CHANNELS.getPreferences,
-        COMPANION_IPC_CHANNELS.setPreferences,
-        COMPANION_IPC_CHANNELS.action,
-        COMPANION_IPC_CHANNELS.openMenu,
-        COMPANION_IPC_CHANNELS.openQuickChat,
-        COMPANION_IPC_CHANNELS.openSession,
-        COMPANION_IPC_CHANNELS.setMotionAvailability,
-        COMPANION_IPC_CHANNELS.ready,
-      ];
-      const trusted =
-        (applicationWindows().some((window) => event.sender.id === window.webContents.id) &&
-          isRendererFrame(event, "index.html")) ||
-        (companionSender &&
-          companionChannels.includes(channel) &&
-          isRendererFrame(event, "companion.html"));
-      if (!trusted) {
-        recordRuntimeError("ipc.security", "Untrusted IPC sender", { operation: channel });
-        throw new Error("Untrusted IPC sender");
-      }
-      if (quickSender && !quickChat?.permitsIpc(channel, args)) {
-        recordRuntimeError(
-          "ipc.security",
-          "Quick Chat IPC is outside the current ChatAgent scope",
-          { operation: channel },
-        );
-        throw new Error("ChatAgent 小窗口仅允许操作当前对话。");
-      }
-      const allowedBeforeConsent: string[] = [
-        IPC_CHANNELS.appInfo,
-        IPC_CHANNELS.desktopState,
-        IPC_CHANNELS.desktopAction,
-        IPC_CHANNELS.policyRead,
-        IPC_CHANNELS.policyAccept,
-        IPC_CHANNELS.runtimeLogReport,
-      ];
-      if (desktop && !desktop.state().accepted && !allowedBeforeConsent.includes(channel))
-        throw new Error("Please accept the privacy policy and terms first.");
-      try {
-        const result = await listener(event, ...args);
-        if (result && typeof result === "object") {
-          const outcome = result as Record<string, unknown>;
-          if (Array.isArray(outcome.warnings))
-            for (const warning of outcome.warnings.slice(0, 100)) {
-              if (typeof warning === "string" && warning.trim())
-                runtimeLogs?.record("ipc.warning", warning, { operation: channel }, "warn");
-            }
-          if (outcome.ok === false || outcome.isError === true || outcome.state === "error") {
-            const detail = [outcome.error, outcome.output, outcome.detail, outcome.responseBody]
-              .filter((value): value is string => typeof value === "string" && Boolean(value))
-              .join("\n");
-            recordRuntimeError(
-              "ipc.result",
-              detail || "Operation returned an unsuccessful result",
-              {
-                operation: channel,
-                status: typeof outcome.status === "number" ? outcome.status : null,
-              },
-            );
+    originalHandle(
+      channel,
+      instrumentIpcHandler(
+        channel,
+        async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+          const quickSender = Boolean(
+            quickChatWindow &&
+              !quickChatWindow.isDestroyed() &&
+              event.sender.id === quickChatWindow.webContents.id,
+          );
+          const companionSender = Boolean(
+            companionWindow &&
+              !companionWindow.isDestroyed() &&
+              event.sender.id === companionWindow.webContents.id,
+          );
+          const companionChannels: string[] = [
+            COMPANION_IPC_CHANNELS.getState,
+            COMPANION_IPC_CHANNELS.getPreferences,
+            COMPANION_IPC_CHANNELS.setPreferences,
+            COMPANION_IPC_CHANNELS.action,
+            COMPANION_IPC_CHANNELS.openMenu,
+            COMPANION_IPC_CHANNELS.openQuickChat,
+            COMPANION_IPC_CHANNELS.openSession,
+            COMPANION_IPC_CHANNELS.setMotionAvailability,
+            COMPANION_IPC_CHANNELS.ready,
+          ];
+          const trusted =
+            (applicationWindows().some((window) => event.sender.id === window.webContents.id) &&
+              isRendererFrame(event, "index.html")) ||
+            (companionSender &&
+              companionChannels.includes(channel) &&
+              isRendererFrame(event, "companion.html"));
+          if (!trusted) {
+            throw Object.assign(new Error("Untrusted IPC sender"), {
+              code: "IPC_UNTRUSTED_SENDER",
+            });
           }
-        }
-        return result;
-      } catch (cause) {
-        recordRuntimeError("ipc.request", cause, { operation: channel });
-        throw new Error(
-          localizeError(
-            cause instanceof Error ? cause.message : String(cause),
-            services?.repository.getSetting("desktop.locale"),
+          if (quickSender && !quickChat?.permitsIpc(channel, args)) {
+            throw Object.assign(new Error("ChatAgent 小窗口仅允许操作当前对话。"), {
+              code: "IPC_CHAT_SCOPE",
+            });
+          }
+          const allowedBeforeConsent: string[] = [
+            IPC_CHANNELS.appInfo,
+            IPC_CHANNELS.desktopState,
+            IPC_CHANNELS.desktopAction,
+            IPC_CHANNELS.policyRead,
+            IPC_CHANNELS.policyAccept,
+            IPC_CHANNELS.runtimeLogReport,
+          ];
+          if (desktop && !desktop.state().accepted && !allowedBeforeConsent.includes(channel))
+            throw Object.assign(new Error("Please accept the privacy policy and terms first."), {
+              code: "IPC_CONSENT_REQUIRED",
+            });
+          return listener(event, ...args);
+        },
+        (cause) =>
+          new Error(
+            localizeError(
+              cause instanceof Error ? cause.message : String(cause),
+              services?.repository.getSetting("desktop.locale"),
+            ),
           ),
-        );
-      }
-    });
+      ),
+    );
   ipcMain.on(STARTUP_PRESENTATION_CHANNELS.skip, (event) => {
     if (isRendererFrame(event, "startup.html")) startupPresentation?.handleSkip(event.sender.id);
   });
@@ -1318,6 +1330,7 @@ function registerIpcHandlers(): void {
     if (id !== null && typeof id !== "string") throw new Error("Invalid session ID.");
     completions?.setActiveSession(id);
   });
+  ipcMain.handle(IPC_CHANNELS.completionMarkAllRead, () => completions?.markAllRead());
   ipcMain.handle(IPC_CHANNELS.desktopAction, async (event, action, value, remember) => {
     if (!desktop) throw new Error("Application services are not ready.");
     if (event.sender.id === quickChatWindow?.webContents.id) {
@@ -1361,12 +1374,12 @@ function registerIpcHandlers(): void {
     startBackgroundServices();
   });
   ipcMain.handle(IPC_CHANNELS.updateStatus, () => updates?.status());
-  ipcMain.handle(IPC_CHANNELS.updateCheck, () => updates?.check());
-  ipcMain.handle(IPC_CHANNELS.updateDownload, () => updates?.download());
+  ipcMain.handle(IPC_CHANNELS.updateCheck, () => updates?.check({ approved: true }));
+  ipcMain.handle(IPC_CHANNELS.updateDownload, () => updates?.download({ approved: true }));
   ipcMain.handle(IPC_CHANNELS.updateCancel, () => updates?.cancel());
-  ipcMain.handle(IPC_CHANNELS.updateInstall, () => updates?.install());
+  ipcMain.handle(IPC_CHANNELS.updateInstall, () => updates?.install({ approved: true }));
   ipcMain.handle(IPC_CHANNELS.runtimeDependencies, async () => {
-    const status = await dependencies?.status();
+    const status = await dependencies?.status({ approved: true });
     if (status)
       for (const [name, detail] of [
         ["native", "nativeDetail"],
@@ -1380,9 +1393,9 @@ function registerIpcHandlers(): void {
     return status;
   });
   ipcMain.handle(IPC_CHANNELS.runtimeInstall, (_event, name) => {
-    if (name === "docker") return dependencies?.install("docker");
-    if (name === "embiody") return dependencies?.install("embiody");
-    if (name === "wsl") return dependencies?.install("wsl");
+    if (name === "docker") return dependencies?.install("docker", { approved: true });
+    if (name === "embiody") return dependencies?.install("embiody", { approved: true });
+    if (name === "wsl") return dependencies?.install("wsl", { approved: true });
     throw new Error("Unknown runtime");
   });
   ipcMain.handle(IPC_CHANNELS.appInfo, (): AppInfo => {
@@ -1679,6 +1692,20 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.imageStudioGenerate, (_event, input) =>
     requireServices().imageStudioService.generate(input),
   );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemotePreview, (_event, input) =>
+    requireServices().imageStudioService.previewRemoteImage(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemoteOpenExternal, (_event, input) =>
+    requireServices().imageStudioService.openRemoteImageExternal(input, (url) =>
+      shell.openExternal(url),
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemoteSave, (_event, input) =>
+    requireServices().imageStudioService.saveRemoteImage(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.imageStudioRemoteDiscard, (_event, ids: unknown) => {
+    requireServices().imageStudioService.discardRemoteImages(ids);
+  });
   ipcMain.handle(IPC_CHANNELS.imageStudioPolishPrompt, (_event, input) =>
     requireServices().imageStudioService.polishPrompt(input),
   );
@@ -1785,7 +1812,7 @@ function registerIpcHandlers(): void {
     return completeSessionUpdate(input, {
       restoreContext: (sessionId) => current.chatService.restoreContext(sessionId),
       getSession: (sessionId) => current.repository.getSession(sessionId),
-      emitUpdated: (session) => emitRuntimeEvent({ type: "session_updated", session }),
+      emitUpdated: (session) => requireServices().emitEvent({ type: "session_updated", session }),
     });
   };
   ipcMain.handle(
@@ -1815,10 +1842,10 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.sessionOpened, (_event, sessionId: string | null) => {
     if (sessionId !== null && typeof sessionId !== "string") throw new Error("Invalid session ID");
-    requireServices().sessionRetentionService.opened(sessionId);
-    const session = sessionId ? requireServices().repository.getSession(sessionId) : null;
-    if (session)
-      mainWindow?.webContents.send(IPC_CHANNELS.runtimeEvent, { type: "session_updated", session });
+    const services = requireServices();
+    services.sessionRetentionService.opened(sessionId);
+    const session = sessionId ? services.repository.getSession(sessionId) : null;
+    if (session) services.emitEvent({ type: "session_updated", session });
   });
   ipcMain.handle(IPC_CHANNELS.sessionRunState, (_event, sessionId: string) =>
     requireServices().repository.latestSessionRun(sessionId),
@@ -1884,8 +1911,25 @@ function registerIpcHandlers(): void {
     requireServices().chatService.getCoordinationState(sessionId),
   );
 
-  ipcMain.handle(IPC_CHANNELS.chatStop, (_event, sessionId: string) => {
-    requireServices().chatService.stop(sessionId);
+  ipcMain.handle(IPC_CHANNELS.chatStop, (_event, sessionId: unknown, runId?: unknown) => {
+    if (typeof sessionId !== "string" || !sessionId || sessionId.length > 128)
+      throw new Error("Invalid session ID.");
+    if (runId !== undefined && (typeof runId !== "string" || !runId || runId.length > 256))
+      throw new Error("Invalid run ID.");
+    const services = requireServices();
+    if (runId === undefined) {
+      services.chatService.stop(sessionId);
+      return;
+    }
+    let run: ReturnType<typeof services.runtimeService.getRun>;
+    try {
+      run = services.runtimeService.getRun(runId);
+    } catch {
+      return;
+    }
+    if (run.sessionId !== sessionId)
+      throw new Error("The selected run does not belong to this session.");
+    services.chatService.stopRun(runId);
   });
   ipcMain.handle(IPC_CHANNELS.chatCompact, (_event, sessionId: string) => {
     if (typeof sessionId !== "string") throw new Error("Invalid session ID.");
@@ -2444,6 +2488,63 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.modelRetryGet, () =>
     requireServices().chatService.getModelRetrySettings(),
   );
+  ipcMain.handle(IPC_CHANNELS.runtimeGovernanceGet, () => {
+    const services = requireServices();
+    return {
+      watchdog: services.chatService.getModelWatchdogSettings(),
+      managedPolicy: {
+        effective: services.managedPolicy.effectivePolicy(),
+        user: services.managedPolicy.userLayer(),
+      },
+      office: normalizeOfficeDeliverySettings(
+        services.repository.getSetting(OFFICE_DELIVERY_SETTINGS_KEY),
+      ),
+    };
+  });
+  ipcMain.handle(IPC_CHANNELS.modelWatchdogSet, (_event, settings: unknown) => {
+    return requireServices().chatService.setModelWatchdogSettings(
+      normalizeModelWatchdogSettings(settings),
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.managedPolicyUserSet, (_event, layer: unknown) => {
+    const services = requireServices();
+    if (layer === null) {
+      services.repository.removeSetting(MANAGED_POLICY_USER_SETTING);
+      return;
+    }
+    services.repository.setSetting(MANAGED_POLICY_USER_SETTING, normalizeManagedPolicyLayer(layer));
+  });
+  ipcMain.handle(IPC_CHANNELS.officeDeliverySettingsSet, (_event, settings: unknown) => {
+    const normalized = normalizeOfficeDeliverySettings(settings);
+    requireServices().repository.setSetting(OFFICE_DELIVERY_SETTINGS_KEY, normalized);
+    return normalized;
+  });
+  ipcMain.handle(IPC_CHANNELS.officeDeliveriesList, (_event, sessionId: unknown) => {
+    if (typeof sessionId !== "string" || !sessionId || sessionId.length > 128)
+      throw new Error("Invalid session ID.");
+    return requireServices().officeDelivery.list(sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.officeDeliveryContinue, (_event, input: unknown) => {
+    if (!input || typeof input !== "object" || Array.isArray(input))
+      throw new Error("Invalid Office delivery continuation input.");
+    const candidate = input as Record<string, unknown>;
+    if (
+      typeof candidate.sessionId !== "string" ||
+      !candidate.sessionId ||
+      candidate.sessionId.length > 128 ||
+      typeof candidate.deliveryId !== "string" ||
+      !candidate.deliveryId ||
+      candidate.deliveryId.length > 256 ||
+      (candidate.startPage !== undefined &&
+        (!Number.isSafeInteger(candidate.startPage) || Number(candidate.startPage) < 1))
+    )
+      throw new Error("Invalid Office delivery continuation input.");
+    return requireServices().chatService.continueOfficeDeliveryVisual({
+      sessionId: candidate.sessionId,
+      deliveryId: candidate.deliveryId,
+      ...(candidate.startPage === undefined ? {} : { startPage: Number(candidate.startPage) }),
+    });
+  });
   const saverSessionId = (id: unknown): string | null => {
     if (id === null || id === undefined) return null;
     if (typeof id !== "string" || !id || id.length > 128) throw new Error("Invalid session ID.");
@@ -2704,20 +2805,21 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
   for (const method of ["error", "warn"] as const) {
     const original = console[method].bind(console);
     console[method] = (...args: unknown[]) => {
-      runtimeLogs?.record(
-        `main.console.${method}`,
-        args
-          .map((value) =>
-            value instanceof Error
-              ? value.stack || value.message
-              : typeof value === "string"
-                ? value
-                : "[structured data omitted]",
-          )
-          .join(" "),
-        {},
-        method === "error" ? "error" : "warn",
-      );
+      if (method !== "error" || !consumeReportedIpcConsoleError(args))
+        runtimeLogs?.record(
+          `main.console.${method}`,
+          args
+            .map((value) =>
+              value instanceof Error
+                ? value.stack || value.message
+                : typeof value === "string"
+                  ? value
+                  : "[structured data omitted]",
+            )
+            .join(" "),
+          {},
+          method === "error" ? "error" : "warn",
+        );
       original(...args);
     };
   }
@@ -2869,7 +2971,7 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
         sessionService: services.sessionService,
         context: (sessionId) => requireServices().chatService.restoreContext(sessionId),
         isBusy: (sessionId) => requireServices().chatService.isSessionBusy(sessionId),
-        emit: emitRuntimeEvent,
+        emit: (event) => requireServices().emitEvent(event),
       });
       registerIpcHandlers();
       startupPresentation.setStage("window");
@@ -3037,6 +3139,7 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
         recordRuntimeError("desktop.draft-flush", cause);
         const error = cause instanceof Error ? cause.message : String(cause);
         updateInstaller = null;
+        updateInstallerApproved = false;
         services?.chatService.cancelUpdatePreparation();
         updates?.cancelHandoff(error);
         for (const window of applicationWindows()) window.setEnabled(true);
@@ -3055,10 +3158,34 @@ if (!isExperimental && !app.requestSingleInstanceLock()) {
       startupPresentation?.dispose();
       companion?.dispose();
       companionSessionNavigation.dispose();
+      const preparedInstaller = updateInstaller;
+      const preparedInstallerApproved = updateInstallerApproved;
+      let preparedUserPolicy: unknown = null;
+      let preparedPolicySnapshotReady = preparedInstaller === null;
+      if (preparedInstaller) {
+        try {
+          preparedUserPolicy = services?.repository.getSetting(MANAGED_POLICY_USER_SETTING) ?? null;
+          preparedPolicySnapshotReady = Boolean(services);
+        } catch (cause) {
+          recordRuntimeError("updates.relaunch-policy", cause);
+        }
+      }
       try {
         await Promise.all([services?.dispose(), updates?.shutdown()]);
+        if (preparedInstaller && preparedPolicySnapshotReady) {
+          try {
+            assertUpdateInstallerLaunch(preparedUserPolicy, preparedInstallerApproved);
+            app.relaunch({ execPath: preparedInstaller, args: ["--updated"] });
+          } catch (cause) {
+            recordRuntimeError("updates.relaunch-policy", cause);
+          }
+        } else if (preparedInstaller) {
+          recordRuntimeError(
+            "updates.relaunch-policy",
+            "Update installer launch skipped because the user policy snapshot was unavailable.",
+          );
+        }
         await runtimeLogs?.flush();
-        if (updateInstaller) app.relaunch({ execPath: updateInstaller, args: ["--updated"] });
       } catch (cause) {
         recordRuntimeError("desktop.shutdown", cause);
         console.error("Shutdown failed; automatic installer launch was blocked:", cause);

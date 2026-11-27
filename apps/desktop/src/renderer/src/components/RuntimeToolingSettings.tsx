@@ -15,6 +15,7 @@ import type {
   CustomToolView,
   DockerRuntimeSettings,
   HeadlessServerStatus,
+  ProviderView,
   SessionView,
   ToolingServerStatus,
 } from "../../../shared/domain";
@@ -22,13 +23,21 @@ import { DEFAULT_MODEL_RETRIES, MAX_MODEL_RETRIES } from "../../../shared/model-
 import { tr } from "../i18n/index";
 import { useDialog } from "./DialogProvider";
 import { ExpandableText } from "./ExpandableText";
+import {
+  type RuntimeGovernanceAdapter,
+  RuntimeGovernanceSettings,
+} from "./RuntimeGovernanceSettings";
 
 export function RuntimeToolingSettings({
   session,
   onOpenExternal,
+  providers = [],
+  governanceAdapter,
 }: {
   session: SessionView | null;
   onOpenExternal: (url: string) => Promise<void>;
+  providers?: ProviderView[];
+  governanceAdapter?: RuntimeGovernanceAdapter;
 }) {
   const { confirm } = useDialog();
   const [dependencies, setDependencies] = useState<Awaited<
@@ -223,18 +232,21 @@ export function RuntimeToolingSettings({
 
   return (
     <div className="settings-page">
+      {governanceAdapter ? (
+        <RuntimeGovernanceSettings adapter={governanceAdapter} providers={providers} />
+      ) : null}
       <section className="settings-block" aria-labelledby="model-retry-heading">
         <div className="settings-block__heading">
           <h3 id="model-retry-heading">{tr("模型请求自动重试")}</h3>
         </div>
         <p>
           {tr(
-            "默认每次断连最多重连 5 次，可调整为 0–20 次；0 表示关闭。恢复输出后再次断连，次数重新计算。",
+            "默认每次模型回复最多重试 5 次，可调整为 0–20 次；0 表示关闭。部分输出不会重置本次预算，下一模型轮次重新计算。",
           )}
         </p>
         <div className="settings-form-grid">
           <label className="field">
-            <span>{tr("每次断连的最大重连次数")}</span>
+            <span>{tr("每次模型回复的最大重试次数")}</span>
             <input
               aria-describedby="model-retry-hint"
               type="number"
@@ -249,7 +261,7 @@ export function RuntimeToolingSettings({
         </div>
         <p id="model-retry-hint">
           {tr(
-            "次数按每次断连分别计算，不是整段对话的总额。空响应或重复的未完成片段不会重置次数；等待期间可以停止，已完成的工具不会重放。",
+            "次数是一次模型流调用的总预算，不是每次断连分别计算，也不是整段对话总额。文本、思考或工具参数的部分输出不会重置次数；等待期间可以停止，已完成的工具不会重放。",
           )}
         </p>
         <div className="settings-actions">

@@ -1,6 +1,6 @@
 # Mingshen Harness Terms of Service
 
-Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.6.
+Effective date: 2026-11-04. Policy revision: 2026-11-04.3. Current application version: 1.3.7.
 
 These terms are between 新哲文院算法社 (the Provider) and the person or organization using Mingshen Harness (the User). Read them together with the Privacy Policy, Disclaimer and permission prompts. The Chinese and English documents describe the same product; mandatory legal rights prevail over conflicting wording.
 
@@ -44,7 +44,7 @@ Automatic context compaction sends older messages and tool results to the compac
 
 Configuring a backup approval or compaction model authorizes one backup attempt with the corresponding operation data or history if the primary call or result validation fails. Additional API usage may apply. A valid primary denial is not rerouted for a different verdict; two failed reviews require manual handling. A backup is not another safety certification. Check both providers' data policies, permissions and usage terms.
 
-Model requests automatically retry connection failures, rate limits and temporary server errors five times per interruption by default, configurable from zero to twenty. A later interruption receives a fresh allowance after forward output progress; this is not a conversation-wide total. Retrying resends the current request to the same provider and may increase usage and charges. Approval and compaction retain the selected primary/backup providers and total timeouts. One attempt per candidate means one logical attempt, which can include transport retries. Stop cancels waits; completed tools are not replayed because of model retries. See the embedded guide for settings and limits.
+Model requests automatically retry connection failures, rate limits and temporary server errors up to five times per model request by default, configurable from zero to twenty. Partial output does not reset the allowance; a later independent model request receives its own allowance. Retrying resends the current request to the same provider and may increase usage and charges. Partial assistant output from a failed attempt is not saved as a complete reply, unfinished tool calls are not executed, and completed tools or file operations are not replayed. Approval and compaction retain the selected primary/backup providers and total timeouts. One attempt per candidate means one logical attempt, which can include transport retries. Stop cancels waits. See the embedded guide for settings and limits.
 
 ## 7. Intellectual property and source licensing
 

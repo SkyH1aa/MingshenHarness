@@ -1,11 +1,12 @@
 const { parentPort, workerData } = require('node:worker_threads');
 const { createRequire } = require('node:module');
+const { createHash } = require('node:crypto');
 const { copyFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const requireApp = createRequire(workerData.moduleBase);
 const physical = value => value.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
-const MAX_PAGES = 200, MAX_IMAGE_PAGES = 20, MAX_TEXT = 120000;
+const MAX_PAGES = 200, MAX_IMAGE_PAGES = 20, MAX_TEXT = 120000, DEFAULT_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 4000, MAX_ARCHIVE_BYTES = 100 * 1024 * 1024, MAX_ENTRY_BYTES = 32 * 1024 * 1024;
 const MAX_SPREADSHEET_SHEETS = 200, MAX_SPREADSHEET_ROWS = 5000, MAX_SPREADSHEET_COLUMNS = 256, MAX_SPREADSHEET_CELLS = 50000;
 let recognizer;
@@ -148,11 +149,18 @@ async function pdf(bytes, mode) {
   const imageOps = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageXObjectRepeat, OPS.paintImageMaskXObject]);
   const doc = await getDocumentProxy(new Uint8Array(bytes), { isEvalSupported: false, maxImageSize: 16000000 });
   const warnings = [], pages = [], text = [];
+  const requestedStart = Number.isInteger(workerData.pdfStartPage) && workerData.pdfStartPage > 0 ? workerData.pdfStartPage : 1;
+  const requestedLimit = Number.isInteger(workerData.pdfPageLimit) && workerData.pdfPageLimit > 0 ? Math.min(MAX_IMAGE_PAGES, workerData.pdfPageLimit) : MAX_IMAGE_PAGES;
+  const imageByteLimit = Number.isInteger(workerData.pdfMaxImageBytes) && workerData.pdfMaxImageBytes > 0 ? Math.min(DEFAULT_IMAGE_BYTES, workerData.pdfMaxImageBytes) : DEFAULT_IMAGE_BYTES;
+  const sourceHash = createHash('sha256').update(bytes).digest('hex');
   let imageBytes = 0, ocrCount = 0, textLength = 0, inspected = 0, visionImageBudgetReached = false;
   try {
-    const count = Math.min(doc.numPages, MAX_PAGES);
-    if (count < doc.numPages) warnings.push(`PDF text extraction covers the first ${count} of ${doc.numPages} pages.`);
-    for (let number = 1; number <= count; number++) {
+    const startPage = requestedStart <= doc.numPages ? requestedStart : doc.numPages + 1;
+    const endPage = startPage <= doc.numPages ? Math.min(doc.numPages, startPage + requestedLimit - 1, MAX_PAGES + startPage - 1) : doc.numPages;
+    if (requestedStart > doc.numPages) warnings.push(`PDF page ${requestedStart} is outside the document's ${doc.numPages} pages.`);
+    if (startPage > 1) warnings.push(`PDF rendering starts at page ${startPage}; earlier pages were not included in this batch.`);
+    if (endPage < doc.numPages) warnings.push(`PDF extraction covers pages ${startPage}-${endPage} of ${doc.numPages}.`);
+    for (let number = startPage; number <= endPage; number++) {
       const page = await doc.getPage(number);
       try {
         const content = await page.getTextContent();
@@ -167,12 +175,17 @@ async function pdf(bytes, mode) {
           if (!Number.isFinite(scale) || scale <= 0 || viewport.width <= 0 || viewport.height <= 0) throw Error('Invalid PDF page dimensions.');
           const image = await renderPageAsImage(doc, number, { canvasImport: async () => canvas, scale, format: 'png' });
           if (mode === 'vision') {
-            if (imageBytes + image.length <= 20 * 1024 * 1024) {
-              pages.push({ page: number, dataUrl: 'data:' + 'image/png;base64,' + Buffer.from(image).toString('base64') });
+            if (imageBytes + image.length <= imageByteLimit) {
+              pages.push({
+                page: number,
+                pageId: `office-visual:${sourceHash.slice(0, 24)}:${number}`,
+                bytes: image.length,
+                dataUrl: 'data:' + 'image/png;base64,' + Buffer.from(image).toString('base64'),
+              });
               imageBytes += image.length;
             } else {
               visionImageBudgetReached = true;
-              warnings.push(`PDF page ${number} image omitted: 20 MiB rendered-image budget reached; later page rendering was stopped.`);
+              warnings.push(`PDF page ${number} image omitted: ${Math.round(imageByteLimit / 1024 / 1024)} MiB rendered-image budget reached; later page rendering was stopped.`);
             }
           } else {
             if (!recognizer) {
@@ -191,9 +204,22 @@ async function pdf(bytes, mode) {
         if (textLength >= MAX_TEXT) { warnings.push(`PDF text truncated at ${MAX_TEXT} characters after page ${number}.`); break; }
       } finally { page.cleanup(); }
     }
-    if (mode === 'vision' && pages.length < doc.numPages) warnings.push(`PDF visual input includes ${pages.length} of ${doc.numPages} pages (maximum ${MAX_IMAGE_PAGES} pages / 20 MiB). Do not claim the omitted pages were viewed.`);
+    const selectedPages = Math.max(0, endPage - startPage + 1);
+    if (mode === 'vision' && pages.length < selectedPages) warnings.push(`PDF visual input includes ${pages.length} of ${selectedPages} requested pages (maximum ${requestedLimit} pages / ${Math.round(imageByteLimit / 1024 / 1024)} MiB). Do not claim the omitted pages were viewed.`);
     if (mode === 'ocr') warnings.push('Offline OCR supports printed Simplified Chinese and English. Handwriting, equations and complex layouts may be inaccurate; use a PDF/image-capable model for visual interpretation.');
-    return { format: 'PDF', text: text.join('\n\n'), warnings, pdf: { totalPages: doc.numPages, inspectedPages: inspected, ocrPages: ocrCount }, pageImages: pages };
+    return {
+      format: 'PDF',
+      text: text.join('\n\n'),
+      warnings,
+      pdf: {
+        totalPages: doc.numPages,
+        inspectedPages: inspected ? Math.max(0, inspected - startPage + 1) : 0,
+        ocrPages: ocrCount,
+        firstPage: selectedPages ? startPage : 0,
+        lastPage: inspected,
+      },
+      pageImages: pages,
+    };
   } finally { await doc.loadingTask.destroy(); }
 }
 async function main() {

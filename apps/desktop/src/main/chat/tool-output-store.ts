@@ -6,6 +6,7 @@ interface SettingsStore {
   getSetting(key: string): unknown;
   setSetting(key: string, value: unknown): void;
   removeSetting(key: string): void;
+  runInSavepoint?<T>(operation: () => T): T;
 }
 interface OutputEntry {
   id: string;
@@ -42,6 +43,11 @@ export class ToolOutputStore {
     return createHash("sha256").update(callId).digest("hex");
   }
   save(sessionId: string, callId: string, output: string): void {
+    const persist = () => this.saveOutput(sessionId, callId, output);
+    if (this.settings.runInSavepoint) this.settings.runInSavepoint(persist);
+    else persist();
+  }
+  private saveOutput(sessionId: string, callId: string, output: string): void {
     const prefix = this.prefix(sessionId),
       id = this.id(callId);
     const capture = new BoundedOutput();

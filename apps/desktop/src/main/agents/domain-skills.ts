@@ -830,6 +830,7 @@ export async function loadDomainSkill(
   promptDirectory: string,
   extensions: ExtensionService,
   resourceDirectory = resolve(promptDirectory, ".."),
+  options: { approved?: boolean } = {},
 ): Promise<string> {
   if (session.agentMode === "chat") throw new Error("CHAT_TOOL_DENIED: Skills are unavailable.");
   const args = skillRequestSchema.parse(raw);
@@ -839,6 +840,7 @@ export async function loadDomainSkill(
       args.name,
       args.resource,
       args.char_offset,
+      options,
     );
   const id = args.name.slice(8);
   const skill = DOMAIN_SKILLS.find((entry) => entry.id === id);

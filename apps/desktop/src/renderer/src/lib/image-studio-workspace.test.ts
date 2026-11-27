@@ -9,8 +9,11 @@ import {
   ImageStudioUrlCache,
   ImageStudioWorkspaceQueue,
   mergeAssetResult,
+  mergeCanvasMutationResult,
+  mergeConcurrentGenerationResult,
   mergeGeneratedResult,
   mergeRemovedAsset,
+  shouldDispatchImageGeneration,
 } from "./image-studio-workspace";
 
 function deferred() {
@@ -69,6 +72,20 @@ function canvas(): ImageStudioCanvas {
         zIndex: 0,
       },
     ],
+  };
+}
+
+function layer(id: string, assetId: string, zIndex = 0) {
+  return {
+    id,
+    assetId,
+    x: zIndex * 10,
+    y: zIndex * 10,
+    width: 10,
+    height: 10,
+    rotation: 0,
+    opacity: 1,
+    zIndex,
   };
 }
 
@@ -142,6 +159,234 @@ describe("image studio workspace queue", () => {
     await expect(queue.run(read)).resolves.toBe("read");
     expect(save).toHaveBeenCalledTimes(2);
     expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("serializes a generation merge behind a deferred canvas close without restoring it", async () => {
+    const persisted: ImageStudioWorkspace[] = [];
+    const queue = new ImageStudioWorkspaceQueue(async (draft) => {
+      persisted.push(draft);
+    });
+    let live: ImageStudioWorkspace = {
+      ...workspace("before generation"),
+      activeDocumentId: "canvas",
+      assets: [asset("old")],
+      documents: [{ ...canvas(), layers: [layer("old-layer", "old")] }],
+    };
+    const closeStarted = deferred();
+    const releaseClose = deferred();
+    const close = queue.run(async () => {
+      closeStarted.resolve();
+      await releaseClose.promise;
+      live = { ...live, activeDocumentId: null, documents: [] };
+      return live;
+    });
+    await closeStarted.promise;
+    let generationApplied = false;
+    const generationResult = {
+      generatedAssets: [asset("generated")],
+      workspace: {
+        ...workspace("stale provider prompt"),
+        activeDocumentId: "canvas",
+        assets: [asset("old"), asset("generated")],
+        documents: [
+          {
+            ...canvas(),
+            layers: [layer("old-layer", "old"), layer("generated-layer", "generated")],
+          },
+        ],
+      },
+      warnings: [],
+    };
+    const generation = queue.commit(
+      () => live,
+      (current) => mergeConcurrentGenerationResult(current, generationResult, "canvas"),
+      (next) => {
+        generationApplied = true;
+        live = next;
+      },
+    );
+
+    await Promise.resolve();
+    expect(generationApplied).toBe(false);
+    releaseClose.resolve();
+    await Promise.all([close, generation]);
+
+    expect(live.assets.map((item) => item.id)).toEqual(["old", "generated"]);
+    expect(live.documents).toEqual([]);
+    expect(persisted.at(-1)).toMatchObject({
+      assets: [{ id: "old" }, { id: "generated" }],
+      documents: [],
+    });
+  });
+
+  it("preserves draft preferences while a deferred deletion reconciles canonical documents", async () => {
+    const persisted: ImageStudioWorkspace[] = [];
+    const queue = new ImageStudioWorkspaceQueue(async (draft) => {
+      persisted.push(draft);
+    });
+    let live: ImageStudioWorkspace = {
+      ...workspace("before deletion"),
+      activeDocumentId: "canvas",
+      assets: [asset("old"), asset("keep")],
+      selectedAssetIds: ["old", "keep"],
+      documents: [{ ...canvas(), layers: [layer("old-layer", "old")] }],
+    };
+    const deletionStarted = deferred();
+    const releaseDeletion = deferred();
+    const deletion = queue.commitCanonical(
+      () => live,
+      async () => {
+        deletionStarted.resolve();
+        await releaseDeletion.promise;
+        return {
+          ...workspace("canonical server snapshot"),
+          activeDocumentId: null,
+          assets: [asset("keep")],
+          selectedAssetIds: [],
+          documents: [],
+        };
+      },
+      mergeCanvasMutationResult,
+      (next) => {
+        live = next;
+      },
+    );
+    await deletionStarted.promise;
+
+    live = {
+      ...live,
+      prompt: "typed during deletion",
+      negativePrompt: "negative typed during deletion",
+      imageModel: { providerId: "image-provider", modelId: "latest-image" },
+      textModel: { providerId: "text-provider", modelId: "latest-text" },
+      generation: { ...live.generation, quality: "high" },
+      selectedAssetIds: ["old", "keep"],
+    };
+    queue.schedule(live, vi.fn());
+
+    const generationResult = {
+      generatedAssets: [asset("generated")],
+      workspace: {
+        ...workspace("stale generation prompt"),
+        activeDocumentId: "canvas",
+        assets: [asset("keep"), asset("generated")],
+        documents: [canvas()],
+      },
+      warnings: [],
+    };
+    const generation = queue.commit(
+      () => live,
+      (current) => mergeConcurrentGenerationResult(current, generationResult, null),
+      (next) => {
+        live = next;
+      },
+    );
+
+    releaseDeletion.resolve();
+    await Promise.all([deletion, generation]);
+
+    expect(live).toMatchObject({
+      activeDocumentId: null,
+      prompt: "typed during deletion",
+      negativePrompt: "negative typed during deletion",
+      imageModel: { providerId: "image-provider", modelId: "latest-image" },
+      textModel: { providerId: "text-provider", modelId: "latest-text" },
+      generation: { quality: "high" },
+      selectedAssetIds: ["keep"],
+      documents: [],
+    });
+    expect(live.assets.map((item) => item.id)).toEqual(["keep", "generated"]);
+    expect(persisted.at(-1)).toMatchObject({
+      activeDocumentId: null,
+      prompt: "typed during deletion",
+      negativePrompt: "negative typed during deletion",
+      generation: { quality: "high" },
+      selectedAssetIds: ["keep"],
+      documents: [],
+    });
+  });
+
+  it("serializes a remote-save merge behind a deferred canvas update without restoring it", async () => {
+    const persisted: ImageStudioWorkspace[] = [];
+    const queue = new ImageStudioWorkspaceQueue(async (draft) => {
+      persisted.push(draft);
+    });
+    let live: ImageStudioWorkspace = {
+      ...workspace("before remote save"),
+      activeDocumentId: "canvas",
+      assets: [asset("old")],
+      documents: [{ ...canvas(), layers: [layer("old-layer", "old")] }],
+    };
+    const mutationStarted = deferred();
+    const releaseMutation = deferred();
+    const mutation = queue.run(async () => {
+      mutationStarted.resolve();
+      await releaseMutation.promise;
+      live = { ...live, activeDocumentId: null, documents: [] };
+      return live;
+    });
+    await mutationStarted.promise;
+    let remoteApplied = false;
+    const remoteResult = {
+      generatedAssets: [asset("remote")],
+      workspace: {
+        ...workspace("stale remote prompt"),
+        activeDocumentId: "canvas",
+        assets: [asset("old"), asset("remote")],
+        documents: [
+          {
+            ...canvas(),
+            layers: [layer("old-layer", "old"), layer("remote-layer", "remote")],
+          },
+        ],
+      },
+      warnings: [],
+    };
+    const remoteSave = queue.commit(
+      () => live,
+      (current) => mergeGeneratedResult(current, remoteResult),
+      (next) => {
+        remoteApplied = true;
+        live = next;
+      },
+    );
+
+    await Promise.resolve();
+    expect(remoteApplied).toBe(false);
+    releaseMutation.resolve();
+    await Promise.all([mutation, remoteSave]);
+
+    expect(live.assets.map((item) => item.id)).toEqual(["old", "remote"]);
+    expect(live.documents).toEqual([]);
+    expect(persisted.at(-1)).toMatchObject({
+      assets: [{ id: "old" }, { id: "remote" }],
+      documents: [],
+    });
+  });
+
+  it("does not dispatch a queued generation cancelled during a deferred workspace flush", async () => {
+    const flushGate = deferred();
+    const flushStarted = deferred();
+    const queue = new ImageStudioWorkspaceQueue(async () => {
+      flushStarted.resolve();
+      await flushGate.promise;
+    });
+    queue.schedule(workspace("pending edit"), vi.fn());
+    const active = new Set(["queued-request"]);
+    const cancelling = new Set<string>();
+    let dispatched = false;
+    const queuedGeneration = (async () => {
+      await queue.flush();
+      if (!shouldDispatchImageGeneration(active, cancelling, "queued-request")) return;
+      dispatched = true;
+    })();
+
+    await flushStarted.promise;
+    active.delete("queued-request");
+    flushGate.resolve();
+    await queuedGeneration;
+
+    expect(dispatched).toBe(false);
   });
 
   it("does not write when an initial load fails", async () => {
@@ -230,6 +475,125 @@ describe("image studio results and cache", () => {
       documents: [{ name: "Edited canvas", layers: [] }],
       assets: [{ id: "keep" }],
     });
+  });
+
+  it("merges out-of-order concurrent assets and layers without losing either result", () => {
+    const current = {
+      ...workspace("latest prompt"),
+      activeDocumentId: "canvas",
+      assets: [asset("old")],
+      documents: [{ ...canvas(), layers: [layer("old-layer", "old")] }],
+    };
+    const resultA = {
+      generatedAssets: [asset("a")],
+      workspace: {
+        ...workspace("stale prompt A"),
+        activeDocumentId: "other-canvas",
+        assets: [asset("old"), asset("a")],
+        documents: [{ ...canvas(), layers: [layer("old-layer", "old"), layer("a-layer", "a")] }],
+      },
+      warnings: [],
+    };
+    const resultB = {
+      generatedAssets: [asset("b")],
+      workspace: {
+        ...workspace("stale prompt B"),
+        activeDocumentId: "other-canvas",
+        assets: [asset("old"), asset("b")],
+        documents: [{ ...canvas(), layers: [layer("old-layer", "old"), layer("b-layer", "b")] }],
+      },
+      warnings: [],
+    };
+
+    const afterA = mergeConcurrentGenerationResult(current, resultA, "canvas");
+    const merged = mergeConcurrentGenerationResult(afterA, resultB, "canvas");
+
+    expect(merged.assets.map((item) => item.id)).toEqual(["old", "a", "b"]);
+    expect(merged.documents[0]?.layers).toMatchObject([
+      { id: "old-layer", assetId: "old", zIndex: 0 },
+      { id: "a-layer", assetId: "a", zIndex: 1 },
+      { id: "b-layer", assetId: "b", zIndex: 2 },
+    ]);
+  });
+
+  it("keeps the live prompt and active canvas while merging a target result", () => {
+    const current = {
+      ...workspace("live prompt"),
+      negativePrompt: "live negative",
+      activeDocumentId: "second",
+      assets: [asset("old")],
+      documents: [canvas(), { ...canvas(), id: "second", name: "Second canvas", layers: [] }],
+    };
+    const result = {
+      generatedAssets: [asset("generated")],
+      workspace: {
+        ...workspace("stale prompt"),
+        negativePrompt: "stale negative",
+        activeDocumentId: "canvas",
+        assets: [asset("old"), asset("generated")],
+        documents: [{ ...canvas(), layers: [layer("generated-layer", "generated")] }],
+      },
+      warnings: [],
+    };
+
+    const merged = mergeConcurrentGenerationResult(current, result, "canvas");
+
+    expect(merged).toMatchObject({
+      prompt: "live prompt",
+      negativePrompt: "live negative",
+      activeDocumentId: "second",
+      documents: [
+        { id: "canvas", name: "Edited canvas" },
+        { id: "second", name: "Second canvas", layers: [] },
+      ],
+    });
+    expect(merged.documents[0]?.layers.map((item) => item.id)).toEqual([
+      "old-layer",
+      "generated-layer",
+    ]);
+  });
+
+  it("does not resurrect a server asset removed after the request started", () => {
+    const current = {
+      ...workspace("live prompt"),
+      assets: [asset("keep")],
+      documents: [],
+    };
+    const result = {
+      generatedAssets: [asset("generated")],
+      workspace: {
+        ...workspace("stale prompt"),
+        assets: [asset("keep"), asset("deleted"), asset("generated")],
+        documents: [],
+      },
+      warnings: [],
+    };
+
+    const merged = mergeConcurrentGenerationResult(current, result, null);
+
+    expect(merged.assets.map((item) => item.id)).toEqual(["keep", "generated"]);
+  });
+
+  it("does not recreate a target canvas closed before the response arrived", () => {
+    const current = {
+      ...workspace("live prompt"),
+      assets: [],
+      documents: [],
+    };
+    const result = {
+      generatedAssets: [asset("generated")],
+      workspace: {
+        ...workspace("stale prompt"),
+        assets: [asset("generated")],
+        documents: [canvas()],
+      },
+      warnings: [],
+    };
+
+    const merged = mergeConcurrentGenerationResult(current, result, "canvas");
+
+    expect(merged.assets.map((item) => item.id)).toEqual(["generated"]);
+    expect(merged.documents).toEqual([]);
   });
 
   it("evicts least recently used entries within a byte budget", () => {

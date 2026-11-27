@@ -1,6 +1,8 @@
 # Mingshen Harness 开发交接与维护记录
 
-最后核对日期：2026-11-24（Asia/Shanghai）。适用工作区版本：1.3.6。
+最后核对日期：2026-11-27（Asia/Shanghai）。适用工作区版本：1.3.7。
+
+**最新交付入口：第98节。** 2026-11-27 诊断修复最终完整回归为231文件（228通过、3环境跳过）、3175项通过、15项跳过、0失败；真实Electron专项20组通过。已完成258个桌面invoke通道、旧HTTP API与`/v1`及后台失败诊断，日志上限提升到15 MiB。用户授权的最新1.3.7 NSIS和ZIP已正式打包并独立核验，官方入口退出0。新ZIP为374,330,516字节，SHA-256=`6c0af48b0f21f7081a3a3ec47e508851091e0e59bc4b04fe437f4ad680bd71d2`。发布SQL已生成，下载直链留空并带执行前阻断。第91、92、97节均为同版本旧包，不可用于当前发版；安装、升级、卸载、SQL执行及线上发布未执行。
 
 本文供其他智能体、开发者和新对话接续工作，记录开发经过、已确认约束、实际代码位置、验证边界和打包方法。它不是功能全部完成、无漏洞或安装包已验收的证明。任何接续工作先核对当前源码、用户最新指令和 `git status`，不要直接照搬早期计划。
 
@@ -9,10 +11,12 @@
 1. 阅读本文和 [README.md](README.md)，涉及安全时阅读 [SECURITY.md](SECURITY.md)。
 2. 执行 `git status --short`，了解已有修改；本交接时工作区有大量未提交修改和未跟踪文件，包含有效实现，不是可直接清理的废料。
 3. 按任务阅读对应模块及相邻测试。优先小范围修复，沿用现有 Electron、React、TypeScript 和 pnpm 结构。
-4. 先阅读 [1.3.6 验证记录](docs/VALIDATION_1.3.6.md)和 [1.3.5 验证记录](docs/VALIDATION_1.3.5.md)；历史行为参考 [1.3.4 验证记录](docs/VALIDATION_1.3.4.md)、[1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
+4. 先阅读 [1.3.7 验证记录](docs/VALIDATION_1.3.7.md)；历史行为参考 [1.3.6 验证记录](docs/VALIDATION_1.3.6.md)、[1.3.5 验证记录](docs/VALIDATION_1.3.5.md)、[1.3.4 验证记录](docs/VALIDATION_1.3.4.md)、[1.3.3 验证记录](docs/VALIDATION_1.3.3.md)、[1.3.2 验证记录](docs/VALIDATION_1.3.2.md)、[1.3.1 验证记录](docs/VALIDATION_1.3.1.md)、[1.3.0 验证记录](docs/VALIDATION_1.3.0.md)、[1.2.9 验证记录](docs/VALIDATION_1.2.9.md)、[1.2.8 工作区验证](docs/VALIDATION_1.2.8.md)、[1.2.7 计划生命周期与附件验证](docs/VALIDATION_1.2.7.md)、[1.2.6 任务工作台与执行验证](docs/VALIDATION_1.2.6.md)、[1.2.5 菜单、首次引导、日志与上下文验证](docs/VALIDATION_1.2.5.md)、[1.2.4 验证](docs/VALIDATION_1.2.4.md)、[1.2.3 验证记录](docs/VALIDATION_1.2.3.md)、[1.2.2 验证记录](docs/VALIDATION_1.2.2.md) 和 [1.2.1 全量记录](docs/FULL_VALIDATION_1.2.1.md)，区分历史结果、模拟验证、真实集成和未验证项目。
 5. 完成后记录改了什么、执行了什么、结果及剩余边界；变更协议、打包、数据结构或安全边界时同步本文和对应文档。
 
-当前工作区目标版本为 1.3.6。生图画布库、参考图、后台生图、素材提示词恢复及批量素材管理均已完成；删除素材会同步清理绑定提示词记录，当前工作区提示词保持不变。手动导入/拖放和批量 ZIP 导出分别采用独立的 500 MiB 合计预算，导出有素材数/字节进度。Windows 安装把内置提示词树放入 app.asar 并逐项 SHA 复核，保留默认 7z 暂存解压与复制重试。最新完整串行 Vitest：205个测试文件，202通过、3环境跳过；2,827项通过、15项跳过、0失败。根 Node 脚本163项、类型检查、Biome 529文件、生产构建和13,871项资源预检通过；批量 ZIP Electron 场景验证了进度条、5阶段 IPC、ZIP 内容与源图 SHA。完整工作台 smoke 两次在后续异步界面等待处超时，不记作全绿，细节见[1.3.6验证记录](docs/VALIDATION_1.3.6.md)。随包文档冻结后的 1.3.6 NSIS/ZIP 已于2026-11-24重建并独立核验，精确数据见第90节。安装、升级和卸载未验收，未发布、未提交；发布 SQL 已准备但 HTTPS 下载链接仍是执行前须替换的占位符，没有执行云 SQL。1.3.4、1.3.5及更早版本的功能、验证和历史边界仍以源码及各版本验证记录为准；本交接后续章节保留完整历史。
+**当前交付说明：** 1.3.7 最新源码检查、打包产物和发布SQL均以第98节为准。下方早期开发周期中“未生成SQL”“不生成正式包”等表述只描述各自当时阶段，不是本轮待办或授权限制；历史测试数和旧SHA不能替代第98节。
+
+当前工作区版本为 **1.3.7**。独立`openai_images`协议、schema11运行治理迁移、全局已读与URL图片确认已保留；第93节后续修复了断流重试预算及工具卡片显示。2026-11-26全量结果为207文件（204通过、3环境跳过）、**2890项通过、15项跳过、0失败**，该结果早于本轮运行治理扩展。第95节记录后续窄修复：runtime/headless **2文件30/30**、Runtime `/v1` smoke **9/9**、ACP bridge smoke **10/10**、计划认领 **3文件40/40**，Quick Chat native **31/31**；fresh typecheck、Lint均退出0，post-native `pnpm build` 3.765秒退出0（main186、renderer2373、preload3）。最终完整串行Vitest session **81543**退出0：**225文件为222通过、3环境跳过；3095项通过、15项跳过、0失败，433.69秒**，JSON为`.impeccable/review/v137-governance-final-accepted-vitest.json`，SHA-256=`cae4ba081de86dddbb8426cdb4ec45c4eaf76cac76afda2c4e87d54d151f8510`；该轮LibreOffice真实隔离渲染**8739.1022ms**，源文件未变。最终治理UI native为`.impeccable/review/v137-runtime-governance-ui-1795773415680/result.json`，SHA-256=`5f0524d7f73807daa255dd2f901826d05e4988dcee0fa5c07ec21bade422eba1`；结果**3 passed/1 QuickChat separate skip、8截图、8组布局、0 runtime errors**，全部`overflowX=false`，新增真实可见区域与`elementFromPoint`遮挡检查，PDF和XLSX公式区480px已人工确认可见，旧遮挡轮只作历史。官方`package-win.cmd --check` session **33082**也退出0，核对**13,877项资源、生产依赖闭包和版本1.3.7**。第92节仍是现存最新NSIS/ZIP，但不包含上述后续源码，不能代表当前源码。安装、升级、卸载未验收，依赖审计仍有3项moderate。未发布、未提交、未执行云SQL或创建1.3.7发布SQL。1.3.6的画布库、参考图、后台生图、素材提示词及批量管理保留，导入/拖放与ZIP导出仍各有独立500 MiB预算；历史1.3.6最终包元数据见第90节。第96节登记随后新增的并发生图、600秒generation与URL默认浏览器打开入口，故上述session 81543、原生构建和session 33082只作为新增功能前基线，不能代表当前工作树。
 
 1.3.0 包含内置 DOCX/PPTX/PDF、按 profile 配置子模型、原生 Responses 状态、图片工具、管道命令、分页读取/受控并发、父会话验证转交与 Token Saver 质量默认值；随后补充模型首次预填、K/M 数值输入、供应商连接编辑和 TencentDB 记忆库。最新工作区记忆设置及模型语义提取见第30节，取代历史离线规则摘录；官方提示词逐字对齐与真实请求核验见第31节。第二套“光轨”界面保留默认“简约”，按已确认预览重构为独立工作台，独立结构见第26节，最新材质打磨及主界面模型/供应商标签见第27节；第24节为首次接入历史。选择自动保存、重载或重启生效，共用全部业务功能。运行信息展开/收起、完整诊断与命令详情见第25节，并在独立结构中回归。各轮实际结果和未验证边界见 [1.3.0 验证记录](docs/VALIDATION_1.3.0.md)。主会话窗口15%的压缩输出预算及触顶恢复、TencentDB 本地记忆核心及项目二选一、工具参数流与 UTF-16 读写修复、缓存前缀优化与诊断、供应商缓存配置、同模型压缩复用、提问/修改冲突通知、Token Saver、执行链、项目记忆、自动重试及剪贴板图片附件见 [1.2.9 验证记录](docs/VALIDATION_1.2.9.md)；下方历史版本结果不能替代本轮验证。
 
@@ -45,7 +49,7 @@
 - 不擅自重建项目、迁移框架、移动模块、创建替代仓库或改变包管理器。
 - 不执行 `git reset --hard`、`git checkout --`、`git clean -fd` 等丢弃现有工作的命令；不把已有未跟踪源码当临时文件删除。
 - 未经明确请求不提交、推送、发布 GitHub Release、不执行云端 SQL、不生成或安装正式安装包。`--dir` 解包验证与正式 NSIS 安装包是两个不同操作。
-- 用户最新指定版本为 **1.3.6**；最新 NSIS/ZIP 已于2026-11-24 在随包文档冻结后本地重建并核验，SHA-256和大小见第90节。1.3.6 发布 SQL 已生成，但公开 HTTPS 下载链接仍为待替换占位；SQL 未执行。尚未安装或验收升级/卸载，也未上传或发布。后续仍须获得明确要求才进行安装或发布。
+- 用户最新指定版本为 **1.3.7**，并授权完成本地正式打包及编写下载链接留空的发布SQL；最新交付见第98节。1.3.6及第91、92、97节的1.3.7包元数据均保留历史，不得拿旧SHA/大小用于当前重建版。尚未执行SQL、安装或验收升级/卸载，也未上传或发布；后续仍须获得明确要求才执行SQL、安装或发布。
 - 保留用户已确定的水青色原子图标。不要替换成旧红色 M 或 Electron 默认图标。
 - 不将真实 API Key、OAuth Secret、Token、Cookie、个人数据库、日志、截图或会话内容加入代码、文档和测试夹具。历史对话中的测试 Key 不得再次使用。
 - 不通过关闭防护、加白名单、改系统 ACL、删除 DLL、修改官方二进制或跳过哈希校验来“修复”打包与隔离。
@@ -59,14 +63,14 @@
 | 产品名 / Agent 名 | Mingshen Harness / Mingshen |
 | 发布者 / 维护主体 | Ming / 新哲文院算法社 |
 | 平台 | Windows 10/11 x64 桌面 GUI；原生 MXC 需要兼容的较新 Windows 11，旧系统选择 Docker |
-| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.6 |
+| 应用版本 | 根 `package.json`、桌面 `package.json`、`apps/desktop/src/shared/release.ts` 中的 1.3.7 |
 | 协议修订号 | `apps/desktop/src/shared/release.ts` 中的 `2026-11-04.3`，与应用版本分别管理；新增备用审批/压缩供应商的数据发送说明，旧版用户重新同意 |
 | 分发 | 当前用户 x64 NSIS、首版不签名；1.2.6起确认后后台下载/校验ZIP并在会话结束后启动安装器，旧网页链接手动打开 |
 | 语言与外观 | 默认简体中文，支持 English；默认“简约”保留白色日间/近黑石墨夜间，第二风格“光轨”为冰白矿青/深墨青；风格重载或重启生效，日夜即时切换，原子图标保留 |
 | 使用对象 | 内部员工；本地优先、自定义供应商，不附赠免费模型或 ChatGPT 订阅 |
 | 供应商示例名 | `Chatgpt Pro`；仅示例名称，不是 OpenAI 官方服务声明 |
 | GitHub | `https://github.com/SkyH1aa/MingshenHarness`；公开 OAuth Client ID 在 `release.ts`，不要添加 Client Secret |
-| 开源许可 | 当前 package license 为 `UNLICENSED`，未见根 LICENSE；Apache-2.0 是建议而非已经授予的许可 |
+| 开源许可 | 根目录实际已有 MIT `LICENSE`，但两个 package license 仍为 `UNLICENSED`，声明不一致；2026-11-26已纠正README事实，包元数据待维护者统一，不能沿用“无根LICENSE”的旧记载 |
 
 用户要求借鉴 Codex、Zcode、OpenCode 和开源 Trae Agent 的工作流，但不能做明显的品牌克隆。Trae Agent 开源仓库不等于完整 Trae 商业 IDE，不得混为同一个能力来源。
 
@@ -143,8 +147,8 @@
 | `apps/desktop/src/main/app-services.ts` | 服务组装、事件分发和异步销毁，关闭数据库前等待任务结束 |
 | `apps/desktop/src/main/chat/` | 发送、Agent 工具循环、取消、标题、活动/汇总、子 Agent、删除与退出协调 |
 | `apps/desktop/src/main/sessions/` | 会话配置/工作区继承、父子归档与恢复、按最后打开时间自动清理 |
-| `apps/desktop/src/main/providers/` | 供应商/Key/模型管理，四种协议请求与 SSE、原生续接、完整错误和脱敏 |
-| `apps/desktop/src/main/storage/` | SQLite、Repository、safeStorage 密文；当前 schema version 9，保留本地FTS/游标分页/变更序号及全部历史迁移 |
+| `apps/desktop/src/main/providers/` | 供应商/Key/模型管理，五种协议请求与 SSE、原生续接、完整错误和脱敏 |
+| `apps/desktop/src/main/storage/` | SQLite、Repository、safeStorage 密文；当前 schema version 11，保留本地FTS/游标分页/变更序号及全部历史迁移 |
 | `apps/desktop/src/main/permissions/` | 审批、提问 broker、会话内前缀与路径授权 |
 | `apps/desktop/src/main/tools/` | 文件、文档、命令、搜索、patch、自定义工具和致命命令保护 |
 | `apps/desktop/src/main/documents/` | 文档读取/OCR、结构化作者 schema、内存生成 DOCX/PPTX 与隔离 Chromium PDF 打印 |
@@ -246,23 +250,23 @@ Set-Location -LiteralPath 'C:\Users\ASUS\Desktop\MingshenHarness'
 | `.\package-win.cmd` | 同上并创建 NSIS 安装包；复制最终发布文件回项目 |
 | `pnpm package:win` | pnpm 已可用时的正式安装包等效入口，同样使用仓库打包包装脚本 |
 
-版本 1.3.6 的预期输出（1.3.5 及更早历史版本发布材料保留）：
+版本 1.3.7 的预期输出（1.3.6 及更早历史版本发布材料保留）：
 
 ```text
-apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.exe
-apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip
-apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip.sha256
-apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip.json
+apps\desktop\release-artifacts\MingshenHarness-1.3.7-x64.exe
+apps\desktop\release-artifacts\MingshenHarness-1.3.7-x64.zip
+apps\desktop\release-artifacts\MingshenHarness-1.3.7-x64.zip.sha256
+apps\desktop\release-artifacts\MingshenHarness-1.3.7-x64.zip.json
 ```
 
 实际构建目录由脚本创建：
 
 ```text
-%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.6-<random>\
+%LOCALAPPDATA%\MingshenHarness\BuildCache\windows-1.3.7-<random>\
   electron\                  临时原版运行时，结束后受限清理
   temp\                      构建子进程的 TEMP/TMP
   output\win-unpacked\      完整应用目录
-  output\MingshenHarness-1.3.6-x64.exe
+  output\MingshenHarness-1.3.7-x64.exe
 ```
 
 `--dir` 是可选的解包验证，不是生成安装包前必须单独执行的步骤。它会打印可运行 EXE 的绝对路径；正式打包会打印项目输出及 `Cached installer:`。如果安装包构建成功、只是复制回项目输出目录失败，使用控制台提示的缓存文件。ZIP、SHA256 及 JSON 各自复制失败时会显示 `Update artifact retained in build cache:`，需分别核对实际路径，不能仅凭退出0断定所有文件已复制回项目。构建失败时打印 `Build files retained for diagnostics:`；该目录不一定有成功安装包，先看构建退出码及目标文件，不要再次全盘清理重装。
@@ -2172,3 +2176,194 @@ Windows打包把内置`resources/prompts/**`放入`app.asar`，将需逐个安�
 | `MingshenHarness-1.3.6-x64.zip.json` | 216 | 版本、文件名、字节数、SHA与实测一致 |
 
 独立PowerShell检查确认EXE的FileVersion/ProductVersion均为1.3.6；ZIP只含根条目`MingshenHarness-1.3.6-x64.exe`，ZIP内EXE的大小与SHA和外置EXE完全一致；ZIP `.sha256`及JSON的版本、文件名、字节数、SHA均与实测相符。发布SQL为`supabase/publish-release-1.3.6.sql`，使用上述ZIP SHA和374,137,004字节；直链使用合法HTTPS示例占位符`https://example.invalid/REPLACE_WITH_PUBLIC_HTTPS_ZIP_URL`，必须替换成真实公开GitHub Release直链后才可执行。没有安装/验收安装、升级、卸载；没有执行云端SQL、上传或发布；未提交或推送。
+
+## 91. 2026-11-25 / 1.3.7 全局已读与URL生图确认
+
+用户要求版本升为1.3.7，顶栏增加“一键已读”并清除全部会话及任务栏未读，生图URL结果提供预览与确认保存，完成后生成正式安装包。已沿用Electron/React/TypeScript、pnpm、原子图标、现有数据结构及协议修订`2026-11-04.3`，没有新增依赖或数据库迁移。
+
+- `CompletionNotificationService.markAllRead`清空完成未读和活动完成通知，持久化并广播全量状态，调用`app.setBadgeCount(0)`与Windows`setOverlayIcon(null, "")`；顶栏Lucide MailCheck入口有数量、空状态和失败反馈。Code/Work/Chat共用此服务，不改变审批、提问、运行或历史消息。
+- `image-generation.ts`新增逐项候选解析，支持Base64、URL及混合响应。无效单项给警告，不丢弃同批可用结果；透明请求的非PNG/WebP Base64单项跳过，本地导入失败时仍可保留URL候选。取消、服务关闭及`CanvasRecoveryError`不能当作普通部分成功吞掉。
+- `image-result-download.ts`只接受无凭据公开HTTPS，每次重定向重验DNS全部结果，连接使用同次已验证地址且`agent:false`，避免重新解析或连接复用；不附模型Key、Cookie、Referer或浏览器存储。拒绝私网/回环/本机/保留地址，最多5次重定向，单图25 MiB、90秒和既有完整解码/像素预算；停滞DNS也受取消与总超时控制，迟到结果不再开连接。
+- 主进程暂存随机候选ID和原始请求提示词，Renderer不获得完整远程URL。预览最多100 MiB源图片字节、30个候选、30分钟有效期；该字节预算不等于进程堆内存总量。仅成功预览并由用户确认后写入普通generated素材，保留本次正面、负面及供应商修订提示词，且不覆盖用户后来编辑的工作区提示词。失败可重试，稍后可重新打开，丢弃、过期及退出清理缓存。生成结果仍有独立100 MiB预算，手动导入/拖放和ZIP导出分别保留500 MiB预算。
+- 供应商图片连接测试能识别URL-only响应，不在连接测试中主动下载结果；普通工具的严格Base64解析入口继续保留。README、双语日志/手册、三协议适用版本、SDK/插件说明、部署说明及Release/验证记录已同步。
+
+源码冻结后的实际验证：完整串行Vitest207文件（204通过、3环境跳过），**2,866项通过、15项跳过、0失败**，364.63秒，JSON为`.impeccable/review/v137-vitest-final.json`。根Node脚本19文件163项通过，28.61秒；Node/Web类型检查、Biome532文件、生产构建（main173/preload3入口/renderer2363模块）及`package-win.cmd --check`的13,871项资源/依赖闭包/版本1.3.7通过。定向4文件76项包含于最终全量；早期ENOENT仅为未落盘目录不存在的夹具误判，已修正并复验。初次Lint的服务格式/导入顺序也已修正，未放宽断言或修改产品预算。
+
+`pnpm audit --prod`退出1，保留3项中等严重性公告：`exceljs > uuid`的`GHSA-w5hq-g745-h8pq`，以及`browserdo-mcp > @modelcontextprotocol/sdk > @hono/node-server`的`GHSA-qv5m-9pm6-hqp3`和`GHSA-jpvv-r467-5p4w`。依赖版本和锁文件未修改，不能声称依赖审计全绿。BrowserDo/Embiody继续免真实连接测试。
+
+只读调用路径核对：ExcelJS现仅使用UUID v4，未调用公告涉及的v3/v5/v6带buffer API；BrowserDo默认stdio链路未启用Hono异步WebSocket升级或反向代理HTTP路径。三公告仍是依赖扫描债务，未来更换transport/代理或UUID调用时需重审；未进行真实攻击验证。具体锁定版本和边界见1.3.7验证记录。
+
+隔离Electron桌面专项`node scripts/v137-image-unread-smoke.mjs`退出0，证据`.impeccable/review/v137-image-unread-1795599801671/result.json`：10组场景、10张截图、10组几何、8次本地合成请求、0运行异常和0服务错误。Code/Work/Chat三个真实主运行形成3个持久未读，跨模式保留；真实顶栏指针清空SQLite完成状态、badge及Windows overlay调用，重载后仍为0。URL-only候选、稍后重开、预览失败重试、确认保存及原始正负/修订提示词、普通Base64、跨页面/重载持久化和确认回导均通过。中文1440/800/680及英文800/680布局检查通过，人工抽查英文680预览与中文680未读截图无阻塞；其余为自动化截图。任务栏部分核对Electron调用，不声明进行了外部任务栏像素识别。
+
+专项前序失败为夹具接线与等待问题，修正hide/tray动作、主进程badge探针、隐藏窗口截图、角标裁剪判断、折叠详情、自动保存落盘等待和单候选隐藏标签断言后，最后一次从头完整通过；没有修改产品CSS或放宽安全策略。具体失败目录和修正见验证记录。README旧生图说明中“拒绝仅URL”措辞已同步为预览确认流程。
+
+文档冻结后于仓库根目录执行` .\package-win.cmd --check`和` .\package-win.cmd`，均退出0；生产构建、13,871项资源及依赖预检、afterPack提示词/Skill资源回读校验、NSIS安装器、blockmap和更新ZIP均成功生成。构建缓存为`C:/Users/ASUS/AppData/Local/MingshenHarness/BuildCache/windows-1.3.7-ZTnEY1/output/`。安装器未签名，与现有配置一致；pnpm平铺依赖下不存在app-local sharp README的提示由workspace README及资源检查覆盖，不作为打包失败。
+
+`apps/desktop/release-artifacts/`最终实测产物：
+
+| 文件 | 字节数 | SHA-256 / 检查 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.7-x64.exe` | 374,200,740 | `25204570cf5ba6e04750e9d59b54ea15db18a9fe5b7fc183fbabee25725273b8` |
+| `MingshenHarness-1.3.7-x64.zip` | 374,158,098 | `d7e556cce01ab298cb40712556cadb7d6a60557b8895722db14166a4261b24c9` |
+| `MingshenHarness-1.3.7-x64.exe.blockmap` | 389,748 | electron-builder产物 |
+| `MingshenHarness-1.3.7-x64.zip.sha256` | 96 | 与实测ZIP SHA一致 |
+| `MingshenHarness-1.3.7-x64.zip.json` | 216 | 版本、文件名、字节数、格式与SHA一致 |
+
+独立PowerShell核验退出0：EXE的FileVersion/ProductVersion均为1.3.7，Authenticode状态为NotSigned；ZIP只含根条目`MingshenHarness-1.3.7-x64.exe`，条目长度374,200,740字节、条目SHA与外置EXE完全一致。ZIP sidecar及JSON与374,158,098字节及实测SHA完全一致，五项发布目录产物均与构建缓存的大小及SHA相同。另逐份比较了55份随包Markdown的SHA，均与冻结源码一致。正式打包后仅更新不随包分发的本交接文档，没有再次改写`docs/*.md`。
+
+最终UI及正确性/安全只读复核没有发现新增交付阻塞。Impeccable机械detector因CLI要求真实CDP目标未成功执行，不能宣称detector通过；布局结论来自实际Electron截图、几何检查及源码审阅。Chat侧栏尚不显示逐会话未读圆点，但全局完成未读服务和一键清除覆盖三种模式；不把现有状态同步写作新增Chat逐会话圆点功能。下载器当前只连接首个已验证DNS地址，若首选IPv6不可达但IPv4可用，预览仍可能失败，不宣称具备多地址自动回退。完整DPI/辅助技术矩阵未验收。
+
+尚未运行安装器，安装、升级和卸载未验收；无正常用户DB/Key或付费供应商请求；没有创建/执行1.3.7发布SQL、上传发布、提交或推送。后续发布应使用本节最终ZIP的真实SHA与大小，不沿用历史1.3.6产物，也不得在随包文档中加入本包自己的精确元数据后继续分发旧包。
+
+## 92. 2026-11-25 / 1.3.7 独立 Images 协议与最终安装包
+
+用户要求研究公司提供的生图Skill示例，但不得加载，新增独立OpenAI生图API协议并使其模型默认图片专用，保持1.3.7、同步文档并重新打包。参考文件仅作接口数据阅读，没有加载、安装或执行，也未复制公司地址、凭据或专有异步工作流。协议依据OpenAI官方Images生成与编辑API；本轮没有新增依赖或改写锁文件，原子图标及政策修订`2026-11-04.3`不变。
+
+- 供应商增加`openai_images`，界面显示`OpenAI /v1/images`。Base URL填写至`/v1`；完整`/images/generations`或`/images/edits`地址被明确拒绝，避免重复拼接。无参考图使用同步JSON `POST /images/generations`，参考图使用multipart `POST /images/edits`；不发送Chat/Responses正文、token、`async`、`stream`或旧`response_format`字段。
+- 新建、手动添加及发现导入的模型默认并锁定纯图片输出；后端创建和更新在省略输出模态时同样默认图片，显式文本/混合输出或工具调用失败关闭。纯生图供应商不进入会话、审批、压缩、草稿润色或反推的文本模型菜单；错误文本调用在Hook与网络请求之前拒绝。旧Responses/Chat图片模型继续兼容。
+- 图片协议隐藏无关的上下文、输出token、思考、工具和缓存配置。后端拒绝包括`auto/off`在内的全部缓存设置；文本协议切换到图片协议时在同一savepoint内删除旧缓存，删除失败回滚协议变更。
+- SQLite顺序追加schema10永久迁移，保留schema1–9、供应商/Key/模型/会话/设置等数据与密文。重建供应商约束前在事务外关闭外键，事务内检查全部外键，失败回滚并恢复外键。旧schema9程序不能打开升级后数据库；需要降级时必须使用升级前完整备份。
+- 先前1.3.7的全局已读、URL结果预览确认、原始正负提示词保留及素材操作继续保留。README、双语手册/更新日志、缓存、SDK/插件、发布草案和验证文档已同步，正式打包前冻结。
+
+最终源码验证：完整串行Vitest退出0，207个文件（204通过、3环境跳过）、**2,887项通过、15项跳过、0失败**，454.92秒；JSON为`.impeccable/review/v137-final-vitest.json`，SHA-256=`392f08ce521c836e3c208956d50762b79e56e5fd1448f03b7aabf7d6d2a067dc`。供应商/共享定向30文件690项通过，不与全量重复相加；根Node脚本19文件163/163项通过，0失败/跳过，43.662秒。Node/Web类型检查、Biome532文件、生产构建（main173/renderer2363模块、3组preload）和差异空白检查通过。
+
+最终隔离Electron专项`node scripts/v137-image-unread-smoke.mjs`退出0，结果`.impeccable/review/v137-image-unread-1795605629497/result.json`，SHA-256=`9d37440b1617fb332d9a754626b1e3fb129c637d971f6892769b2c4be20b5cfc`：14场景、13截图、10组几何检查、11次本地合成请求，0异常和0服务错误。验证真实供应商创建、图片模型添加与发现导入、文本菜单排除、JSON生成、multipart参考图、旧Responses兼容、URL确认、提示词回导、已读及持久化、中英文窄窗口布局；人工抽查最新供应商创建和发现截图无阻塞，其余截图为自动化产物。URL网络防护由下载器单测补充，不把内存图片夹具当作真实公网验收。
+
+文档冻结后，在根目录执行` .\package-win.cmd --check`及` .\package-win.cmd`，均退出0。预检核对13,871项资源、生产依赖闭包与版本1.3.7；官方Electron/原生依赖校验、生产重建、afterPack资源回读校验、NSIS及更新ZIP成功。构建缓存为`C:/Users/ASUS/AppData/Local/MingshenHarness/BuildCache/windows-1.3.7-240sMa/output/`。缺少app-local sharp README的提示由workspace README及资源检查覆盖；未配置证书而跳过签名符合既有配置，不作构建失败。
+
+`apps/desktop/release-artifacts/`本轮最终实测产物，取代第91节同版本旧包元数据：
+
+| 文件 | 字节数 | SHA-256 / 检查 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.7-x64.exe` | 374,208,521 | `7bfa093b6dbbd74af02837f85d9ef04dbd8e27f951a86a81170555b745328b60` |
+| `MingshenHarness-1.3.7-x64.zip` | 374,165,948 | `2b6039431b180688a78f412a79281417fe6542d2e06eab0f202d5de7516d758d` |
+| `MingshenHarness-1.3.7-x64.exe.blockmap` | 389,236 | electron-builder产物 |
+| `MingshenHarness-1.3.7-x64.zip.sha256` | 96 | 与实测ZIP SHA一致 |
+| `MingshenHarness-1.3.7-x64.zip.json` | 216 | 版本、格式、文件名、字节数与SHA一致 |
+
+独立PowerShell核验退出0：EXE的FileVersion/ProductVersion均为1.3.7、Authenticode为NotSigned；ZIP仅含一个根条目`MingshenHarness-1.3.7-x64.exe`，长度374,208,521字节，内容SHA与外置EXE完全一致。ZIP sidecar、JSON与374,165,948字节和实测SHA一致；五项发布产物与本轮构建缓存的大小和SHA逐一匹配。55份随包Markdown与冻结源码逐份SHA完全一致，无缺少或多出文件；ASAR索引29,943项中不存在`AGENT.md`/`AGENTS.md`，内置package版本为1.3.7。另一只读审查任务独立复核版本、JSON证据、随包文档和五项产物，结果一致。正式打包后只更新不随包分发的本交接，不修改随包`docs/*.md`或源码，避免包元数据自引用。
+
+保留边界：生产依赖审计仍有3项中等严重性公告，`pnpm audit --prod`退出1，不写作通过；依赖没有升级，当前调用路径判断详见1.3.7验证记录。标准同步Images不包含第三方私有异步轮询、流式图像事件、遮罩绘制或Outpainting工作流。未使用真实付费供应商、公司接口或正常用户数据库/凭据；未运行安装器，安装、升级和卸载未验收。未创建或执行1.3.7发布SQL、未上传发布、未提交或推送。后续发版只使用本节及旁置元数据中的新ZIP大小与SHA，不再沿用第91节旧包。
+
+## 93. 2026-11-26 / 1.3.7 模型断流重试与工具显示修复
+
+用户报告API不稳定时重连会让工具像被删除、文档任务反复从头开始。本轮确认重试计数曾在同一未完成模型流收到部分正文、思考或工具参数时重置，供应商每次断流前发出少量内容即可不断续期；已完成工具并未被后端删除。Renderer还会在活动轨迹匹配期间隐藏已完成工具卡片，并在运行结束后隐藏重试诊断，放大了“工具消失”的观感。
+
+- `streamModelTurn` 改为每个模型流调用固定使用配置的 0–20 次额外重试额度；部分输出不续期，完整请求结束后下一模型流调用有独立额度。未取消请求下由fetch/读取抛出的 `AbortError` 和 `The operation was aborted` 作为可重试瞬态错误；用户主动取消不会重试。重连仍完整发送工具定义。
+- ChatService 在重试和最终网络失败时丢弃未完成工具参数；未完成工具绝不执行。失败轮的半截assistant文本/思考不写成普通历史；用户手动停止仍按现有中断记录行为处理。已经完成的工具、文件修改和检查点保留，模型重试不回放已完成操作。
+- 设置、双语手册、服务条款、隐私政策、更新日志及本节验证记录同步新语义。Renderer仅把尚处于running且无持久结果的工具作为活动项隐藏；重连时显示重试状态，结束后保留重试/未完成请求诊断。
+
+最终定向测试：`model-retry.test.ts`、`model-retry-runtime.test.ts`、`model-stream.test.ts`、Renderer `activity-details.test.ts` 共4个文件135项通过。`pnpm --filter @mingshen/desktop typecheck`、`pnpm lint`（532文件）及`git diff --check`通过；未运行全仓库Vitest、生产构建或打包。已存在的1.3.7安装器不包含本轮修复，不能作为修复后交付物。另未增加模型流空闲watchdog；若供应商连接永久挂起且不抛错误/结束流，仍需后续单独设计和验证超时策略。
+
+## 94. 2026-11-26 / 1.3.7 全量检查与 Harness 产品调研
+
+用户要求全量检查，并提供与OpenCode、DeepSeek Harness的对比报告。版本保持1.3.7，保留全部既有修改；没有根据调研新增产品能力、升级依赖、正式打包、安装、提交或发布。
+
+最新实际结果：完整Vitest退出0，207文件（204通过、3环境跳过）、**2,890项通过、15项跳过、0失败**，694.74秒，JSON为`.impeccable/review/v137-retry-full-vitest-20261126.json`。根Node脚本163/163通过，54.650秒；`pnpm typecheck`、`pnpm lint`（532文件）、生产构建（main173/renderer2363/三组preload）和`package-win.cmd --check`（13,871项资源、生产依赖与1.3.7版本）均退出0。依赖审计仍退出1，3项moderate、0 high/critical；没有修改依赖和锁文件。15项环境跳过与现场边界见验证页，不能计为通过。
+
+现有`scripts/model-retry-smoke.mjs`已从旧的断流续期语义更新为每次模型请求固定预算，修正了CDP主页面定位、实验运行时定位、记忆摘要夹具、唯一证据目录及刷新新文档同步。最终从头执行退出0，10组场景、5张截图、21次主请求、2次真实子请求、4次记忆请求、0Renderer运行异常，证据`.impeccable/review/v137-retry-1795675222619/result.json`。验证工具定义保留、完成写入不回放且卡片可见、未完成调用不执行、半截输出不能续期、失败半截不持久化、停止/403/关闭重试/耗尽、定时和真实子Agent恢复、重载持久化及中英文紧凑设置。中间一次在最后刷新遇到CDP旧上下文竞态，失败证据`.impeccable/review/v137-retry-1795674791437/failure.json`保留；同步修正没有改变产品代码或削弱行为断言。
+
+生图/全局已读专项重新执行退出0，14场景、13截图、10组几何、11次本地请求、0异常和服务错误，结果`.impeccable/review/v137-image-unread-1795674483402/result.json`。桌面专项全部使用临时profile、项目和本地合成模型，URL传输用受控图片夹具；未使用正常数据库、Key、付费模型或真实BrowserDo/Embiody。人工抽查了完成工具卡片、失败诊断及英文680生图预览，其余截图不声称逐张人工检查。
+
+新增[产品对比调研报告](docs/RESEARCH_HARNESS_COMPARISON_2026-11-26.md)，README增加入口，验证页同步本轮结果。OpenCode采用Anomaly的V2 2.4.2，区分旧V1 1.19.6与`/releases/latest`别名；DeepSeek采用官方`deepseek-ai/deepseek-harness`，区分稳定npm/桌面0.2.2-rc.5和master0.2.3-alpha.2预览源码。仅只读查询官方文档、源码、包元数据与更新feed，没有安装/执行竞品、插件或模型。报告明确现有Mingshen后台子Agent、Worktree、调度、QA及插件均已存在，不重复列为缺失，改进建议不代表实装或性能结论。
+
+本轮还确认根目录确有已跟踪的MIT `LICENSE`，旧README和本交接的“无根LICENSE”表述有误。已纠正文档，两个包的`UNLICENSED`元数据保持原样，待维护者统一声明；不替维护者变更许可。调度服务启动会立即tick，过期任务可触发一次，不能写成完全没有启动补投；尚无可配置cron/RRULE/时区/misfire规则。模型流仍无首包/空闲watchdog，外部工具没有通用exactly-once或事务回滚保证。
+
+当前生产构建包含第93节修复，但第92节正式安装器不包含它，本轮没有重新生成NSIS/ZIP，不能沿用旧包元数据代表当前源码。安装、升级、卸载、真实Office/付费供应商与完整Windows设备矩阵未验收；没有执行云SQL、提交、推送或上传发布。
+
+## 95. 2026-11-27 / 1.3.7 运行治理与开发者接口文档接续
+
+用户要求按1.3.7增强计划补齐统一运行、开发者接口、管理策略、工具强校验、任务认领和办公交付文档，并完成全量检查。产品源码在Office交付终审、治理UI native复核和API契约审计期间只做了经批准的窄范围修复，没有回退或重写并行代理的已接受实现。最终完整串行Vitest session **81543**使用原断言、超时和单worker运行，退出0：**225文件为222通过、3环境跳过；3095项通过、15项跳过、0失败，433.69秒**；JSON为`.impeccable/review/v137-governance-final-accepted-vitest.json`，SHA-256=`cae4ba081de86dddbb8426cdb4ec45c4eaf76cac76afda2c4e87d54d151f8510`。该次full实际LibreOffice隔离渲染**8739.1022ms**、源文件保持，migrations **17/17**含v11备份与失败回滚，OfficeDelivery **19/19**、office-document **34通过/3环境跳过**。此前session 7326的8个失败文件已由同进程control full **115/115**和逐项isolated诊断；更早session 22460的**3094通过/15跳过**仅是后续窄修复前基线，不得改名冒充最终新证据。Quick Chat最终native smoke `.impeccable/review/v133-quick-chat-1795758428645`为**31/31**；`chat:stop(sessionId, runId)`仅在停止通道兼容1/2参数，其他IPC长度不变，非空`runId`和ChatService所有权检查保留。UI修复后的fresh typecheck、Lint和生产构建均退出0。此后runtime/headless窄修复冻结为**2文件30/30**，Runtime `/v1` smoke **9/9**，ACP bridge smoke **10/10**；支持live delta无ID且不推进durable cursor、ACP ownership和过滤后全局游标前进、停止关闭`/v1` SSE并完成心跳清理/退订/Token重启。计划认领窄修复冻结为**3文件40/40**，外部`settle.expectedVersion`现在必须为调用方读取的positive safe integer `claimVersion`，心跳推进后旧值返回`409`。最终治理UI native `.impeccable/review/v137-runtime-governance-ui-1795773415680/result.json`的SHA-256为`5f0524d7f73807daa255dd2f901826d05e4988dcee0fa5c07ec21bade422eba1`，结果为**3 passed / 1 QuickChat separate skip、8截图、8组布局、0 runtime errors**，全部`overflowX=false`；测试新增真实可见区域与`elementFromPoint`遮挡检查，PDF与XLSX公式区480px截图已由根任务人工确认可见。旧`.impeccable/review/v137-runtime-governance-ui-1795772654836`的sidebar遮挡只作为测试夹具历史。该轮XLSX使用受控`SystemRoot`，因其中无PowerShell而出现COM启动`ENOENT`、隔离LibreOffice失败，故只记`recalc failed / render unavailable / formula partial / unverified`，不能当作无Office三环境通过；产品Office服务未因该夹具问题改动。
+
+历史失败诊断证据：原8个文件以同一进程做control full为**115/115通过、118.88秒**，逐项isolated随后也全部通过；该结果说明原full失败尚不能确定归因于OS或产品。Quick Chat最终native smoke后来独立完成，证据为**31/31**；不把旧失败轮次计为通过。
+
+窄修复阶段已全部冻结：运行状态迁移与生命周期事件在同一savepoint提交，事件写入失败会回滚运行行；计划认领与心跳只接受真实live executor，外部结算使用必填caller CAS。Office文档已补`formulaCoverage`、结构/内容分离、渲染**256MiB**预算、输出大小与取消清理边界。fresh源码检查与最终治理UI native已经完成；功能实现和界面收口不再是待办，完整Vitest新session作为最终汇总证据单独记录。
+
+本轮只读核对并记录：
+
+- `app-services.ts`创建`RuntimeService`，把它接到Headless服务、准确`runId`停止和开发者处理器；schema已追加到11，schema10升级前创建`.pre-v11-backup-*.sqlite`。
+- 新请求的运行行、幂等接纳记录和`runtime.status` `accepted`生命周期事件在同一数据库事务中写入，提交后才向主界面、快捷Chat、桌宠和外部事件流发布；重复幂等请求返回原运行且不重复生成接纳事件。原子接纳与duplicate定向**52/52**通过。Runtime/Headless窄修复**2文件30/30**、Runtime `/v1` smoke **9/9**、ACP bridge smoke **10/10**通过；这些定向证据不能替代冻结源码的最终fresh full。
+- `/v1`已注册能力、会话快照、幂等发送、运行查询/停止、事件续接和有效策略。接纳时`policyRevision`保持不变，最近一次拒绝以有界`lastPolicyDenial`保存revision/code/reason/scope/sources/time；运行行更新与`runtime.policy_denied`事件同事务，事件清理后仍可从运行查询和快照读取。机器策略无效时，认证的现有历史、快照、运行与有效策略读取继续作为安全诊断面，write/claim/Office检查继续阻断。任务认领支持`claim`、`heartbeat`、`settle`、`recover`；外部`settle.expectedVersion`必须是调用方最近读取的positive safe integer `claimVersion`，缺失/格式错误为`400`，心跳等推进后旧值为`409`，并只接受active、live owner、无活动工具/命令/清理/文件租约/执行安全/写屏障的`completed`或`released`；`stale`或`cancel_requested`只能通过宿主停止确认和逐effect只读检查证据`recover`。实时正文/思考delta无ID且不推进durable cursor；ACP只接受本bridge创建会话，过滤外部事件后全局持久游标仍前进。外部办公回执写入只支持`prepare`、`check`，经ChatService主Code/Work+host+full_access+未归档+工作区闭包并逐阶段重检策略；外部`visual-batch`/`record-visual`固定返回`OFFICE_EXTERNAL_VISUAL_EVIDENCE_UNTRUSTED`，桌面任务工作台保留内部视觉续接。`prepare`只接受会话工作区内相对路径。停止的`202`只表示`stopRequested`，`cancellationConfirmed`保持`false`，必须观察准确运行终态。
+- `OfficeDeliveryService`具备回执、结构/公式/渲染/视觉批次、预算和证据缓存；主CodeAgent/WorkAgent在宿主、完全访问且有工作区时，工具批次后的DOCX/XLSX/PPTX/PDF变化会自动调用该服务。可修复问题回到当前模型，按每个文件最多3轮修复；文件变化后旧哈希回执失效，预算耗尽后当前运行对该文件设置写屏障。任务工作台可列出已有回执并继续视觉批次。Office开发API不信任外部视觉证据，必须由宿主`check`生成；ChatAgent、子Agent和沙箱执行没有这条宿主验收权限。OfficeDelivery冻结定向为19/19、office-document为34通过/3环境跳过，typecheck通过；本机LibreOffice隔离渲染保留源文件，真实Microsoft Office COM和真实视觉模型仍未现场验收。另有插件Hook 47/47及Headless 3/3属于不同测试层，不能并入Office计数。
+- 原生`office_document`创建、编辑和基础验证仍只对WorkAgent开放；CodeAgent不获得该工具。主CodeAgent/WorkAgent的宿主交付检查是另一条边界，可对被授权的工具写入或修改的工作区Office文件生成回执，但不能把CodeAgent误写成拥有WorkAgent原生命令。`OFFICE_DELIVERY.md`已按此纠正矛盾。
+- 交互终端创建在启动Shell/profile之前检查`command.execute`；`ask`按fail-closed拒绝，不声称已通过交互审批，`deny`或策略无效同样不能启动空PTY。
+- 实际loopback专项已用实际HeadlessServerService+Runtime+临时SQLite+实际SDK+spawn CLI覆盖capabilities、幂等两轮、run、精确保留式停止、completed snapshot、服务重启Token轮换、旧Token SDK/CLI失败及CLI NDJSON单行。ChatService使用`admitTurn`合约桩，不含真实模型/chatloop；`headless-idempotency.integration.test.ts`另有真实Chat接纳full定向1/1通过。
+- 模型首响应/空闲watchdog、管理策略入口、ToolOutcome Schema校验和PlanClaimService已有源码接线；本轮没有动态证明所有桌面、快捷Chat、桌宠、API、SDK和ACP表面使用同一状态源，也没有完成断线、策略损坏、并发认领、非法工具输出或真实Office验收。
+- Quick Chat真实桌面试跑曾发现`chat:stop`的两参数调用在IPC白名单处被按单参数拒绝。最小修复只允许该通道接收1/2参数，非空`runId`和ChatService的所有权检查保留；其他IPC参数长度未变。控制器12/12、typecheck、Biome及重新构建通过，修复后的native smoke最终为**31/31**，旧失败轮次不计为通过。
+
+同步文件：
+
+- 新增[运行治理](docs/RUNTIME_GOVERNANCE.md)、[开发者接口](docs/DEVELOPER_API.md)和[办公交付验证](docs/OFFICE_DELIVERY.md)。
+- 更新[README.md](README.md)、[SECURITY.md](SECURITY.md)、[双语用户手册](docs/USER_GUIDE.md)、[English user guide](docs/USER_GUIDE.en.md)、[双语文档日志](docs/CHANGELOG.md)、[English changelog](docs/CHANGELOG.en.md)、[本地插件接口](docs/LOCAL_PLUGINS.md)、随包SDK说明及[1.3.7验证记录](docs/VALIDATION_1.3.7.md)。
+- 文档明确事件保留30天/256MiB、Office视觉默认12页/12MiB每批和200页/200MiB每文件每轮、证据缓存24小时/512MiB、机器策略路径及无效策略暂停新执行。
+
+完整Vitest已由最终新session **81543**收口，最终治理UI native也已完成；post-native `pnpm build`退出0，官方`package-win.cmd --check` session **33082**最终通过，核对13,877项资源、生产依赖闭包和版本1.3.7。不能用session 22460改名或旧安装器代替。Office三环境、真实付费视觉模型、桌面/托盘/快捷Chat/桌宠/API/SDK/ACP完整长时一致性以及正式安装、升级、卸载仍须按各自矩阵另行验收；定向测试、native单次通过和窄修复结果不能替代这些现场边界。本轮不生成NSIS/ZIP、SQL或发布物。
+
+## 96. 2026-11-27 / 1.3.7 并发生图、600秒generation与URL默认浏览器打开
+
+用户最新指令覆盖第95节的收口范围。新增契约如下，已完成当前源码定向、真实Electron、完整回归和官方资源预检；最终正式产物另记第97节：
+
+- 主进程与UI各自限制最多3个并发生图请求。每项有独立状态、取消和结果；切换ChatAgent、Workstation等页面后继续后台执行，单项失败或取消不终止其他请求。
+- 每个generation的总预算为600秒，包含供应商请求、响应解析和结果提交。远程URL预览下载仍为90秒；文本润色、反推提示词、网页请求和其他旧流程预算独立。超时只终止对应requestId。
+- 提交时快照正面/负面提示词、参考图及目标画布。结果返回后保留用户随后编辑的提示词和active canvas；目标画布已关闭或删除时结果留在素材库，不重新创建或复活画布。
+- URL预览弹窗的“在浏览器打开”在loading、error、ready三态均可用。Renderer只发送不透明候选id与requestId；主进程重新校验候选、期限、规范化网络目标、operational及`network.request`/`browser.use`策略，再调用`shell.openExternal`。该操作不等待或取消预览队列，不改变保存/丢弃状态。
+- 外部浏览器是独立会话。Cookie、登录态与CAPTCHA结果不回传Mingshen Harness；浏览器后续DNS、重定向和导航不受应用内受控图片下载器的同一约束。不得把浏览器可打开写成应用内远程下载安全校验通过，也不得声称能解除受控下载限制。
+- 版本保持1.3.7，`DATABASE_SCHEMA_VERSION`保持11，不新增数据库迁移。
+
+已同步README、中文与英文用户手册、中文与英文更新日志、1.3.7 Release草案、SECURITY和VALIDATION；新增验证项明确标为待填。session 81543、治理UI native、post-native 3.765秒构建、session 33082的13,877项资源预检和既有NSIS/ZIP全部是新增功能前基线，不能外推到当前工作树。
+
+最终源码完整串行Vitest session **23152** 退出0：**225文件中222通过、3环境跳过；3131项通过、15项跳过、0失败，414.67秒**。JSON为`.impeccable/review/v137-image-concurrency-final-vitest.json`，SHA-256=`e536c3412332204fe5bd4e58e2e193362870e3fb541327e5e881cbd14bc01a9c`。本轮真实LibreOffice隔离渲染**8684ms**，源文件未变。生图Electron专项session **71289** 退出0并清理：**17组、17截图、10组几何、17次本地请求、0异常/服务错误**，结果`.impeccable/review/v137-image-unread-1795779471864/result.json`，SHA-256=`e5d587f26c4279c14d5829e9705d1d0d8b7669f1087fa0cee64c9e5f2d6fe817`。专项脚本SHA-256=`380994cc754131b6254d3d337f6d2c0af15b2514500db1462e117991e22e81c8`。根任务人工查看该最终目录中的loading、open-error、三请求680和英文预览680四张截图，未见操作阻塞，其余不声称逐张人工检查。
+
+当前源码后端**3文件117/117**、前端**15/15**、preload**9/9**和根Node脚本**19文件163/163**均通过。UI冻结后typecheck **2.6237秒**、Lint **568文件/3.5442秒**、生产构建**3.5856秒**均退出0，main186/renderer2373/preload3。官方`package-win.cmd --check` session **66510**退出0，核对**13,877项资源**、生产依赖闭包及版本1.3.7。前序native失败均限于测试夹具同步、prompt基线、供应商延迟匹配、dialog class或drawer展开，证据保留，不计为通过；没有改变已接受的产品四文件哈希、放宽断言或提高测试超时。
+
+用户已明确授权在文档完成后正式打包最新1.3.7，同时生成NSIS安装器和更新ZIP。随包文档冻结后执行打包，产物核验仅更新不随包分发的本交接第97节。保留非CAS全图保存与Renderer崩溃之间的画布图层窗口、外部浏览器后续DNS/重定向、3项moderate依赖公告，以及真实COM/付费视觉/安装升级卸载未验收等边界；主进程图片素材不因该画布窗口丢失。未生成发布SQL、未安装、上传、提交或推送。
+
+## 97. 2026-11-27 / 1.3.7 并发生图增强正式交付
+
+本节取代第91、92节同版本旧包元数据。用户明确要求增加URL默认浏览器打开、最多3个并发生图请求、每项600秒预算，并在同步文档后生成最新版1.3.7。产品与随包文档冻结后，官方`.\package-win.cmd --check` session **66510**退出0（**13,877项资源**、生产依赖与1.3.7版本）；正式`.\package-win.cmd` session **7278**退出0，完成Electron45.2.1校验、保留原子图标和安装动画帧、原生运行时与node-pty官方预构建校验、源码重建、生产资源预检、afterPack资源校验、NSIS和更新ZIP生成。未通过编辑依赖、关闭防护、修改ACL或跳过哈希解决构建问题。
+
+本轮构建目录：`C:\Users\ASUS\AppData\Local\MingshenHarness\BuildCache\windows-1.3.7-CD5kOH`；以下五项产物已复制至`apps/desktop/release-artifacts/`，与该目录`output/`的大小及SHA逐项一致。
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.7-x64.exe` | 374,363,591 | `1aea6edb049e79503de0b7f48656920e795050a4b9920e2bf393f9601c73a581` |
+| `MingshenHarness-1.3.7-x64.exe.blockmap` | 389,386 | `b92fb165a985b9f1f2ba998f99b029e35c179fee187e782108a67437b22c2385` |
+| `MingshenHarness-1.3.7-x64.zip` | 374,320,881 | `3ee6cabf25adff5f6b652288c0214a2ee0e89325795bb5767333a7d6999e8e53` |
+| `MingshenHarness-1.3.7-x64.zip.sha256` | 96 | `9cc6ceaf67cd9542a932dbccfedc7ff14cab538adbc3e1856ffe25180a163c70` |
+| `MingshenHarness-1.3.7-x64.zip.json` | 216 | `87002ff88b933999f301d46081d8b2d1a7d2527f11b7662bf3b96b2c7fc27a53` |
+
+主核验均退出0：EXE FileVersion/ProductVersion为1.3.7，Authenticode为`NotSigned`，符合现有未配置证书的分发约定；ZIP唯一根条目为`MingshenHarness-1.3.7-x64.exe`，未压缩长度374,363,591字节，流式读取SHA与外置EXE一致。JSON的version、format、filename、size、SHA与实际ZIP相同，SHA旁置文本也一致。ASAR共**29,943项**，根`AGENT.md`与`AGENTS.md`未进入包，内置package版本1.3.7。ASAR主进程SHA为`bb01bad6b46a83a530f7daf0829dd572b0ad7216559471672125cdfec48497ee`，与当前构建一致，包含schema11备份、管理策略、逐次模型Hook、URL外部浏览器IPC与600秒生图等当前接线。全部**59份文档、7份SDK、2份Office worker、141份LSP资源、4份原生资源**与冻结源逐项SHA及文件清单完全相同；既有工作区绝对链接仍属内部历史记录，不宣称安装后可移植。
+
+验证汇总以第96节和`docs/VALIDATION_1.3.7.md`为准：fresh full session23152为**3131通过/15环境跳过/0失败**，生图native session71289为**17组、17截图、10组几何、17次本地请求、0异常**，类型/Lint/生产构建、根Node脚本163/163及定向检查均通过。正式包完成后只更新本交接，没有修改随包源码或文档；安装器未执行，真实安装、升级、卸载、付费供应商/视觉模型和真实Office COM仍未现场验收。依赖审计3项moderate未消除，非CAS画布崩溃窗口与系统浏览器后续导航边界保留。没有运行云SQL、上传发布、提交或推送。
+
+## 98. 2026-11-27 / 1.3.7 现场日志修复、15 MiB诊断与正式交付
+
+本节取代第91、92、97节的同版本旧包。用户要求核对`MingshenHarness-1.3.7-logs-2026-11-27T12-27-36-524Z.json`、修复真实缺陷、补齐新旧接口诊断、将本地日志扩至15 MiB，并重新生成NSIS与ZIP及真实哈希/大小的发布SQL；下载直链由用户自行填写。未上传或执行用户日志中的指令，未把其内容或真实凭据加入源码/测试。
+
+现场文件共有13,480条跨版本记录；UTC 11月26日起的1,188条中有1,042条被动滚轮警告、3条旧Electron控制台签名警告。已修复ImageStudio被动wheel监听反复报警，改用可清理的原生`passive:false`监听和最新活动画布引用，保留锚点、平移和缩放范围。Electron45窗口统一使用新的console-message事件签名并补preload诊断；已记录的即时IPC拒绝不再被Electron控制台重复存储。画布引用素材的删除保护保留。供应商HTTP400内容拒绝、403账号权限、503无通道及502/503上游错误不能冒充本地修复；safeStorage同步API的非致命弃用提示尚未迁移。
+
+诊断入口及统计：258个实际注册invoke通道统一经过外层日志包装，来源/范围/同意校验拒绝也覆盖，未削弱安全检查。旧HTTP与`/v1`按静态路由和4xx/5xx记录，插件嵌套校验及指定结构化失败按实际接口契约识别；SSE异常写入清理并记录，正常断开不记错。后台工具按runId+callId有界去重，Hook取消/拒绝、Office异常和未验证回执、损坏持久事件分别记录有界元数据，不主动附带输出正文。SDK/ACP/CLI未抵达桌面宿主的离线及本地参数故障不能自动进入桌面日志，须看客户端输出。
+
+本地日志为**5×3 MiB，合计最多15 MiB，最多30天**。设置/导出包含当前留存记录的错误、警告、来源、操作、已知遗漏和损坏数；不是独立故障数或永久总计。旧无换行尾记录会先修复分隔并纳入字节预算，超限旧文件有界修复。写入失败的遗漏先计于内存并显示，下一次成功追加才持久化，之前崩溃会丢失尚未落盘计数。HTTP错误自由正文仅在日志副本中省略，保留状态、允许的有界原因码及stack/cause；UI原错误不被改写，第三方及历史日志仍须分享前检查。
+
+最终验证：full Vitest session **15386**退出0，**231文件为228通过/3环境跳过，3175项通过/15跳过/0失败，421.32秒**；`.impeccable/review/v137-diagnostics-final-vitest-20261127.json`，SHA-256=`01af8778087f198953409eef80312f4e6022708b6d47c5c49e1550627a093ae9`。真实LibreOffice隔离渲染8276ms、源文件未变；15项环境跳过不能记作通过。真实Electron session **10123**退出0并清理，**20组、20截图、12组几何、17次本地请求、0异常/服务错误**；`.impeccable/review/v137-image-unread-1795785536657/result.json`，SHA-256=`50599e34c0a55197afe3da36e48d4a59442b31fb69c81c630b29aa335c797cd4`。专项脚本SHA-256=`63c842f50b790838ae29384f0cac8b35a9bb72cdaed6cba46b75d0c4b632474d`。新增真实wheel/Ctrlwheel、缺失素材单次日志、插件无效返回、API401/404及15 MiB导出统计，中英文1040×680无横向溢出。根任务人工查看最终两张诊断页和画布滚轮截图，其余不声称逐张人工审阅。
+
+类型检查4.6114秒、Lint578文件（Biome1418ms/墙钟3.2171秒）、生产构建3.8018秒（main189/renderer2375/preload3）均退出0；根Node session **19625**为**19文件163/163、0跳过、29248.7814ms**。SDK/ACP/CLI与专项语法、差异空白和64份Markdown的349个本地链接检查通过，31个历史绝对链接不声称安装后可移植。生产依赖审计仍退出1，**3 moderate、0 high/critical，381依赖**，未改依赖/锁文件。正式资源预检session **57310**退出0，核对**13,877项资源**、生产依赖闭包与1.3.7版本。
+
+随包源码/文档冻结后，正式`package-win.cmd` session **70289**退出0；Electron45.2.1、原子图标/安装动画、官方node-pty预构建、生产重建、afterPack资源校验、NSIS及ZIP全部完成。构建缓存为`C:\Users\ASUS\AppData\Local\MingshenHarness\BuildCache\windows-1.3.7-WMgv6P`，以下五项发布文件与其`output/`逐项大小/SHA一致：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `MingshenHarness-1.3.7-x64.exe` | 374,374,039 | `dbfbfa0a0ae46b258bc5f850a9c612d39079fcf2c68d20ddced5b536c10d034b` |
+| `MingshenHarness-1.3.7-x64.exe.blockmap` | 389,395 | `dfd9d2e89ef8f9c992bf718a40d2482a9de866c049acbf64a68f8536b5264467` |
+| `MingshenHarness-1.3.7-x64.zip` | 374,330,516 | `6c0af48b0f21f7081a3a3ec47e508851091e0e59bc4b04fe437f4ad680bd71d2` |
+| `MingshenHarness-1.3.7-x64.zip.sha256` | 96 | `9fc136fa884b870cee3769b10ce316c37a995e257f0900fef77e6bc9f7c32fff` |
+| `MingshenHarness-1.3.7-x64.zip.json` | 216 | `fe6f7a3007ca71dad3dcbc24c9de1e42df625534f3b839ad44a0a1f78190d650` |
+
+独立核验：EXE FileVersion/ProductVersion均1.3.7，Authenticode为NotSigned，符合未配置证书的既有分发；ZIP唯一根条目是同名EXE，解压流SHA与外置EXE相同。旁置JSON的version/format/filename/size/SHA及SHA文本一致。产物证据`.impeccable/review/v137-diagnostics-artifacts-20261127.json`，SHA-256=`f545535f115795e939d30f835d7cd60a6b7f6d73bb705125c15aefd12bd41248`。
+
+源码冻结证据`.impeccable/review/v137-diagnostics-source-freeze-20261127.json`共**874文件**，SHA-256=`bcf56331da15dc78fed67de075b5290a792f5585bfbb50c448f44a0d7d622da8`；打包后全部未变。ASAR共**29,943项**，根AGENT/AGENTS未进入包，内置package版本1.3.7；全部**113个编译文件**的清单和SHA与当前out一致，主进程SHA-256=`8d181b11cf7a57ee5377bb0078c9a3a041be019fb4518fcb27a497981d91194e`。全部**59份文档、7份SDK、2份Office worker、141份LSP、4份原生资源**清单及SHA逐项与冻结源一致；资源证据`.impeccable/review/v137-diagnostics-package-resources-20261127.json`，SHA-256=`0904e4d4174099b7c96b2ba1d15bbb924e1acf642b362df249b895ed52bdc01b`。
+
+已生成`supabase/publish-release-1.3.7.sql`，采用本节新ZIP的实际SHA/大小。`v_download_url`留空，空白或不合法HTTPS会在UPSERT前RAISE并回滚；按用户填入公开ZIP直链后可由项目所有者手动运行。遵循migrations0001+0003约束，notes少于1000字符；`ON CONFLICT(version)`更新并重新激活已有1.3.7行。相同版本重建不会自动更新已安装1.3.7的客户端，须手动运行新安装器。完整Release标题/简介见`docs/RELEASE_1.3.7.md`。
+
+本轮同步README、双语手册/更新日志/隐私说明、开发者API、Release和验证页，冻结后仅更新不随包分发的本交接、发布SQL、Supabase发布指南和本地验证元数据。没有运行安装器、SQL或线上发布，没有提交/推送。真实安装/升级/卸载、付费供应商及视觉模型、真实Office COM和完整三环境矩阵仍未验收；既有非CAS画布崩溃窗口与外部浏览器后续导航边界保留。

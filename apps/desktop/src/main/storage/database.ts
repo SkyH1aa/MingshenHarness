@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { MIGRATION_OFFICE_DELIVERY } from "../../shared/office-delivery";
+import { MIGRATION_RUNTIME_V11 } from "../runtime/runtime-service";
+import { PLAN_CLAIMS_MIGRATION_SQL } from "../workbench/plan-claim-schema";
 
-const SCHEMA_VERSION = 9;
+export const DATABASE_SCHEMA_VERSION = 11;
+export const PRE_V11_BACKUP_MARKER = ".pre-v11-backup-";
 
 const MIGRATION_V1 = `
   create table if not exists secrets (
@@ -434,6 +439,33 @@ const MIGRATION_V9 = `
     default '["code","work"]';
 `;
 
+const MIGRATION_V10 = `
+  create table providers_v10 (
+    id text primary key,
+    name text not null,
+    base_url text not null,
+    protocol text not null check (
+      protocol in ('anthropic_messages', 'openai_responses', 'openai_chat_completions', 'gemini_generate_content', 'openai_images')
+    ),
+    auth_mode text not null check (
+      auth_mode in ('bearer', 'x_api_key', 'api_key', 'x_goog_api_key', 'custom')
+    ),
+    custom_header_name text,
+    active_key_id text,
+    created_at text not null,
+    updated_at text not null
+  );
+  insert into providers_v10 select * from providers;
+  drop table providers;
+  alter table providers_v10 rename to providers;
+`;
+
+const MIGRATION_V11 = `
+  ${MIGRATION_RUNTIME_V11}
+  ${PLAN_CLAIMS_MIGRATION_SQL}
+  ${MIGRATION_OFFICE_DELIVERY}
+`;
+
 // Keep every historical step in the application; upgrades may skip many releases.
 export const DATABASE_MIGRATIONS: readonly string[] = [
   MIGRATION_V1,
@@ -445,10 +477,28 @@ export const DATABASE_MIGRATIONS: readonly string[] = [
   MIGRATION_V7,
   MIGRATION_V8,
   MIGRATION_V9,
+  MIGRATION_V10,
+  MIGRATION_V11,
 ];
 
+function isMemoryDatabase(filePath: string): boolean {
+  return (
+    filePath === ":memory:" ||
+    filePath.startsWith("file::memory:") ||
+    /[?&]mode=memory(?:&|$)/i.test(filePath)
+  );
+}
+
+function createPreV11Backup(database: DatabaseSync, filePath: string): string | null {
+  if (isMemoryDatabase(filePath)) return null;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = `${filePath}${PRE_V11_BACKUP_MARKER}${timestamp}-${randomUUID()}.sqlite`;
+  database.prepare("vacuum into ?").run(backupPath);
+  return backupPath;
+}
+
 export function openDatabase(filePath: string): DatabaseSync {
-  mkdirSync(dirname(filePath), { recursive: true });
+  if (!isMemoryDatabase(filePath)) mkdirSync(dirname(filePath), { recursive: true });
 
   const database = new DatabaseSync(filePath);
   try {
@@ -461,29 +511,34 @@ export function openDatabase(filePath: string): DatabaseSync {
       | undefined;
     const currentVersion = versionRow?.user_version ?? 0;
 
-    if (currentVersion > SCHEMA_VERSION) {
+    if (currentVersion > DATABASE_SCHEMA_VERSION) {
       throw new Error(
-        `Database schema ${currentVersion} is newer than the supported version ${SCHEMA_VERSION}.`,
+        `Database schema ${currentVersion} is newer than the supported version ${DATABASE_SCHEMA_VERSION}.`,
       );
     }
 
-    for (let version = currentVersion + 1; version <= SCHEMA_VERSION; version++) {
+    for (let version = currentVersion + 1; version <= DATABASE_SCHEMA_VERSION; version++) {
+      if (version === 11 && currentVersion > 0) createPreV11Backup(database, filePath);
       // Rebuild the parent without cascading deletes or rewriting child FK targets.
-      if (version === 8) database.exec("pragma foreign_keys = off;");
-      database.exec("begin immediate;");
+      const rebuildsProviders = version === 8 || version === 10;
+      if (rebuildsProviders) database.exec("pragma foreign_keys = off;");
+      let transactionOpen = false;
       try {
+        database.exec("begin immediate;");
+        transactionOpen = true;
         const migration = DATABASE_MIGRATIONS[version - 1];
         if (!migration) throw new Error(`Missing database migration ${version}.`);
         database.exec(migration);
-        if (version === 8 && database.prepare("pragma foreign_key_check;").all().length)
+        if (rebuildsProviders && database.prepare("pragma foreign_key_check;").all().length)
           throw new Error("Provider migration failed foreign key validation.");
         database.exec(`pragma user_version = ${version};`);
         database.exec("commit;");
+        transactionOpen = false;
       } catch (error) {
-        database.exec("rollback;");
+        if (transactionOpen) database.exec("rollback;");
         throw error;
       } finally {
-        if (version === 8) database.exec("pragma foreign_keys = on;");
+        if (rebuildsProviders) database.exec("pragma foreign_keys = on;");
       }
     }
     return database;

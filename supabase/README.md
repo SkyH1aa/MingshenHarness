@@ -14,7 +14,9 @@
 
 只通过 SQL Editor、服务端任务或 Supabase Dashboard 写入发布记录。`anon` 角色不能直接写表。
 
-当前源码版本为1.3.6。本轮 500 MiB 图片导入/导出预算和 ZIP 进度已包含在最终本地包中；[publish-release-1.3.6.sql](publish-release-1.3.6.sql) 使用该 ZIP 的实际 SHA-256 与字节数，公开 HTTPS 下载直链保留占位，维护者上传后必须在执行前替换。旧版 1.3.6、1.3.5 或更早 ZIP 元数据均不能替代当前包。最近已保留完整发布事实的1.3.5对应 [publish-release-1.3.5.sql](publish-release-1.3.5.sql)，仅作历史材料。执行前须确认已部署0003，并在Supabase SQL Editor手动运行发布脚本；本次没有执行云端SQL。下方仍为结构示例，不能原样执行。`publish-release-1.3.3.sql`保留1.3.3历史发布元数据，`publish-release-1.3.2.sql`、`publish-release-1.3.1.sql`和`publish-release.sql`分别保留1.3.2/1.3.1/1.3.0历史元数据。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；不要将分享网页标记为ZIP直链。
+当前源码版本为1.3.7，已按最新正式 ZIP 的实际 SHA-256 和字节数生成 [publish-release-1.3.7.sql](publish-release-1.3.7.sql)。按维护者要求，脚本的 `v_download_url` 留空；先填入公开 HTTPS ZIP 直链，再在 Supabase SQL Editor 以项目所有者身份手动执行。留空时脚本会在写入前抛错并回滚，避免误发空地址。`ON CONFLICT(version)` 会更新并重新激活已有1.3.7记录；已安装同版本的客户端需要手动运行新版安装器。
+
+包元数据取自 `apps/desktop/release-artifacts/MingshenHarness-1.3.7-x64.zip.json` 和同名 `.sha256`，最终独立核验见根目录 `AGENT.md` 第98节。本次未执行云端SQL。1.3.6 的 [publish-release-1.3.6.sql](publish-release-1.3.6.sql) 仅保留历史，不得用于1.3.7；同版本旧包的SHA和大小也不能复用。执行前须确认已部署0001和0003。下方仍为结构示例，不能原样执行。`publish-release-1.3.3.sql`保留1.3.3历史发布元数据，`publish-release-1.3.2.sql`、`publish-release-1.3.1.sql`和`publish-release.sql`分别保留1.3.2/1.3.1/1.3.0历史元数据。历史过渡版1.2.6的 `publish-release-1.2.6.sql` 保留下载网页（`page`，哈希/大小为空）示例；不要将分享网页标记为ZIP直链。
 
 ```sql
 insert into public.mingshen_app_releases (
@@ -25,7 +27,7 @@ insert into public.mingshen_app_releases (
   is_active, package_format, package_sha256, package_size
 )
 values (
-  '1.3.6',
+  '1.3.7',
   'REPLACE_WITH_PUBLIC_HTTPS_ZIP_URL',
   '修复 ...',
   now(),
@@ -33,7 +35,7 @@ values (
 );
 ```
 
-`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链；该字段为 `NOT NULL` 且有 HTTPS 约束，不能写空字符串，未取得直链时使用 `REPLACE_WITH_PUBLIC_HTTPS_ZIP_URL` 占位并在执行前替换。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。`publish-release-1.3.5.sql` 保留1.3.5历史正式包元数据；1.3.6脚本只对应当前最终 ZIP，不得复用其他1.3.6包、旧版本元数据或空地址。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
+`version` 必须严格符合 `x.x.x`，每段 1 到 3 位数字。1.2.7 起 `download_page_url` 沿用字段名但填写公开 HTTPS ZIP 直链；该字段为 `NOT NULL` 且有 HTTPS 约束，不能向表写入空字符串。新版脚本可将待填写地址暂存为空变量，但必须保留写入前阻断并在执行前填好。`package_format='zip'` 必须附 ZIP 的 SHA-256；`package_size` 是实际字节数。`publish-release-1.3.5.sql` 和 `publish-release-1.3.6.sql` 分别保留对应历史正式包元数据；1.3.7 脚本已在最终包生成后创建，重新打包必须重算SHA和字节数。`package-win.cmd` 在生成 EXE 后自动生成 ZIP、哈希和 JSON，已有 EXE 可用 `node scripts/create-update-zip.cjs <EXE路径>`。
 
 1.3.3 ZIP为318504814字节（303.75 MiB），SHA-256为`39039e54ec234f0c23ce629a6cb81aac5f26f979a264ff6f60f390f245d12d90`，对应`MingshenHarness-1.3.3-x64.zip`；下载地址已填为维护者提供的`SkyH1aa/MingshenHarness`仓库`V1.3.3` Release资产直链。ZIP根目录只有同版本安装EXE，解压长度319403978字节，其SHA-256与旁置EXE一致，安装器ProductVersion为1.3.3。本次未重新下载远端ZIP验证内容。旧版本SQL保留各自实际元数据，不混用。相同版本重新发布不会触发已安装同版本客户端的升级提示。本轮只生成发布文件，没有执行云端SQL或上传包。
 

@@ -422,7 +422,7 @@ describe("workbench runtime boundaries", () => {
       f.db.close();
     }
   });
-  it("resumes the same conversation with its latest edited plan, todo statuses and breakpoints", async () => {
+  it("submits the latest edited plan for resume without mutating it before request admission", async () => {
     const f = fixture();
     try {
       f.repository.updateSession(f.session.id, { status: "interrupted" });
@@ -484,10 +484,11 @@ describe("workbench runtime boundaries", () => {
       expect(input?.text).toContain('"status":"in_progress"');
       expect(input?.text).toContain('"breakpoints":["verify"]');
       expect(input?.text).toContain("不自动重放");
+      expect(send.mock.calls[0]?.slice(1)).toEqual([undefined, true]);
       const resumed = f.chat.workbench.state(f.session.id);
       expect(resumed.plan).toMatchObject({
-        revision: edited.revision + 1,
-        paused: false,
+        revision: edited.revision,
+        paused: true,
         steps: edited.steps.map(({ updatedAt: _time, ...item }) => item),
         breakpoints: ["verify"],
       });

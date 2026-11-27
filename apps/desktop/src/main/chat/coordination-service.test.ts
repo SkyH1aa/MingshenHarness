@@ -146,4 +146,31 @@ describe("CoordinationService", () => {
 
     expect(new CoordinationService(f.repository).state(input.sessionId)).toEqual(finished);
   });
+
+  it("requires canonical plan association and persists the linked step", () => {
+    const f = fixture();
+    const linked = new CoordinationService(f.repository, undefined, {
+      requirePlanAssociation: true,
+      linkPlanTasks: () => [
+        { taskId: "task", planStepId: "plan-task" },
+        { taskId: "qa", planStepId: "plan-qa", kind: "qa" },
+      ],
+    });
+    expect(linked.start(input)).toMatchObject({
+      tasks: [
+        {
+          planStepId: "plan-task",
+          status: "queued",
+        },
+      ],
+      qa: {
+        planStepId: "plan-qa",
+        status: "not_run",
+      },
+    });
+    const missing = new CoordinationService(f.repository, undefined, {
+      requirePlanAssociation: true,
+    });
+    expect(() => missing.start({ ...input, sessionId: "other" })).toThrow("canonical plan step");
+  });
 });

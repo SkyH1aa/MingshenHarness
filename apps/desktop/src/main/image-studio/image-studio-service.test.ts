@@ -14,6 +14,7 @@ import { createCanvas } from "@napi-rs/canvas";
 import { unzipSync } from "fflate";
 import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProviderProtocol } from "../../shared/domain";
 import {
   DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS,
   emptyImageStudioWorkspace,
@@ -134,14 +135,14 @@ function asset(id: string): ImageStudioAsset {
   };
 }
 
-async function visionFixture() {
+async function visionFixture(protocol: ProviderProtocol = "openai_chat_completions") {
   const database = openDatabase(":memory:");
   databases.push(database);
   const repository = new Repository(database);
   const provider = repository.insertProvider({
     name: "Vision fixture",
     baseUrl: "https://images.invalid/v1",
-    protocol: "openai_chat_completions",
+    protocol,
     authMode: "bearer",
     customHeaderName: null,
   });
@@ -184,14 +185,14 @@ async function visionFixture() {
   };
 }
 
-async function imageOutputFixture() {
+async function imageOutputFixture(protocol: ProviderProtocol = "openai_chat_completions") {
   const database = openDatabase(":memory:");
   databases.push(database);
   const repository = new Repository(database);
   const provider = repository.insertProvider({
     name: "Image output fixture",
     baseUrl: "https://images.invalid/v1",
-    protocol: "openai_chat_completions",
+    protocol,
     authMode: "bearer",
     customHeaderName: null,
   });
@@ -1520,38 +1521,73 @@ describe("image studio workspace safety", () => {
     await service.dispose();
   });
 
-  it("ignores reference ids and uses the JSON generations endpoint when reference mode is off", async () => {
-    const { service, model } = await imageOutputFixture();
-    const fetchMock = vi.fn(
-      async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> =>
-        Response.json({ data: [{ b64_json: TINY_PNG_BASE64 }] }),
-    );
+  it.each(["openai_images", "openai_chat_completions", "openai_responses"] as const)(
+    "%s uses the Images JSON endpoint without chat or asynchronous fields",
+    async (protocol) => {
+      const { service, model } = await imageOutputFixture(protocol);
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+          Response.json({ data: [{ b64_json: TINY_PNG_BASE64 }] }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await service.generate({
+        requestId: "generate-with-references-off",
+        model,
+        prompt: "Generate without references",
+        generation: {
+          ...DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS,
+          resolution: "auto",
+          aspectRatio: "auto",
+          referenceEnabled: false,
+        },
+        referenceAssetIds: ["../outside"],
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+        "https://images.invalid/v1/images/generations",
+      );
+      const init = fetchMock.mock.calls[0]?.[1];
+      expect(init?.headers).toMatchObject({ "content-type": "application/json" });
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        model: "image-model",
+        prompt: "Generate without references",
+        size: "auto",
+      });
+      for (const field of [
+        "messages",
+        "input",
+        "stream",
+        "async",
+        "response_format",
+        "max_tokens",
+        "max_output_tokens",
+      ])
+        expect(JSON.parse(String(init?.body))).not.toHaveProperty(field);
+      await service.dispose();
+    },
+  );
+
+  it("rejects Images-only providers for prompt polishing and reverse prompting even with a malformed text model", async () => {
+    const { service, model, importedAsset } = await visionFixture("openai_images");
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-
-    await service.generate({
-      requestId: "generate-with-references-off",
-      model,
-      prompt: "Generate without references",
-      generation: {
-        ...DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS,
-        resolution: "auto",
-        aspectRatio: "auto",
-        referenceEnabled: false,
-      },
-      referenceAssetIds: ["../outside"],
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-      "https://images.invalid/v1/images/generations",
-    );
-    const init = fetchMock.mock.calls[0]?.[1];
-    expect(init?.headers).toMatchObject({ "content-type": "application/json" });
-    expect(JSON.parse(String(init?.body))).toMatchObject({
-      model: "image-model",
-      prompt: "Generate without references",
-      size: "auto",
-    });
+    await expect(
+      service.polishPrompt({
+        requestId: "images-must-not-polish",
+        model,
+        prompt: "Polish this image idea",
+      }),
+    ).rejects.toThrow("所选模型不是文本输出模型");
+    await expect(
+      service.reversePrompt({
+        requestId: "images-must-not-reverse",
+        model,
+        assetId: importedAsset.id,
+      }),
+    ).rejects.toThrow("所选语言模型未启用图片输入");
+    expect(fetchMock).not.toHaveBeenCalled();
     await service.dispose();
   });
 
@@ -1587,65 +1623,68 @@ describe("image studio workspace safety", () => {
     await service.dispose();
   });
 
-  it("sends only the first three unique references as ordered multipart images", async () => {
-    const { service, model } = await imageOutputFixture();
-    const dataUrls = ["red", "green", "blue", "white"].map(colorPngDataUrl);
-    const imported = await service.importAssets(
-      dataUrls.map((dataUrl, index) => ({
-        name: `reference-${index + 1}.png`,
-        dataUrl,
-      })),
-    );
-    const referenceIds = imported.assets.map((item) => item.id);
-    expect(referenceIds).toHaveLength(4);
-    const fetchMock = vi.fn(
-      async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> =>
-        Response.json({ data: [{ b64_json: TINY_PNG_BASE64 }] }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await service.generate({
-      requestId: "generate-three-references",
-      model,
-      prompt: "Use three ordered references",
-      generation: {
-        ...DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS,
-        resolution: "auto",
-        aspectRatio: "auto",
-        referenceEnabled: true,
-      },
-      referenceAssetIds: [
-        referenceIds[0] as string,
-        referenceIds[1] as string,
-        referenceIds[0] as string,
-        referenceIds[2] as string,
-        referenceIds[3] as string,
-      ],
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://images.invalid/v1/images/edits");
-    const init = fetchMock.mock.calls[0]?.[1];
-    expect(init?.headers).not.toHaveProperty("content-type");
-    expect(init?.body).toBeInstanceOf(FormData);
-    const form = init?.body as FormData;
-    expect(form.get("model")).toBe("image-model");
-    expect(form.get("prompt")).toBe("Use three ordered references");
-    expect(form.get("size")).toBe("auto");
-    expect(form.get("n")).toBe("1");
-    expect(form.getAll("image")).toEqual([]);
-    const images = form.getAll("image[]");
-    expect(images).toHaveLength(3);
-    for (const [index, image] of images.entries()) {
-      expect(image).not.toBeTypeOf("string");
-      const blob = image as Blob;
-      expect(blob.type).toBe("image/png");
-      expect(Buffer.from(await blob.arrayBuffer())).toEqual(
-        bytesFromDataUrl(dataUrls[index] as string),
+  it.each(["openai_images", "openai_chat_completions", "openai_responses"] as const)(
+    "%s sends only the first three unique references as ordered multipart images",
+    async (protocol) => {
+      const { service, model } = await imageOutputFixture(protocol);
+      const dataUrls = ["red", "green", "blue", "white"].map(colorPngDataUrl);
+      const imported = await service.importAssets(
+        dataUrls.map((dataUrl, index) => ({
+          name: `reference-${index + 1}.png`,
+          dataUrl,
+        })),
       );
-    }
-    await service.dispose();
-  });
+      const referenceIds = imported.assets.map((item) => item.id);
+      expect(referenceIds).toHaveLength(4);
+      const fetchMock = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+          Response.json({ data: [{ b64_json: TINY_PNG_BASE64 }] }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await service.generate({
+        requestId: "generate-three-references",
+        model,
+        prompt: "Use three ordered references",
+        generation: {
+          ...DEFAULT_IMAGE_STUDIO_GENERATION_SETTINGS,
+          resolution: "auto",
+          aspectRatio: "auto",
+          referenceEnabled: true,
+        },
+        referenceAssetIds: [
+          referenceIds[0] as string,
+          referenceIds[1] as string,
+          referenceIds[0] as string,
+          referenceIds[2] as string,
+          referenceIds[3] as string,
+        ],
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://images.invalid/v1/images/edits");
+      const init = fetchMock.mock.calls[0]?.[1];
+      expect(init?.headers).not.toHaveProperty("content-type");
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect(form.get("model")).toBe("image-model");
+      expect(form.get("prompt")).toBe("Use three ordered references");
+      expect(form.get("size")).toBe("auto");
+      expect(form.get("n")).toBe("1");
+      expect(form.getAll("image")).toEqual([]);
+      const images = form.getAll("image[]");
+      expect(images).toHaveLength(3);
+      for (const [index, image] of images.entries()) {
+        expect(image).not.toBeTypeOf("string");
+        const blob = image as Blob;
+        expect(blob.type).toBe("image/png");
+        expect(Buffer.from(await blob.arrayBuffer())).toEqual(
+          bytesFromDataUrl(dataUrls[index] as string),
+        );
+      }
+      await service.dispose();
+    },
+  );
 
   it("uses the singular image field for one reference", async () => {
     const { service, model } = await imageOutputFixture();

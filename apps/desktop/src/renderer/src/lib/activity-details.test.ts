@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ActivityEvent, SessionMessage } from "../../../shared/domain";
 import {
   activityDetailsText,
+  collectActiveToolDetails,
   collectToolDetails,
   formatToolArguments,
   toolDetailsForActivity,
@@ -270,6 +271,57 @@ describe("activity detail disclosure", () => {
       toolDetailsForMessage(tools, "message", "pipe"),
     );
     expect(activityDetailsText(completed, tools)).toContain("INITIAL_OUTPUT");
+  });
+
+  it("only treats a running tool without a persisted result as active", () => {
+    const callId = "retry-visible";
+    const tools = collectToolDetails([
+      message([
+        {
+          type: "tool_call",
+          callId,
+          name: "write_file",
+          arguments: '{"path":"notes.md","content":"complete"}',
+          status: "completed",
+        },
+      ]),
+      message([{ type: "tool_result", callId, output: "written", isError: false }], {
+        id: "result",
+        seq: 2,
+        createdAt: "2026-11-09T00:00:01.000Z",
+      }),
+    ]);
+    const running = {
+      ...activity(`run:${callId}`),
+      toolName: "write_file",
+      status: "running" as const,
+      completedAt: null,
+    };
+    expect(collectActiveToolDetails([running], tools).size).toBe(0);
+
+    const pendingCallId = "retry-pending";
+    const pendingTools = collectToolDetails([
+      message(
+        [
+          {
+            type: "tool_call",
+            callId: pendingCallId,
+            name: "write_file",
+            arguments: '{"path":"pending.md","content":"pending"}',
+            status: "running",
+          },
+        ],
+        { id: "pending-call", seq: 2, createdAt: "2026-11-09T00:00:01.000Z" },
+      ),
+    ]);
+    const pending = {
+      ...running,
+      id: `run:${pendingCallId}`,
+      startedAt: "2026-11-09T00:00:01.000Z",
+    };
+    const active = collectActiveToolDetails([pending], pendingTools);
+    expect(active).toHaveLength(1);
+    expect([...active][0]).toBe(toolDetailsForActivity(pending, pendingTools));
   });
 
   it("does not guess between ambiguous calls or attach another session's result", () => {

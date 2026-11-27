@@ -29,6 +29,9 @@ export function validatePromptCachingSettings(
   value: unknown,
   protocol: ProviderProtocol,
 ): PromptCachingSettings {
+  if (protocol === "openai_images") {
+    throw new Error("OpenAI Images 协议不支持提示缓存。");
+  }
   const result = promptCachingSettingsSchema.safeParse(value);
   if (!result.success) throw new Error("缓存配置无效，请重新选择缓存方式和保留时间。");
   if (

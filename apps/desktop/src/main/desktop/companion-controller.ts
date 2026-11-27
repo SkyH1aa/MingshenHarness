@@ -18,6 +18,7 @@ import {
   normalizeCompanionPreferences,
 } from "../../shared/desktop-companion";
 import type { ChatStreamEvent } from "../../shared/domain";
+import { RUNTIME_TERMINAL_STATUSES } from "../../shared/runtime";
 import type { Repository } from "../storage/repository";
 
 const PREFERENCES_SETTING_KEY = "desktop.companion.preferences.v1";
@@ -163,6 +164,7 @@ export class CompanionController {
   >();
   private readonly terminalRuns = new Set<string>();
   private readonly activeRunActivity = new Set<string>();
+  private readonly runtimeWaitingRuns = new Set<string>();
   private readonly approvalRunById = new Map<string, string>();
   private readonly questionRunById = new Map<string, string>();
   private disposed = false;
@@ -200,6 +202,7 @@ export class CompanionController {
 
   getState(): CompanionState {
     const waitingRuns = new Set([
+      ...this.runtimeWaitingRuns,
       ...this.approvalRunById.values(),
       ...this.questionRunById.values(),
     ]);
@@ -506,6 +509,49 @@ export class CompanionController {
     if (this.disposed) return;
     const runId = "runId" in event ? runKey(event.sessionId, event.runId) : null;
     switch (event.type) {
+      case "runtime_run_updated": {
+        if (!runId || this.terminalRuns.has(runId)) return;
+        const status = event.run.status;
+        if (RUNTIME_TERMINAL_STATUSES.has(status)) {
+          this.runtimeWaitingRuns.delete(runId);
+          this.finishRun(
+            runId,
+            status === "completed"
+              ? "success"
+              : status === "failed" || status === "blocked_policy"
+                ? "error"
+                : "idle",
+          );
+          break;
+        }
+        if (!this.activeRuns.has(runId)) {
+          const session = this.repository.getSession(event.sessionId);
+          if (!session || session.archived) return;
+          const startedAt = Date.parse(event.run.startedAt ?? event.run.createdAt);
+          this.runDetails.set(runId, {
+            sessionId: event.sessionId,
+            runId: event.run.runId,
+            title: sanitizeSessionTitle(session.title),
+            startedAt: Number.isFinite(startedAt) ? startedAt : this.now(),
+          });
+          this.activeRuns.add(runId);
+          this.automaticGreeting = false;
+          if (this.preferences.taskPanelEnabled) this.taskPanelOpen = true;
+          if (this.motionRequest?.source === "idle") this.motionRequest = null;
+          this.clearIdleTimer();
+          this.clearTransientMoodTimer();
+        }
+        if (status === "waiting_approval" || status === "waiting_user") {
+          this.runtimeWaitingRuns.add(runId);
+          this.activeRunActivity.add(runId);
+        } else {
+          this.runtimeWaitingRuns.delete(runId);
+          this.clearWaitingApprovals(runId);
+        }
+        this.mood = this.activeMood();
+        this.setActiveTaskMessage();
+        break;
+      }
       case "run_started":
         if (!runId || this.terminalRuns.has(runId) || this.activeRuns.has(runId)) return;
         {
@@ -1085,6 +1131,7 @@ export class CompanionController {
     this.activeRuns.delete(runId);
     this.runDetails.delete(runId);
     this.activeRunActivity.delete(runId);
+    this.runtimeWaitingRuns.delete(runId);
     this.terminalRuns.add(runId);
     if (this.terminalRuns.size > MAX_TERMINAL_RUNS) {
       const oldest = this.terminalRuns.values().next().value;
@@ -1134,9 +1181,21 @@ export class CompanionController {
 
   private hasWaitingRun(): boolean {
     const active = this.activeRuns;
-    return [...this.approvalRunById.values(), ...this.questionRunById.values()].some((runId) =>
-      active.has(runId),
+    return (
+      [...this.runtimeWaitingRuns].some((runId) => active.has(runId)) ||
+      [...this.approvalRunById.values(), ...this.questionRunById.values()].some((runId) =>
+        active.has(runId),
+      )
     );
+  }
+
+  private clearWaitingApprovals(runId: string): void {
+    for (const [id, waitingRunId] of this.approvalRunById) {
+      if (waitingRunId === runId) this.approvalRunById.delete(id);
+    }
+    for (const [id, waitingRunId] of this.questionRunById) {
+      if (waitingRunId === runId) this.questionRunById.delete(id);
+    }
   }
 
   private replaceWaitingRuns(target: Map<string, string>, entries: Array<[string, string]>): void {

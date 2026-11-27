@@ -72,6 +72,7 @@ function fixture(
       { role: "user", parts: [{ type: "text", text: "Continue the project" }] },
     ]),
     listSessionTodos: vi.fn(() => []),
+    replaceSessionTodos: vi.fn(),
     getSetting: vi.fn((key: string) => settings.get(key)),
     setSetting: vi.fn((key: string, value: unknown) => settings.set(key, value)),
     getAgentProfile: vi.fn((id: string) => profiles.find((entry) => entry.id === id) ?? null),

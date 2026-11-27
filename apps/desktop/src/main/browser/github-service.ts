@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { GitHubConnectionStatus } from "../../shared/domain";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
 import { maskSecret, type SecretStore } from "../storage/secret-store";
 
@@ -34,6 +35,7 @@ interface GitHubConnectionRecord {
 const CONNECTION_SETTING = "github.connection";
 
 export class GitHubService {
+  private managedPolicy: ManagedPolicyService | null = null;
   private startingAuthorization: AbortController | null = null;
   private deviceFlow: {
     deviceCode: string;
@@ -51,6 +53,10 @@ export class GitHubService {
     private readonly secretStore: SecretStore,
   ) {}
 
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
+
   async startDeviceAuthorization(
     clientId: string,
   ): Promise<{ userCode: string; verificationUrl: string; expiresAt: number }> {
@@ -58,6 +64,7 @@ export class GitHubService {
       throw new Error(
         "请输入为 Mingshen 注册且启用 Device Flow 的 GitHub App/OAuth App Client ID。",
       );
+    this.assertNetworkAllowed("GitHub 设备授权");
     this.cancelDeviceAuthorization();
     const controller = new AbortController();
     this.startingAuthorization = controller;
@@ -139,6 +146,7 @@ export class GitHubService {
     }
     this.polling = true;
     try {
+      this.assertNetworkAllowed("GitHub 授权轮询");
       await delay(Math.max(0, flow.nextPoll - Date.now()), undefined, {
         signal: flow.controller.signal,
       });
@@ -251,6 +259,7 @@ export class GitHubService {
       return { output: "GitHub 搜索关键词不能为空。", isError: true };
     }
     try {
+      this.assertNetworkAllowed("GitHub 仓库搜索");
       const payload = await this.request<GitHubSearchResponse>(
         `/search/repositories?q=${encodeURIComponent(normalized)}&sort=stars&order=desc&per_page=${Math.min(Math.max(limit, 1), 20)}`,
       );
@@ -279,6 +288,7 @@ export class GitHubService {
     args: Record<string, unknown>,
   ): Promise<{ output: string; isError: boolean }> {
     try {
+      this.assertNetworkAllowed(`GitHub 工具 ${toolName}`);
       switch (toolName) {
         case "github_search_repositories":
           return await this.searchRepositories(
@@ -408,6 +418,7 @@ export class GitHubService {
     } = {},
     tokenOverride?: string,
   ): Promise<T> {
+    this.assertNetworkAllowed("GitHub API 请求");
     const token = tokenOverride ?? this.getToken();
     if (!token && (init.method ?? "GET") !== "GET") {
       throw new Error("该 GitHub 写操作需要先连接 GitHub Token。");
@@ -449,6 +460,11 @@ export class GitHubService {
       output: `${action}失败：${error instanceof Error ? error.message : String(error)}`,
       isError: true,
     };
+  }
+
+  private assertNetworkAllowed(operation: string): void {
+    this.managedPolicy?.assertOperational(operation);
+    this.managedPolicy?.assertCapability("network.request", { approved: true });
   }
 }
 

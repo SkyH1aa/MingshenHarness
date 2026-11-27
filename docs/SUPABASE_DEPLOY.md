@@ -45,7 +45,7 @@ select * from public.mingshen_get_latest_release_v2();
 
 ## 3. 发布新版本
 
-本地源码目标版本为 **1.3.6**。本轮 500 MiB 图片导入/导出预算和批量 ZIP 进度已包含在最终本地包中；[supabase/publish-release-1.3.6.sql](../supabase/publish-release-1.3.6.sql) 的 ZIP 哈希与大小对应该包的实际文件，下载直链仍为维护者待替换的 HTTPS 占位。上传最终 ZIP 后须填入真实公开直链再执行 SQL；不能复用过去任何 1.3.6、1.3.5 或更早版本的 ZIP 哈希、大小与直链。维护者曾于2026-11-19自行完成 **1.3.3** 打包；[supabase/publish-release-1.3.3.sql](../supabase/publish-release-1.3.3.sql) 只保留该包已核对的历史事实。发布记录需包含以下字段并手动执行：
+本地源码目标版本为 **1.3.7**。创建 `publish-release-1.3.7.sql` 时，必须使用文档冻结后最终 ZIP 的实际哈希、大小及维护者提供的公开 HTTPS 直链；本轮未要求创建或执行发布 SQL。产物元数据见 `apps/desktop/release-artifacts/MingshenHarness-1.3.7-x64.zip.json` 和同名 `.sha256`，交付核验记录见根目录 `AGENT.md` 的 1.3.7 节。不能复用过去任何 1.3.6、1.3.5 或更早版本的 ZIP 哈希、大小与直链。维护者曾于2026-11-19自行完成 **1.3.3** 打包；[supabase/publish-release-1.3.3.sql](../supabase/publish-release-1.3.3.sql) 只保留该包已核对的历史事实。发布记录需包含以下字段并手动执行：
 
 历史过渡版 **1.2.6** 使用 `supabase/publish-release-1.2.6.sql`：执行 0003 后填 `package_format='page'`，哈希及大小为 `null`，旧客户端仍在默认浏览器打开下载网页。脚本保留维护者提供的分享页，执行前确认其中安装包已换为对应版本，或替换为正确地址。安装 1.2.6 或更新版本后，后续 ZIP 自动更新才由新客户端处理；不要把分享网页标成 `zip`。
 
@@ -77,21 +77,21 @@ select * from public.mingshen_get_latest_release_v2();
 .\package-win.cmd
 ```
 
-该入口按当前源码版本生成 EXE 后自动生成同名 ZIP、`.zip.sha256` 和 `.zip.json`，输出至 `apps/desktop/release-artifacts`。2026-11-19维护者自行生成的1.3.3安装包继续作为历史产物保留；1.3.6 需从新构建重新计算全部元数据。生成新安装包后也可单独执行：
+该入口按当前源码版本生成 EXE 后自动生成同名 ZIP、`.zip.sha256` 和 `.zip.json`，输出至 `apps/desktop/release-artifacts`。2026-11-19维护者自行生成的1.3.3安装包继续作为历史产物保留；1.3.7 需从新构建重新计算全部元数据。生成新安装包后也可单独执行：
 
 ```powershell
-node scripts/create-update-zip.cjs "apps/desktop/release-artifacts/MingshenHarness-1.3.6-x64.exe"
+node scripts/create-update-zip.cjs "apps/desktop/release-artifacts/MingshenHarness-1.3.7-x64.exe"
 ```
 
-1.3.6 ZIP 根目录必须只有 `MingshenHarness-1.3.6-x64.exe`，无额外脚本、EXE、链接或嵌套安装器目录。上传 **ZIP** 到支持直链下载的服务，再把 JSON 中的版本、ZIP 哈希和大小填入对应发布 SQL；公开 HTTPS 直链尚不可用时保留占位符，执行 SQL 前再替换。客户端不会猜下载网页中的按钮，不需要下载 `.sha256/.json` 旁文件，也不携带 Supabase Key、模型 Key 或浏览器 Cookie 下载。
+1.3.7 ZIP 根目录必须只有 `MingshenHarness-1.3.7-x64.exe`，无额外脚本、EXE、链接或嵌套安装器目录。上传 **ZIP** 到支持直链下载的服务，再把 JSON 中的版本、ZIP 哈希和大小填入对应发布 SQL；公开 HTTPS 直链尚不可用时保留占位符，执行 SQL 前再替换。客户端不会猜下载网页中的按钮，不需要下载 `.sha256/.json` 旁文件，也不携带 Supabase Key、模型 Key 或浏览器 Cookie 下载。
 
-打包后在仓库根目录查看1.3.6发布元数据：
+打包后在仓库根目录查看1.3.7发布元数据：
 
 ```powershell
-Get-Content .\apps\desktop\release-artifacts\MingshenHarness-1.3.6-x64.zip.json
+Get-Content .\apps\desktop\release-artifacts\MingshenHarness-1.3.7-x64.zip.json
 ```
 
-发布后若 RPC 仍返回较高的测试版本（例如 `8.8.8`），需由维护者确认并停用该测试记录；客户端按数值选择最高生效版本，不会用 `1.3.6` 覆盖它。
+发布后若 RPC 仍返回较高的测试版本（例如 `8.8.8`），需由维护者确认并停用该测试记录；客户端按数值选择最高生效版本，不会用 `1.3.7` 覆盖它。
 
 1.2.6 用户逐次确认后后台下载/校验/解压，等待活跃会话结束、关闭数据库后启动安装器。取消/失败不执行，重启不自动执行旧缓存。旧客户端的四字段 RPC 不变，仍会把 ZIP URL 交给浏览器；旧网页记录在新客户端中仍为手动更新。SHA-256 检查不等于代码签名，ZIP 不能保证绕过 Windows SmartScreen 或组织风控。
 

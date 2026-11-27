@@ -253,6 +253,7 @@ const errors: Record<string, string> = {
   "API Key 不属于该供应商。": "API key does not belong to this provider.",
   "API Key 不能为空。": "API key is required.",
   "该供应商没有可用的 API Key。": "No usable API key is configured for this provider.",
+  "连接测试未检测到可用的图片结果。": "The connection test did not find a usable image result.",
   "模型列表不是有效 JSON。": "Model list is not valid JSON.",
   "供应商返回的模型列表为空或格式不受支持。":
     "Provider returned an empty or unsupported model list.",

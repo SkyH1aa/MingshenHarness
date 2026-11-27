@@ -847,6 +847,19 @@
   }
 }
 
+@media (max-width: 600px) {
+  .app-topbar .agent-mode-switcher__mode {
+    width: 30px;
+    min-width: 30px;
+    padding: 0;
+    gap: 0;
+  }
+
+  .app-topbar .agent-mode-switcher__mode span {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agent-mode-switcher__mode {
     transition: none;

@@ -145,10 +145,11 @@ export class AutomaticApprovalService {
     if (!provider || !model)
       throw new Error("APPROVAL_MODEL_REQUIRED: 请先在设置的权限与安全中配置审批模型。");
     try {
-      this.providers.getActiveApiKey(provider.id);
-    } catch {
+      this.providers.getActiveApiKey(provider.id, { modelConfigId: model.id });
+    } catch (cause) {
       throw new Error(
-        "APPROVAL_MODEL_REQUIRED: 审批模型的 API Key 不可用，请在设置中检查供应商凭据。",
+        `APPROVAL_MODEL_REQUIRED: 审批模型不可用，请在设置中检查供应商凭据或管理策略。${cause instanceof Error ? ` ${cause.message}` : ""}`,
+        { cause },
       );
     }
     return { provider, model };
@@ -174,7 +175,11 @@ export class AutomaticApprovalService {
     const secrets: string[] = [];
     for (const candidate of candidates) {
       try {
-        secrets.push(this.providers.getActiveApiKey(candidate.providerId));
+        secrets.push(
+          this.providers.getActiveApiKey(candidate.providerId, {
+            modelConfigId: candidate.modelId,
+          }),
+        );
       } catch {
         /* An unavailable credential is reported by its attempt. */
       }
@@ -241,10 +246,14 @@ export class AutomaticApprovalService {
     onProgress?: (reason: string) => void,
   ): Promise<ApprovalReviewResult> {
     const { provider, model } = this.model(settings);
-    const apiKey = this.providers.getActiveApiKey(provider.id);
+    const apiKey = this.providers.getActiveApiKey(provider.id, { modelConfigId: model.id });
     const timeout = AbortSignal.timeout(45_000);
     const reviewSignal = AbortSignal.any([signal, timeout]);
     reviewSignal.throwIfAborted();
+    const policyHook =
+      typeof this.providers.managedPolicyRequestHook === "function"
+        ? this.providers.managedPolicyRequestHook()
+        : undefined;
     let text = "";
     for await (const event of streamModelTurn({
       provider,
@@ -266,6 +275,7 @@ export class AutomaticApprovalService {
       tools: [],
       maxOutputTokens: Math.min(4096, model.maxOutputTokens),
       signal: reviewSignal,
+      ...(policyHook ? { beforeEachRequest: policyHook } : {}),
       retry: {
         ...normalizeModelRetrySettings(this.repository.getSetting(MODEL_RETRY_SETTING)),
         onRetry: ({ attempt, maxRetries, error }) => {

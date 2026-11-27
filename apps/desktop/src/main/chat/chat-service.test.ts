@@ -83,6 +83,7 @@ describe("Chat MCP routing", () => {
       expect.any(Function),
       {},
       [extension.id],
+      { policyApproved: true },
     );
   });
 
@@ -606,7 +607,7 @@ process.exit(1);`,
     );
     const closing = chat.shutdown();
     release();
-    await expect(pending).rejects.toThrow("shutting down");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await closing;
     await expect(chat.send({ sessionId: "session", text: "Too late" })).rejects.toThrow(
       "shutting down",
@@ -1265,12 +1266,12 @@ process.exit(1);`,
 
     await internal.availableTools(session, model, "run", signal);
     expect(internal.requestApproval).not.toHaveBeenCalled();
-    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set());
+    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set(), true);
 
     internal.runActivatedPlugins.set("run", new Set(["plugin-extension"]));
     await internal.availableTools(session, model, "run", signal);
     expect(internal.requestApproval).toHaveBeenCalledOnce();
-    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set([server.id]));
+    expect(discover).toHaveBeenLastCalledWith(false, null, new Set(), new Set([server.id]), true);
   });
   it("exposes web tools only when a ChatAgent session allows internet access", async () => {
     const chat = new ChatService({
@@ -1363,10 +1364,10 @@ process.exit(1);`,
       "read_file",
       "run_command",
     ]);
-    expect(discover).toHaveBeenCalledWith(true, null, undefined, new Set());
+    expect(discover).toHaveBeenCalledWith(true, null, undefined, new Set(), true);
     expect(custom).not.toHaveBeenCalled();
   });
-  it("exposes read-only MCP tools in Plan, executes them and remembers per-server approval", async () => {
+  it("hides and rejects third-party readOnlyHint MCP tools in read-only Plan", async () => {
     let calls = 0;
     const server = createServer(async (request, response) => {
       const buffers: Buffer[] = [];
@@ -1462,32 +1463,37 @@ process.exit(1);`,
         "use_plugin",
         "read_tool_output",
         "recall_context",
-        "mcp__fixture__lookup",
       ]);
-      const input = {
+      const lookup = await internal.executeToolCall({
         session,
         runId: "run",
         signal: new AbortController().signal,
         toolCall: {
-          name: tools.find((tool) => tool.name === "mcp__fixture__lookup")?.name,
+          name: "mcp__fixture__lookup",
           callId: "call",
           arguments: "{}",
         },
-      };
-      expect((await internal.executeToolCall(input)).output).toContain("actual MCP result");
-      expect((await internal.executeToolCall(input)).isError).toBe(false);
-      expect(approval).toHaveBeenCalledTimes(1);
-      expect(calls).toBe(2);
-      expect(
-        (
-          await internal.executeToolCall({
-            ...input,
-            toolCall: { ...input.toolCall, name: "mcp__fixture__mutate" },
-          })
-        ).isError,
-      ).toBe(true);
-      expect(calls).toBe(2);
-      expect((await mcp.callTool("fixture", "mutate", {})).isError).toBe(true);
+      });
+      expect(lookup).toMatchObject({ isError: true });
+      expect(lookup.output).toContain("不符合只读 Agent 策略");
+      expect(approval).not.toHaveBeenCalled();
+      expect(calls).toBe(0);
+
+      const mutate = await internal.executeToolCall({
+        session,
+        runId: "run",
+        signal: new AbortController().signal,
+        toolCall: {
+          name: "mcp__fixture__mutate",
+          callId: "call-mutate",
+          arguments: "{}",
+        },
+      });
+      expect(mutate).toMatchObject({ isError: true });
+      expect(mutate.output).toContain("不符合只读 Agent 策略");
+      expect(approval).not.toHaveBeenCalled();
+      expect(calls).toBe(0);
+
       await mcp.setEnabled("fixture", false);
       expect(await internal.availableTools(session, { toolCalls: true } as ModelConfig)).toEqual([
         expect.objectContaining({ name: "use_plugin" }),
@@ -1548,7 +1554,11 @@ process.exit(1);`,
           arguments: JSON.stringify({ path: "a.txt" }),
         },
       }),
-    ).resolves.toEqual({ output: "tool result", isError: false });
+    ).resolves.toMatchObject({
+      output: "tool result",
+      isError: false,
+      outcome: { status: "success", effect: "none", validation: { status: "validated" } },
+    });
 
     expect(performToolCall).toHaveBeenCalledOnce();
     expect(runPluginHooks).toHaveBeenNthCalledWith(
@@ -1760,6 +1770,7 @@ describe("Agent profile permission resolution", () => {
         expect.objectContaining({ id: "builtin:plugin-creator", source: "builtin" }),
         expect.objectContaining({ id: "builtin:harness-plugin-api", source: "builtin" }),
       ]),
+      { approved: true },
     );
     expect(runtime.requestApproval).not.toHaveBeenCalled();
   });

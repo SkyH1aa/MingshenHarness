@@ -46,6 +46,7 @@ import {
   XCircle,
 } from "lucide-react";
 import {
+  Fragment,
   type KeyboardEvent,
   memo,
   type SetStateAction,
@@ -99,6 +100,7 @@ import { getLocale, tr, useLocale } from "../i18n/index";
 import { runtimeText } from "../i18n/runtime";
 import {
   activityDetailsText,
+  collectActiveToolDetails,
   collectToolDetails,
   toolDetailsForActivity,
   toolDetailsForMessage,
@@ -110,7 +112,20 @@ import { clipboardImages, namedClipboardImage } from "../lib/clipboard-images";
 import type { DraftAttachment } from "../lib/composer-drafts";
 import { composerMarkdown } from "../lib/composer-markdown";
 import { revealPanelItem } from "../lib/floating-panel";
-import { formatCount, formatDuration, formatPath } from "../lib/format";
+import {
+  failedRuntimeRunStatus,
+  formatCount,
+  formatDuration,
+  formatPath,
+  isActiveRuntimeRunStatus,
+  runtimeRunStatusLabel,
+  toolOutcomeDetailLines,
+  toolOutcomeForActivity,
+  toolOutcomeForToolCall,
+  toolOutcomeHasRisk,
+  toolOutcomeInlineLabel,
+  toolOutcomeStatusLabel,
+} from "../lib/format";
 import { orbitTranscript } from "../lib/orbit-transcript";
 import {
   type BuiltinCommand,
@@ -543,7 +558,12 @@ export function ChatView({
   const approvalId = approval?.id ?? null;
   const approvalIdRef = useRef(approvalId);
   approvalIdRef.current = approvalId;
-  const waitingForRequest = session?.status === "waiting_approval" && !approval && !question;
+  const runtimeStatus = runState?.status ?? null;
+  const waitingForRequest =
+    (runtimeStatus === "waiting_approval" ||
+      (!runtimeStatus && session?.status === "waiting_approval")) &&
+    !approval &&
+    !question;
   const selectedModel = providers
     .find((provider) => provider.id === session?.providerId)
     ?.models.find((model) => model.id === session?.modelId);
@@ -602,14 +622,17 @@ export function ChatView({
     anchorComposer: true,
   });
   const running =
-    session?.status === "running" || session?.status === "waiting_approval" || Boolean(live);
+    Boolean(live) ||
+    (runtimeStatus
+      ? isActiveRuntimeRunStatus(runtimeStatus)
+      : session?.status === "running" || session?.status === "waiting_approval");
   const canSteerRun = Boolean(
     session &&
       !session.parentSessionId &&
       running &&
-      runState?.status === "running" &&
+      runtimeStatus === "running" &&
       steeringState?.accepting &&
-      steeringState.runId === runState.runId,
+      steeringState.runId === runState?.runId,
   );
   const steeringBlocker = steeringDraftBlocker(
     draft,
@@ -619,13 +642,24 @@ export function ChatView({
   );
   const activeToolDetails = useMemo(() => {
     if (!running || activities.length === 0) return noActiveToolDetails;
-    const calls = new Set<ToolDetail>();
-    for (const activity of activities) {
-      const call = toolDetailsForActivity(activity, toolDetails);
-      if (call) calls.add(call);
-    }
-    return calls;
+    return collectActiveToolDetails(activities, toolDetails);
   }, [running, activities, toolDetails]);
+  const settledDiagnostics = useMemo(() => {
+    if (running || live) return [];
+    return activities.filter(
+      (activity) =>
+        activity.toolName === "model_retry" ||
+        (activity.status === "failed" && !toolDetailsForActivity(activity, toolDetails)),
+    );
+  }, [running, live, activities, toolDetails]);
+  const displayedActivities = running || live ? activities : settledDiagnostics;
+  const reconnectingActivity = useMemo(
+    () =>
+      [...activities]
+        .reverse()
+        .find((activity) => activity.toolName === "model_retry" && activity.status === "running"),
+    [activities],
+  );
 
   useEffect(() => {
     const panel = slashMenuRef.current;
@@ -1752,15 +1786,17 @@ export function ChatView({
   );
   const statusLabel = question
     ? tr("等待回答")
-    : session.status === "waiting_approval"
+    : approval || runtimeStatus === "waiting_approval"
       ? tr("\u7B49\u5F85\u6279\u51C6")
-      : session.status === "running"
-        ? tr("\u6B63\u5728\u6267\u884C")
-        : session.status === "error"
-          ? tr("\u6267\u884C\u5931\u8D25")
-          : session.status === "interrupted"
-            ? tr("\u5DF2\u4E2D\u65AD")
-            : tr("\u5C31\u7EEA");
+      : runtimeStatus
+        ? runtimeRunStatusLabel(runtimeStatus)
+        : session.status === "running"
+          ? tr("\u6B63\u5728\u6267\u884C")
+          : session.status === "error"
+            ? tr("\u6267\u884C\u5931\u8D25")
+            : session.status === "interrupted"
+              ? tr("\u5DF2\u4E2D\u65AD")
+              : tr("\u5C31\u7EEA");
 
   const applyStarterPrompt = (text: string) => {
     if (interactionBlockedRef.current || !draftState.ready) return;
@@ -2006,6 +2042,7 @@ export function ChatView({
                   child={Boolean(session.parentSessionId)}
                   executionGroup={entry.execution}
                   toolDetails={toolDetails}
+                  messages={messages}
                   activeToolDetails={activeToolDetails}
                   onOpenWorkspace={onOpenWorkspace}
                   onRewriteMessage={onRewriteMessage}
@@ -2071,16 +2108,18 @@ export function ChatView({
               );
             })}
 
-            {activities.length > 0 && (running || Boolean(live)) ? (
+            {displayedActivities.length > 0 ? (
               <>
                 <ActivityTrail
-                  key={live?.runId ?? activities[0]?.runId}
+                  key={live?.runId ?? displayedActivities[0]?.runId}
                   orbit={orbit}
-                  activities={activities}
+                  activities={displayedActivities}
                   toolDetails={toolDetails}
+                  messages={messages}
                   onOpenFile={onOpenFile}
+                  settled={!running && !live}
                 />
-                {liveChangeCount > 0 ? (
+                {running && liveChangeCount > 0 ? (
                   <button className="live-change-summary" type="button" onClick={onOpenWorkspace}>
                     <FilePenLine aria-hidden="true" size={15} />
                     <strong>
@@ -2136,6 +2175,11 @@ export function ChatView({
               >
                 {running || sending ? (
                   <LoaderCircle className="spin" aria-hidden="true" size={14} />
+                ) : failedRuntimeRunStatus(runtimeStatus) ||
+                  runtimeStatus === "interrupted" ||
+                  session.status === "error" ||
+                  session.status === "interrupted" ? (
+                  <XCircle aria-hidden="true" size={14} />
                 ) : (
                   <Check aria-hidden="true" size={14} />
                 )}
@@ -2146,15 +2190,17 @@ export function ChatView({
                       ? tr("等待批准")
                       : context?.state === "compacting" && running
                         ? tr("正在压缩上下文")
-                        : running || sending
-                          ? activities.some((activity) => activity.status === "running")
-                            ? tr("正在执行")
-                            : tr("思考中")
-                          : runState?.status === "failed"
-                            ? tr("执行失败")
-                            : runState?.status === "interrupted" || runState?.status === "running"
-                              ? tr("已中断")
-                              : tr("已完成")}
+                        : reconnectingActivity
+                          ? runtimeText(reconnectingActivity.title)
+                          : runtimeStatus && running
+                            ? runtimeRunStatusLabel(runtimeStatus)
+                            : running || sending
+                              ? activities.some((activity) => activity.status === "running")
+                                ? tr("正在执行")
+                                : tr("思考中")
+                              : runtimeStatus
+                                ? runtimeRunStatusLabel(runtimeStatus)
+                                : tr("已完成")}
                 </span>
                 {elapsedSeconds !== null ? (
                   <span>{tr("已运行 {0}", [formatDuration(elapsedSeconds)])}</span>
@@ -3080,12 +3126,16 @@ const ActivityTrail = memo(function ActivityTrail({
   orbit,
   activities,
   toolDetails,
+  messages,
   onOpenFile,
+  settled = false,
 }: {
   orbit: boolean;
   activities: ActivityEvent[];
   toolDetails: ReturnType<typeof collectToolDetails>;
+  messages: SessionMessage[];
   onOpenFile: (path: string) => void;
+  settled?: boolean;
 }) {
   useLocale();
   const [expanded, setExpanded] = useState(orbit);
@@ -3103,7 +3153,7 @@ const ActivityTrail = memo(function ActivityTrail({
   return (
     <section
       className={`${expanded ? "activity-trail" : "activity-trail activity-trail--collapsed"}${orbit ? " orbit-execution-records orbit-execution-records--live" : ""}`}
-      aria-label={tr("\u5B9E\u65F6\u6267\u884C\u8FDB\u5EA6")}
+      aria-label={settled ? tr("运行轨迹") : tr("\u5B9E\u65F6\u6267\u884C\u8FDB\u5EA6")}
     >
       <div className="activity-trail__current">
         <button
@@ -3150,6 +3200,18 @@ const ActivityTrail = memo(function ActivityTrail({
             const Icon = activityIcon(activity.kind);
             const change = activity.fileChange;
             const diffExpanded = expandedDiffId === activity.id;
+            const toolOutcome = toolOutcomeForActivity(activity, messages);
+            const outcomeLabel = toolOutcome ? toolOutcomeInlineLabel(toolOutcome) : "";
+            const outcomeDetails = toolOutcome
+              ? toolOutcomeDetailLines(toolOutcome).join("\n")
+              : "";
+            const details = [activityDetailsText(activity, toolDetails), outcomeDetails]
+              .filter(Boolean)
+              .join("\n\n");
+            const detailPreview = [activity.detail, outcomeLabel].filter(Boolean).join(" \u00B7 ");
+            const failed =
+              activity.status === "failed" ||
+              Boolean(toolOutcome && toolOutcomeHasRisk(toolOutcome));
             return (
               <div
                 className={`activity-file-group${orbit ? " orbit-execution-step" : ""}`}
@@ -3191,9 +3253,9 @@ const ActivityTrail = memo(function ActivityTrail({
                     <ExpandableText
                       className="activity-disclosure"
                       label={runtimeText(activity.title)}
-                      preview={activity.detail}
-                      text={() => activityDetailsText(activity, toolDetails)}
-                      tone={activity.status === "failed" ? "error" : undefined}
+                      preview={detailPreview}
+                      text={details}
+                      tone={failed ? "error" : undefined}
                     />
                   )}
                   {activity.durationMs !== null ? (
@@ -3203,15 +3265,25 @@ const ActivityTrail = memo(function ActivityTrail({
                         : formatDuration(activity.durationMs / 1000)}
                     </span>
                   ) : null}
+                  {toolOutcome ? (
+                    <span
+                      className="activity-row__duration"
+                      title={toolOutcomeDetailLines(toolOutcome).join("\n")}
+                    >
+                      {outcomeLabel}
+                    </span>
+                  ) : null}
                   {orbit ? (
                     <span className="orbit-execution-state">
-                      {tr(
-                        activity.status === "completed"
-                          ? "完成"
-                          : activity.status === "failed"
-                            ? "失败"
-                            : "运行中",
-                      )}
+                      {toolOutcome
+                        ? toolOutcomeStatusLabel(toolOutcome)
+                        : tr(
+                            activity.status === "completed"
+                              ? "完成"
+                              : activity.status === "failed"
+                                ? "失败"
+                                : "运行中",
+                          )}
                     </span>
                   ) : null}
                   {change?.diff ? (
@@ -3242,9 +3314,9 @@ const ActivityTrail = memo(function ActivityTrail({
                   <ExpandableText
                     className="activity-file-details"
                     label={tr("详情")}
-                    preview={activity.detail || change.path}
-                    text={() => activityDetailsText(activity, toolDetails)}
-                    tone={activity.status === "failed" ? "error" : undefined}
+                    preview={detailPreview || change.path}
+                    text={details}
+                    tone={failed ? "error" : undefined}
                   />
                 ) : null}
                 {change?.diff && diffExpanded ? (
@@ -3539,6 +3611,7 @@ const MessageRow = memo(function MessageRow({
   child,
   executionGroup,
   toolDetails,
+  messages,
   activeToolDetails,
   onOpenWorkspace,
   onRewriteMessage,
@@ -3556,6 +3629,7 @@ const MessageRow = memo(function MessageRow({
   child: boolean;
   executionGroup: boolean;
   toolDetails: ReturnType<typeof collectToolDetails>;
+  messages: SessionMessage[];
   activeToolDetails: ReadonlySet<NonNullable<ReturnType<typeof toolDetailsForMessage>>>;
   onOpenWorkspace: () => void;
   onRewriteMessage: (messageId: string, text: string) => Promise<void>;
@@ -3846,14 +3920,25 @@ const MessageRow = memo(function MessageRow({
       ) : null}
       {visibleToolCalls.map((toolCall) => {
         const detail = toolDetailsForMessage(toolDetails, message.id, toolCall.callId);
+        const outcome = toolOutcomeForToolCall(messages, message, toolCall.callId);
         return (
-          <ToolCallDetails
-            key={toolCall.callId}
-            toolCall={toolCall}
-            output={detail?.output}
-            isError={detail?.isError}
-            orbit={orbit}
-          />
+          <Fragment key={toolCall.callId}>
+            <ToolCallDetails
+              toolCall={toolCall}
+              output={detail?.output}
+              isError={detail?.isError}
+              orbit={orbit}
+            />
+            {outcome ? (
+              <ExpandableText
+                className="activity-file-details"
+                label={tr("工具结果校验")}
+                preview={toolOutcomeInlineLabel(outcome)}
+                text={toolOutcomeDetailLines(outcome).join("\n")}
+                tone={toolOutcomeHasRisk(outcome) ? "error" : undefined}
+              />
+            ) : null}
+          </Fragment>
         );
       })}
       {error?.type === "error" ? (

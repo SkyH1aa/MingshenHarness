@@ -184,7 +184,21 @@ describe("persistent structured plans", () => {
         "已更新",
       );
       const fork = f.repository.forkSession(f.session.id);
-      expect(restarted.state(fork.id).plan).toEqual(next);
+      const forkedPlan = restarted.state(fork.id).plan;
+      expect(forkedPlan).toMatchObject({
+        revision: next.revision,
+        generation: next.generation + 1,
+        paused: true,
+        reviewRequired: next.reviewRequired,
+        breakpoints: next.breakpoints,
+      });
+      expect(forkedPlan.steps).toEqual(
+        next.steps.map((step) => ({
+          ...step,
+          status: step.status === "in_progress" ? "pending" : step.status,
+        })),
+      );
+      expect(forkedPlan.activeClaims).toBeUndefined();
       restarted.update({ sessionId: f.session.id, revision: 2, paused: false });
       expect(restarted.state(fork.id).plan.paused).toBe(true);
       f.repository.removeSession(f.session.id);

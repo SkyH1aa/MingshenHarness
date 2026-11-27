@@ -1,6 +1,6 @@
 # Mingshen Local Plugin SDK
 
-Version 1.3.6.
+Version 1.3.7.
 
 `mingshen-plugin.mjs` is a dependency-free scaffolding and preflight helper for
 Mingshen's native local-plugin format.
@@ -49,6 +49,16 @@ ChatAgent, actual SubAgents and other unsupported sessions validate in
 The host validator runs directly in the Electron main process. It does not require
 system Node.js, read PATH or launch this CLI. Only users who choose to run this CLI
 need a compatible Node.js environment; its result cannot replace host validation.
+
+Plugin execution is subordinate to the managed host policy described in
+**Settings → Runtime & Integrations → Runtime governance**. Built-in safety limits,
+machine policy, application policy, Agent mode, project trust and execution
+environment are layered with deny precedence. A manifest, project file, Agent
+prompt or Full Access choice cannot relax them. If the machine policy file exists
+but is unreadable, malformed or uses an unsupported version, new plugin, Skill,
+command, MCP and Hook execution pauses; installed metadata and diagnostics remain
+available. Static validation never executes plugin code and does not authorize a
+later action.
 
 Marketplace add, install, update and enable/disable remain explicit user actions in
 that settings page. Install and update require all Agent tasks to finish or be manually

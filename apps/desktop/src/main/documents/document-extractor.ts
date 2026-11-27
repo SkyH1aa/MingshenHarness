@@ -15,12 +15,24 @@ const MAX_ARCHIVE_ENTRY_BYTES = 32 * 1024 * 1024;
 
 export type PdfReadMode = "native" | "vision" | "ocr";
 
+export interface PdfExtractionOptions {
+  startPage?: number;
+  pageLimit?: number;
+  maxImageBytes?: number;
+}
+
 export interface DocumentExtractionResult {
   format: string;
   text: string;
   warnings: string[];
-  pdf?: { totalPages: number; inspectedPages: number; ocrPages: number };
-  pageImages?: Array<{ page: number; dataUrl: string }>;
+  pdf?: {
+    totalPages: number;
+    inspectedPages: number;
+    ocrPages: number;
+    firstPage?: number;
+    lastPage?: number;
+  };
+  pageImages?: Array<{ page: number; pageId?: string; bytes?: number; dataUrl: string }>;
 }
 
 export function isDocumentPath(filePath: string): boolean {
@@ -35,6 +47,7 @@ async function extractInWorker(
   extension: string,
   signal?: AbortSignal,
   mode: PdfReadMode = "ocr",
+  pdfOptions: PdfExtractionOptions = {},
 ): Promise<DocumentExtractionResult> {
   signal?.throwIfAborted();
   while (activeWorkers >= 2) {
@@ -77,7 +90,16 @@ async function extractInWorker(
     const moduleBase = appRequire.resolve("mammoth/package.json");
     return await new Promise<DocumentExtractionResult>((done, reject) => {
       const worker = new Worker(script, {
-        workerData: { bytes, extension, mode, moduleBase, languageDirectory },
+        workerData: {
+          bytes,
+          extension,
+          mode,
+          moduleBase,
+          languageDirectory,
+          pdfStartPage: pdfOptions.startPage,
+          pdfPageLimit: pdfOptions.pageLimit,
+          pdfMaxImageBytes: pdfOptions.maxImageBytes,
+        },
         resourceLimits: { maxOldGenerationSizeMb: 384 },
       });
       let settled = false;
@@ -147,6 +169,7 @@ export async function extractDocumentBuffer(
   filePath: string,
   signal?: AbortSignal,
   pdfMode: PdfReadMode = "ocr",
+  pdfOptions: PdfExtractionOptions = {},
 ): Promise<DocumentExtractionResult> {
   signal?.throwIfAborted();
   if (buffer.length > MAX_DOCUMENT_BYTES) throw new Error("Document exceeds the 25 MiB limit.");
@@ -162,11 +185,37 @@ export async function extractDocumentBuffer(
     case ".odt":
       return await extractInWorker(buffer, extension, signal, pdfMode);
     case ".pdf":
+      return await extractInWorker(buffer, extension, signal, pdfMode, pdfOptions);
     case ".doc":
       return await extractInWorker(buffer, extension, signal, pdfMode);
     default:
       throw new Error(`不支持的文档格式：${extension || "未知"}`);
   }
+}
+
+export async function extractPdfPageBatch(
+  buffer: Buffer,
+  filePath: string,
+  options: PdfExtractionOptions = {},
+  signal?: AbortSignal,
+): Promise<DocumentExtractionResult> {
+  const startPage =
+    Number.isInteger(options.startPage) && Number(options.startPage) > 0
+      ? Number(options.startPage)
+      : 1;
+  const pageLimit =
+    Number.isInteger(options.pageLimit) && Number(options.pageLimit) > 0
+      ? Math.min(20, Number(options.pageLimit))
+      : 12;
+  const maxImageBytes =
+    Number.isInteger(options.maxImageBytes) && Number(options.maxImageBytes) > 0
+      ? Math.min(20 * 1024 * 1024, Number(options.maxImageBytes))
+      : 12 * 1024 * 1024;
+  return extractDocumentBuffer(buffer, filePath, signal, "vision", {
+    startPage,
+    pageLimit,
+    maxImageBytes,
+  });
 }
 
 export async function validateDocumentArchive(buffer: Buffer): Promise<void> {

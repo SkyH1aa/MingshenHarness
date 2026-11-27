@@ -70,6 +70,7 @@ const api: MingshenDesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.completionConfigure, settings),
   setActiveNotificationSession: (sessionId) =>
     ipcRenderer.invoke(IPC_CHANNELS.completionActiveSession, sessionId),
+  markAllCompletionNotificationsRead: () => ipcRenderer.invoke(IPC_CHANNELS.completionMarkAllRead),
   onCompletionNotifications: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
       listener(state);
@@ -230,6 +231,14 @@ const api: MingshenDesktopApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.imageStudioExportProgress, handler);
   },
   generateImageStudioImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.imageStudioGenerate, input),
+  previewImageStudioRemoteImage: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemotePreview, input),
+  openImageStudioRemoteImage: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoteOpenExternal, input),
+  saveImageStudioRemoteImage: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoteSave, input),
+  discardImageStudioRemoteImages: (ids) =>
+    ipcRenderer.invoke(IPC_CHANNELS.imageStudioRemoteDiscard, ids),
   polishImageStudioPrompt: (input) =>
     ipcRenderer.invoke(IPC_CHANNELS.imageStudioPolishPrompt, input),
   reverseImageStudioPrompt: (input) =>
@@ -289,7 +298,7 @@ const api: MingshenDesktopApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.composerDraftChanged, handler);
   },
   rewriteAndSendChat: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatRewrite, input),
-  stopChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.chatStop, sessionId),
+  stopChat: (sessionId, runId) => ipcRenderer.invoke(IPC_CHANNELS.chatStop, sessionId, runId),
   getRunSteering: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.runSteeringGet, sessionId),
   steerRun: (input) => ipcRenderer.invoke(IPC_CHANNELS.runSteeringSend, input),
   listQueuedPrompts: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.queuedPromptList, sessionId),
@@ -451,6 +460,15 @@ const api: MingshenDesktopApi = {
       charOffset,
     ),
   setModelRetrySettings: (settings) => ipcRenderer.invoke(IPC_CHANNELS.modelRetrySet, settings),
+  getRuntimeGovernance: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeGovernanceGet),
+  setModelWatchdogSettings: (settings) =>
+    ipcRenderer.invoke(IPC_CHANNELS.modelWatchdogSet, settings),
+  saveManagedUserPolicy: (layer) => ipcRenderer.invoke(IPC_CHANNELS.managedPolicyUserSet, layer),
+  setOfficeDeliverySettings: (settings) =>
+    ipcRenderer.invoke(IPC_CHANNELS.officeDeliverySettingsSet, settings),
+  listOfficeDeliveries: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.officeDeliveriesList, sessionId),
+  continueOfficeDelivery: (input) => ipcRenderer.invoke(IPC_CHANNELS.officeDeliveryContinue, input),
   getAgentRuntimeSettings: () => ipcRenderer.invoke(IPC_CHANNELS.agentRuntimeSettingsGet),
   setAgentRuntimeSettings: (settings) =>
     ipcRenderer.invoke(IPC_CHANNELS.agentRuntimeSettingsSet, settings),

@@ -104,4 +104,8 @@ export class FileLockService {
   releaseRun(runId: string): void {
     this.leases = this.leases.filter((lease) => lease.owner.runId !== runId);
   }
+
+  hasRun(runId: string): boolean {
+    return this.leases.some((lease) => lease.owner.runId === runId);
+  }
 }

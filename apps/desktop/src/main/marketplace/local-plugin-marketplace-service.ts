@@ -16,6 +16,7 @@ import type {
   LocalPluginValidationIssue,
 } from "../../shared/local-plugins";
 import type { ExtensionService } from "../extensions/extension-service";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
 
 const MARKETS_SETTING = "localPluginMarkets" + ".v1";
@@ -218,18 +219,28 @@ function compareSemanticVersions(left: string, right: string): number | null {
 export class LocalPluginMarketplaceService {
   private nextUpdateMarketIndex = 0;
   private readonly cachedUpdates = new Map<string, CachedMarketUpdates>();
+  private managedPolicy: ManagedPolicyService | null;
 
   constructor(
     private readonly repository: Repository,
     private readonly extensionService: ExtensionService,
     private readonly extensionRoot: string,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
 
   listSources(): LocalPluginMarketSource[] {
     return this.loadMarkets().sort((left, right) => left.name.localeCompare(right.name));
   }
 
   async checkForUpdates(): Promise<LocalPluginUpdateCheckResult> {
+    this.managedPolicy?.assertOperational("本地插件市场更新检查");
+    this.managedPolicy?.assertCapability("marketplace.update");
     const markets = this.listSources();
     const start = markets.length ? this.nextUpdateMarketIndex % markets.length : 0;
     const scanCount = Math.min(markets.length, MAX_UPDATE_CHECK_MARKETS);
@@ -414,6 +425,8 @@ export class LocalPluginMarketplaceService {
   }
 
   async addMarket(rootOrCatalogPath: string): Promise<LocalPluginMarketView> {
+    this.managedPolicy?.assertOperational("本地插件市场添加");
+    this.managedPolicy?.assertCapability("marketplace.update", { approved: true });
     const parsed = await this.parseCatalog(rootOrCatalogPath);
     const id = this.marketId(parsed.rootPath);
     const now = new Date().toISOString();
@@ -433,6 +446,8 @@ export class LocalPluginMarketplaceService {
   }
 
   async refreshMarket(marketId: string): Promise<LocalPluginMarketView> {
+    this.managedPolicy?.assertOperational("本地插件市场刷新");
+    this.managedPolicy?.assertCapability("marketplace.update", { approved: true });
     const current = this.requireMarket(marketId);
     const parsed = await this.parseCatalog(current.catalogPath);
     const market: LocalPluginMarketSource = {
@@ -591,6 +606,9 @@ export class LocalPluginMarketplaceService {
   }
 
   async installPlugin(marketId: string, pluginName: string): Promise<LocalPluginInstallResult> {
+    this.managedPolicy?.assertOperational("本地插件安装");
+    this.managedPolicy?.assertCapability("marketplace.update", { approved: true });
+    this.managedPolicy?.assertCapability("plugin.install", { approved: true });
     const view = await this.refreshMarket(marketId);
     const plugin = view.plugins.find((entry) => entry.name === pluginName);
     if (!plugin) throw new Error("市场中不存在该插件，请刷新后重试。");
@@ -654,6 +672,9 @@ export class LocalPluginMarketplaceService {
   }
 
   async updatePlugin(marketId: string, pluginName: string): Promise<LocalPluginInstallResult> {
+    this.managedPolicy?.assertOperational("本地插件更新");
+    this.managedPolicy?.assertCapability("marketplace.update", { approved: true });
+    this.managedPolicy?.assertCapability("plugin.install", { approved: true });
     const view = await this.refreshMarket(marketId);
     const plugin = view.plugins.find((entry) => entry.name === pluginName);
     if (!plugin) throw new Error("市场中不存在该插件，请刷新后重试。");

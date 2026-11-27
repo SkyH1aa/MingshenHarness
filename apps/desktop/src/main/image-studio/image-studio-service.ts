@@ -35,6 +35,9 @@ import {
   type ImageStudioImportFile,
   type ImageStudioLayer,
   type ImageStudioPolishInput,
+  type ImageStudioRemoteImage,
+  type ImageStudioRemoteImageInput,
+  type ImageStudioRemotePreview,
   type ImageStudioReversePromptInput,
   type ImageStudioServiceResult,
   type ImageStudioWorkspace,
@@ -50,11 +53,20 @@ import {
   isTextModel,
   isVisionTextModel,
 } from "../../shared/model-capabilities";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import {
   decodeStrictBase64Image,
+  type ImageGenerationPayload,
+  type ImageGenerationRemotePayload,
+  parseImageGenerationCandidatesDetailed,
   parseImageGenerationResponse,
-  parseImageGenerationResponses,
 } from "../providers/image-generation";
+import {
+  assertPublicRemoteImageHost,
+  fetchRemoteImage,
+  normalizeRemoteImageUrl,
+  REMOTE_IMAGE_TIMEOUT_MS,
+} from "../providers/image-result-download";
 import { detectImage } from "../providers/image-validation";
 import type { ProviderService } from "../providers/provider-service";
 import { buildAuthHeaders } from "../providers/provider-service";
@@ -72,7 +84,11 @@ const MAX_TEXT_RESPONSE_BYTES = Math.ceil((IMAGE_STUDIO_MAX_SINGLE_BYTES * 4) / 
 const MAX_IMAGE_RESPONSE_BYTES =
   Math.ceil((IMAGE_STUDIO_MAX_GENERATION_BYTES * 4) / 3) + 1024 * 1024;
 const TEXT_HTTP_TIMEOUT_MS = 120_000;
-const IMAGE_HTTP_TIMEOUT_MS = 180_000;
+const IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+const IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS = 3;
+const IMAGE_STUDIO_REMOTE_IMAGE_TTL_MS = 30 * 60 * 1_000;
+const IMAGE_STUDIO_MAX_PENDING_REMOTE_IMAGES = 30;
+export const IMAGE_STUDIO_MAX_REMOTE_PREVIEW_BYTES = IMAGE_STUDIO_MAX_GENERATION_BYTES;
 const MAX_BATCH_ASSETS = IMAGE_STUDIO_MAX_ASSETS;
 const SAFE_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SAFE_CANVAS_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -95,6 +111,44 @@ interface TextModelResult {
   text: string;
   body: Record<string, unknown>;
   url: string;
+}
+
+interface PendingRemoteImageGroup {
+  prompt: string;
+  negativePrompt: string;
+  model: ModelReference;
+  generation: ImageStudioGenerateInput["generation"];
+  base64Bytes: number;
+  remoteBytes: number;
+}
+
+interface PendingRemoteImage {
+  id: string;
+  sourceUrl: string;
+  revisedPrompt: string | null;
+  expiresAt: number;
+  group: PendingRemoteImageGroup;
+  preview: ImageGenerationPayload | null;
+  previewPromise: Promise<ImageGenerationPayload> | null;
+  previewRequestId: string | null;
+  saving: boolean;
+  saveRequestId: string | null;
+}
+
+export function canReserveRemoteImagePreviewBytes(
+  currentBytes: number,
+  additionalBytes: number,
+  maximumBytes = IMAGE_STUDIO_MAX_REMOTE_PREVIEW_BYTES,
+): boolean {
+  return (
+    Number.isSafeInteger(currentBytes) &&
+    currentBytes >= 0 &&
+    Number.isSafeInteger(additionalBytes) &&
+    additionalBytes > 0 &&
+    Number.isSafeInteger(maximumBytes) &&
+    maximumBytes >= 0 &&
+    currentBytes + additionalBytes <= maximumBytes
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -362,21 +416,33 @@ export class ImageStudioService {
   private readonly canvasDirectory: string;
   private readonly canvasTrashDirectory: string;
   private readonly activeRequests = new Map<string, AbortController>();
+  private readonly activeGenerationRequests = new Set<string>();
+  private readonly pendingRemoteImages = new Map<string, PendingRemoteImage>();
   private readonly operations = new Set<Promise<unknown>>();
   private assetReadQueue: Promise<void> = Promise.resolve();
   private canvasOperationQueue: Promise<void> = Promise.resolve();
+  private remotePreviewQueue: Promise<unknown> = Promise.resolve();
+  private pendingRemotePreviewBytes = 0;
+  private remoteExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
   private disposal: Promise<void> | null = null;
+  private managedPolicy: ManagedPolicyService | null;
 
   constructor(
     private readonly repository: Repository,
     private readonly providerService: ProviderService,
     userDataDirectory: string,
+    options: { managedPolicy?: ManagedPolicyService } = {},
   ) {
     this.studioDirectory = join(userDataDirectory, "image-studio");
     this.assetDirectory = join(this.studioDirectory, "assets");
     this.canvasDirectory = join(this.studioDirectory, "canvases");
     this.canvasTrashDirectory = join(this.canvasDirectory, ".trash");
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
   }
 
   private async initialize(): Promise<void> {
@@ -1558,12 +1624,45 @@ export class ImageStudioService {
   }
 
   generate(input: ImageStudioGenerateInput): Promise<ImageStudioGenerateResult> {
-    return this.trackOperation(() => this.generateInternal(input));
+    this.assertOpen();
+    if (typeof input.requestId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(input.requestId))
+      return Promise.reject(new Error("生图请求标识格式无效。"));
+    if (this.activeGenerationRequests.has(input.requestId))
+      return Promise.reject(new Error("该生图请求正在运行，请勿重复提交。"));
+    if (this.activeGenerationRequests.size >= IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS)
+      return Promise.reject(
+        new Error(
+          `同时最多运行 ${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} 个生图请求，请等待其他请求完成后再试。`,
+        ),
+      );
+    const requestId = input.requestId;
+    this.activeGenerationRequests.add(requestId);
+    const operation = this.trackOperation(() =>
+      this.generateInternal(input).finally(() => this.activeGenerationRequests.delete(requestId)),
+    );
+    void operation.then(
+      () => this.activeGenerationRequests.delete(requestId),
+      () => this.activeGenerationRequests.delete(requestId),
+    );
+    return operation;
   }
 
   private async generateInternal(
     input: ImageStudioGenerateInput,
   ): Promise<ImageStudioGenerateResult> {
+    const generationWorkspace = this.getWorkspace();
+    const requestedTargetDocumentId =
+      input.targetDocumentId === undefined
+        ? generationWorkspace.activeDocumentId
+        : input.targetDocumentId === null
+          ? null
+          : this.validCanvasId(input.targetDocumentId);
+    const targetDocumentId =
+      input.addToActiveCanvas === true &&
+      requestedTargetDocumentId &&
+      generationWorkspace.documents.some((document) => document.id === requestedTargetDocumentId)
+        ? requestedTargetDocumentId
+        : null;
     const modelReference = optionalModelReference(input.model);
     if (!modelReference) throw new Error("请选择图片生成模型。");
     const generation = validateImageStudioGenerationSettings(input.generation);
@@ -1578,127 +1677,477 @@ export class ImageStudioService {
     const { provider, model } = this.resolveModel(modelReference);
     if (!isImageOutputModel(model))
       throw new Error("所选模型不是仅图片生成模型，请到设置中启用“图片生成模型”。");
-    if (provider.protocol !== "openai_chat_completions" && provider.protocol !== "openai_responses")
+    if (
+      !["openai_images", "openai_chat_completions", "openai_responses"].includes(provider.protocol)
+    )
       throw new Error(
-        "内置生图使用 OpenAI Images 兼容协议。请新建一个 OpenAI Chat Completions 兼容供应商，Base URL 以 /v1 结尾。",
+        "内置生图使用 OpenAI Images 兼容协议。请选择 OpenAI Images 供应商，Base URL 以 /v1 结尾。",
       );
 
-    const apiKey = this.providerService.getActiveApiKey(provider.id);
+    this.managedPolicy?.assertOperational("图片生成");
+    this.managedPolicy?.assertProvider(provider.id, model.id, { approved: true });
+    this.managedPolicy?.assertCapability("provider.request", { approved: true });
+    this.managedPolicy?.assertCapability("image.generate", { approved: true });
+    this.managedPolicy?.assertCapability("network.request", { approved: true });
+    const apiKey = this.providerService.getActiveApiKey(provider.id, {
+      approved: true,
+      modelConfigId: model.id,
+    });
     const url = `${provider.baseUrl}/images/${referenceIds.length ? "edits" : "generations"}`;
     const body = {
       model: model.modelId,
       prompt,
       ...imageStudioApiParameters(generation),
     };
-    return this.withRequest(input.requestId, IMAGE_HTTP_TIMEOUT_MS, async (signal) => {
-      const headers = buildAuthHeaders({
-        baseUrl: provider.baseUrl,
-        protocol: provider.protocol,
-        authMode: provider.authMode,
-        customHeaderName: provider.customHeaderName,
-        apiKey,
-      });
-      let requestBody: string | FormData = JSON.stringify(body);
-      if (referenceIds.length) {
-        const form = new FormData();
-        for (const [key, value] of Object.entries(body)) form.set(key, String(value));
-        for (const [index, id] of referenceIds.entries()) {
-          const data = await this.queueAssetBytes(id, signal);
-          let bytes: Uint8Array<ArrayBufferLike> = data.bytes;
-          let mimeType = data.mimeType;
-          if (mimeType === "image/gif" || mimeType === "image/webp") {
-            bytes = await sharp(bytes, {
-              failOn: "warning",
-              limitInputPixels: 40_000_000,
-              sequentialRead: true,
-              page: 0,
-              pages: 1,
-            })
-              .png()
-              .toBuffer();
-            if (bytes.byteLength > IMAGE_STUDIO_MAX_SINGLE_BYTES)
-              throw new Error("参考图转换为 PNG 后超过单图 25 MiB 限制，请缩小图片后重试。");
-            await detectImage(bytes, "image/png");
-            mimeType = "image/png";
+    let generationCommitted = false;
+    return this.withRequest(
+      input.requestId,
+      IMAGE_GENERATION_TIMEOUT_MS,
+      async (signal) => {
+        const headers = buildAuthHeaders({
+          baseUrl: provider.baseUrl,
+          protocol: provider.protocol,
+          authMode: provider.authMode,
+          customHeaderName: provider.customHeaderName,
+          apiKey,
+        });
+        let requestBody: string | FormData = JSON.stringify(body);
+        if (referenceIds.length) {
+          const form = new FormData();
+          for (const [key, value] of Object.entries(body)) form.set(key, String(value));
+          for (const [index, id] of referenceIds.entries()) {
+            const data = await this.queueAssetBytes(id, signal);
+            let bytes: Uint8Array<ArrayBufferLike> = data.bytes;
+            let mimeType = data.mimeType;
+            if (mimeType === "image/gif" || mimeType === "image/webp") {
+              bytes = await sharp(bytes, {
+                failOn: "warning",
+                limitInputPixels: 40_000_000,
+                sequentialRead: true,
+                page: 0,
+                pages: 1,
+              })
+                .png()
+                .toBuffer();
+              if (bytes.byteLength > IMAGE_STUDIO_MAX_SINGLE_BYTES)
+                throw new Error("参考图转换为 PNG 后超过单图 25 MiB 限制，请缩小图片后重试。");
+              await detectImage(bytes, "image/png");
+              mimeType = "image/png";
+            }
+            signal.throwIfAborted();
+            this.assertOpen();
+            const extension = mimeType === "image/jpeg" ? "jpg" : "png";
+            form.append(
+              referenceIds.length === 1 ? "image" : "image[]",
+              new Blob(
+                [new Uint8Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength)],
+                { type: mimeType },
+              ),
+              `reference-${index + 1}.${extension}`,
+            );
           }
-          signal.throwIfAborted();
-          this.assertOpen();
-          const extension = mimeType === "image/jpeg" ? "jpg" : "png";
-          form.append(
-            referenceIds.length === 1 ? "image" : "image[]",
-            new Blob(
-              [new Uint8Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength)],
-              { type: mimeType },
-            ),
-            `reference-${index + 1}.${extension}`,
-          );
+          // Fetch supplies the multipart boundary; the JSON content type would discard the images.
+          delete headers["content-type"];
+          requestBody = form;
         }
-        // Fetch supplies the multipart boundary; the JSON content type would discard the images.
-        delete headers["content-type"];
-        requestBody = form;
-      }
-      signal.throwIfAborted();
-      this.assertOpen();
-      const response = await fetch(url, {
-        method: "POST",
-        redirect: "error",
-        headers,
-        body: requestBody,
-        signal,
-      });
-      const raw = await boundedResponseText(response, MAX_IMAGE_RESPONSE_BYTES);
-      if (!response.ok)
-        throw new Error(fetchErrorMessage(response.status, response.statusText, raw, apiKey));
-      let payload: unknown;
-      try {
-        payload = JSON.parse(raw) as unknown;
-      } catch {
-        throw new Error("图片供应商返回的不是有效 JSON。");
-      }
-      const generated = await parseImageGenerationResponses(payload);
-      signal.throwIfAborted();
-      this.assertOpen();
-      if (generated.length > generation.imageCount)
-        throw new Error("供应商返回的图片数量超过本次请求数量，已拒绝保存异常结果。");
-      const warnings = generated.flatMap((image, index) =>
-        generation.resolution !== "auto" &&
-        (image.width !== generation.width || image.height !== generation.height)
-          ? [
-              {
-                code: "size_mismatch" as const,
-                imageIndex: index + 1,
-                requestedWidth: generation.width,
-                requestedHeight: generation.height,
-                actualWidth: image.width,
-                actualHeight: image.height,
-              },
-            ]
-          : [],
-      );
-      if (
-        generation.transparentBackground &&
-        generated.some((image) => image.mimeType !== "image/png" && image.mimeType !== "image/webp")
-      )
-        throw new Error("透明背景请求必须返回 PNG 或 WebP，供应商结果未保存。");
-      signal.throwIfAborted();
-      this.assertOpen();
-      const workspace = await this.trackCanvasOperation(async () => {
-        await this.ensureCanvasLibrary();
-        return this.importGeneratedAssets({
-          generated,
-          workspacePrompt,
-          workspaceNegativePrompt,
-          model: modelReference,
-          addToActiveCanvas: input.addToActiveCanvas === true,
+        signal.throwIfAborted();
+        this.assertOpen();
+        const response = await fetch(url, {
+          method: "POST",
+          redirect: "error",
+          headers,
+          body: requestBody,
           signal,
         });
-      });
-      return {
-        generatedAssets: workspace.assets.slice(-generated.length),
-        workspace,
-        warnings,
-      };
+        const raw = await boundedResponseText(response, MAX_IMAGE_RESPONSE_BYTES);
+        if (!response.ok)
+          throw new Error(fetchErrorMessage(response.status, response.statusText, raw, apiKey));
+        let payload: unknown;
+        try {
+          payload = JSON.parse(raw) as unknown;
+        } catch {
+          throw new Error("图片供应商返回的不是有效 JSON。");
+        }
+        const parsed = await parseImageGenerationCandidatesDetailed(payload);
+        const candidates = parsed.candidates;
+        signal.throwIfAborted();
+        this.assertOpen();
+        if (parsed.resultCount > generation.imageCount)
+          throw new Error("供应商返回的图片数量超过本次请求数量，已拒绝保存异常结果。");
+        const generatedCandidates = candidates.filter(
+          (candidate): candidate is ImageGenerationPayload => "base64" in candidate,
+        );
+        const remoteCandidates = candidates.filter(
+          (candidate): candidate is ImageGenerationRemotePayload => "url" in candidate,
+        );
+        const remoteWarnings = parsed.warnings.map((warning) => warning.message);
+        const generated = generatedCandidates.filter((image, index) => {
+          if (
+            generation.transparentBackground &&
+            image.mimeType !== "image/png" &&
+            image.mimeType !== "image/webp"
+          ) {
+            remoteWarnings.push(
+              `透明背景请求只接受 PNG 或 WebP，第 ${index + 1} 个 Base64 图片已跳过。`,
+            );
+            return false;
+          }
+          return true;
+        });
+        const warnings = generated.flatMap((image, index) =>
+          generation.resolution !== "auto" &&
+          (image.width !== generation.width || image.height !== generation.height)
+            ? [
+                {
+                  code: "size_mismatch" as const,
+                  imageIndex: index + 1,
+                  requestedWidth: generation.width,
+                  requestedHeight: generation.height,
+                  actualWidth: image.width,
+                  actualHeight: image.height,
+                },
+              ]
+            : [],
+        );
+        signal.throwIfAborted();
+        this.assertOpen();
+        let workspace = this.getWorkspace();
+        let generatedAssets: ImageStudioAsset[] = [];
+        let importedBase64Bytes = 0;
+        let importFailure: unknown = null;
+        if (generated.length) {
+          try {
+            workspace = await this.trackCanvasOperation(async () => {
+              await this.ensureCanvasLibrary();
+              return this.importGeneratedAssets({
+                generated,
+                workspacePrompt,
+                workspaceNegativePrompt,
+                model: modelReference,
+                targetDocumentId,
+                preserveWorkspacePrompts: true,
+                signal,
+              });
+            });
+            generatedAssets = workspace.assets.slice(-generated.length);
+            importedBase64Bytes = generated.reduce((total, image) => total + image.byteLength, 0);
+          } catch (error) {
+            signal.throwIfAborted();
+            this.assertOpen();
+            if (
+              error instanceof CanvasRecoveryError ||
+              (error instanceof Error && error.cause instanceof CanvasRecoveryError)
+            )
+              throw error;
+            importFailure = error;
+            workspace = this.getWorkspace();
+          }
+        }
+        const remoteImages = this.registerRemoteImages({
+          candidates: remoteCandidates,
+          group: {
+            prompt: workspacePrompt,
+            negativePrompt: workspaceNegativePrompt,
+            model: modelReference,
+            generation,
+            base64Bytes: importedBase64Bytes,
+            remoteBytes: 0,
+          },
+          warnings: remoteWarnings,
+        });
+        if (importFailure && remoteImages.length === 0) throw importFailure;
+        if (importFailure)
+          remoteWarnings.push(
+            `Base64 图片保存到本地素材库失败，已保留可预览的 URL 结果：${this.errorMessage(importFailure)}`,
+          );
+        const result = {
+          generatedAssets,
+          workspace,
+          warnings,
+          ...(remoteImages.length ? { remoteImages } : {}),
+          ...(remoteWarnings.length ? { remoteWarnings } : {}),
+        };
+        generationCommitted = true;
+        return result;
+      },
+      { isCommittedResult: () => generationCommitted },
+    );
+  }
+
+  private registerRemoteImages(input: {
+    candidates: ImageGenerationRemotePayload[];
+    group: PendingRemoteImageGroup;
+    warnings: string[];
+  }): ImageStudioRemoteImage[] {
+    this.expirePendingRemoteImages();
+    const available = Math.max(
+      0,
+      IMAGE_STUDIO_MAX_PENDING_REMOTE_IMAGES - this.pendingRemoteImages.size,
+    );
+    const candidates = input.candidates.flatMap((candidate, index) => {
+      try {
+        return [{ ...candidate, url: normalizeRemoteImageUrl(candidate.url) }];
+      } catch {
+        input.warnings.push(
+          `远程图片 ${index + 1} 的 URL 不安全或无效，只支持无凭据的公开 HTTPS 图片。`,
+        );
+        return [];
+      }
     });
+    const accepted = candidates.slice(0, available);
+    if (accepted.length < candidates.length)
+      input.warnings.push(
+        `其余 ${candidates.length - accepted.length} 张远程结果未暂存：待确认图片最多保留 ${IMAGE_STUDIO_MAX_PENDING_REMOTE_IMAGES} 张。`,
+      );
+    const expiresAt = Date.now() + IMAGE_STUDIO_REMOTE_IMAGE_TTL_MS;
+    const results = accepted.map((candidate): ImageStudioRemoteImage => {
+      const id = randomUUID();
+      this.pendingRemoteImages.set(id, {
+        id,
+        sourceUrl: candidate.url,
+        revisedPrompt: candidate.revisedPrompt,
+        expiresAt,
+        group: input.group,
+        preview: null,
+        previewPromise: null,
+        previewRequestId: null,
+        saving: false,
+        saveRequestId: null,
+      });
+      return { id, expiresAt: new Date(expiresAt).toISOString() };
+    });
+    this.scheduleRemoteExpiry();
+    return results;
+  }
+
+  previewRemoteImage(input: ImageStudioRemoteImageInput): Promise<ImageStudioRemotePreview> {
+    return this.trackOperation(() => this.previewRemoteImageInternal(input));
+  }
+
+  openRemoteImageExternal(
+    input: ImageStudioRemoteImageInput,
+    opener: (url: string) => Promise<void>,
+  ): Promise<void> {
+    return this.trackOperation(async () => {
+      if (typeof opener !== "function") throw new Error("系统浏览器打开器无效。");
+      const pending = this.getPendingRemoteImage(input);
+      const url = normalizeRemoteImageUrl(pending.sourceUrl);
+      this.managedPolicy?.assertOperational("远程图片外部打开");
+      this.managedPolicy?.assertCapability("network.request", { approved: true });
+      this.managedPolicy?.assertCapability("browser.use", { approved: true });
+      this.assertOpen();
+      // This is a point-in-time check. The external browser resolves again and may follow redirects.
+      await assertPublicRemoteImageHost(url);
+      const current = this.getPendingRemoteImage(input);
+      if (current !== pending) throw new Error("远程图片预览已过期或失效，请重新生成。");
+      this.managedPolicy?.assertOperational("远程图片外部打开");
+      this.managedPolicy?.assertCapability("network.request", { approved: true });
+      this.managedPolicy?.assertCapability("browser.use", { approved: true });
+      this.assertOpen();
+      await opener(url);
+    });
+  }
+
+  private async previewRemoteImageInternal(
+    input: ImageStudioRemoteImageInput,
+  ): Promise<ImageStudioRemotePreview> {
+    this.managedPolicy?.assertOperational("远程图片预览");
+    this.managedPolicy?.assertCapability("network.request", { approved: true });
+    const pending = this.getPendingRemoteImage(input);
+    let payload = pending.preview;
+    if (!payload) {
+      const inFlight = pending.previewPromise;
+      if (inFlight) payload = await inFlight;
+      else {
+        pending.previewRequestId = input.requestId;
+        const preview = this.withRequest(input.requestId, REMOTE_IMAGE_TIMEOUT_MS, (signal) => {
+          const download = this.remotePreviewQueue.then(async () => {
+            signal.throwIfAborted();
+            if (this.pendingRemoteImages.get(pending.id) !== pending)
+              throw new Error("图片预览已失效，请重新生成。");
+            const result = await fetchRemoteImage(pending.sourceUrl, signal);
+            signal.throwIfAborted();
+            this.assertOpen();
+            this.expirePendingRemoteImages();
+            if (this.pendingRemoteImages.get(pending.id) !== pending)
+              throw new Error("图片预览已失效，请重新生成。");
+            if (
+              !canReserveRemoteImagePreviewBytes(this.pendingRemotePreviewBytes, result.byteLength)
+            )
+              throw new Error(
+                "待确认的远程图片超过 100 MiB 内存预览上限，请先保存或跳过其他图片。",
+              );
+            if (
+              pending.group.base64Bytes + pending.group.remoteBytes + result.byteLength >
+              IMAGE_STUDIO_MAX_GENERATION_BYTES
+            )
+              throw new Error("本次生成图片合计超过 100 MiB 安全上限，无法预览此结果。");
+            pending.group.remoteBytes += result.byteLength;
+            pending.preview = result;
+            this.pendingRemotePreviewBytes += result.byteLength;
+            return result;
+          });
+          this.remotePreviewQueue = download.catch(() => undefined);
+          return download;
+        });
+        pending.previewPromise = preview;
+        try {
+          payload = await preview;
+        } finally {
+          pending.previewPromise = null;
+          pending.previewRequestId = null;
+        }
+      }
+    }
+    if (!payload || this.pendingRemoteImages.get(pending.id) !== pending)
+      throw new Error("远程图片预览已过期或失效。");
+    return {
+      id: pending.id,
+      dataUrl: `data:${payload.mimeType};base64,${payload.base64}`,
+      sourceHost: new URL(pending.sourceUrl).hostname,
+      mimeType: payload.mimeType,
+      width: payload.width,
+      height: payload.height,
+      size: payload.byteLength,
+      prompt: pending.group.prompt,
+      negativePrompt: pending.group.negativePrompt,
+      revisedPrompt: pending.revisedPrompt,
+    };
+  }
+
+  saveRemoteImage(input: ImageStudioRemoteImageInput): Promise<ImageStudioGenerateResult> {
+    return this.trackOperation(() => this.saveRemoteImageInternal(input));
+  }
+
+  private async saveRemoteImageInternal(
+    input: ImageStudioRemoteImageInput,
+  ): Promise<ImageStudioGenerateResult> {
+    const pending = this.getPendingRemoteImage(input);
+    const generated = pending.preview;
+    if (!generated) throw new Error("请先成功预览图片，再保存到素材库。");
+    if (pending.saving) throw new Error("此图片正在保存，请勿重复提交。");
+    if (
+      pending.group.generation.transparentBackground &&
+      generated.mimeType !== "image/png" &&
+      generated.mimeType !== "image/webp"
+    )
+      throw new Error("透明背景请求必须返回 PNG 或 WebP，此图片未保存。");
+    const previous = this.getWorkspace();
+    if (previous.assets.length >= IMAGE_STUDIO_MAX_ASSETS)
+      throw new Error(`图片素材库最多保存 ${IMAGE_STUDIO_MAX_ASSETS} 张图片，请先删除部分素材。`);
+    pending.saving = true;
+    pending.saveRequestId = input.requestId;
+    let workspace: ImageStudioWorkspace;
+    try {
+      workspace = await this.withRequest(input.requestId, REMOTE_IMAGE_TIMEOUT_MS, (signal) =>
+        this.trackCanvasOperation(async () => {
+          signal.throwIfAborted();
+          this.getPendingRemoteImage(input);
+          await this.ensureCanvasLibrary();
+          return this.importGeneratedAssets({
+            generated: [{ ...generated, revisedPrompt: pending.revisedPrompt }],
+            workspacePrompt: pending.group.prompt,
+            workspaceNegativePrompt: pending.group.negativePrompt,
+            model: pending.group.model,
+            targetDocumentId: null,
+            preserveWorkspacePrompts: true,
+            signal,
+          });
+        }),
+      );
+      this.releasePendingRemoteImage(pending.id);
+    } finally {
+      pending.saving = false;
+      pending.saveRequestId = null;
+    }
+    const warning = this.generationSizeWarning(pending.group.generation, generated);
+    return {
+      generatedAssets: workspace.assets.slice(-1),
+      workspace,
+      warnings: warning ? [{ code: "size_mismatch", imageIndex: 1, ...warning }] : [],
+    };
+  }
+
+  private generationSizeWarning(
+    generation: ImageStudioGenerateInput["generation"],
+    image: Pick<ImageGenerationPayload, "width" | "height">,
+  ): Omit<ImageStudioGenerateResult["warnings"][number], "code" | "imageIndex"> | null {
+    return generation.resolution !== "auto" &&
+      (image.width !== generation.width || image.height !== generation.height)
+      ? {
+          requestedWidth: generation.width,
+          requestedHeight: generation.height,
+          actualWidth: image.width,
+          actualHeight: image.height,
+        }
+      : null;
+  }
+
+  private getPendingRemoteImage(input: ImageStudioRemoteImageInput): PendingRemoteImage {
+    if (
+      !input ||
+      typeof input.id !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test(input.id) ||
+      typeof input.requestId !== "string" ||
+      !/^[A-Za-z0-9_-]{8,128}$/.test(input.requestId)
+    )
+      throw new Error("远程图片预览标识无效。");
+    this.expirePendingRemoteImages();
+    const pending = this.pendingRemoteImages.get(input.id);
+    if (!pending) throw new Error("远程图片预览已过期或失效，请重新生成。");
+    return pending;
+  }
+
+  private expirePendingRemoteImages(): void {
+    const now = Date.now();
+    for (const [id, pending] of this.pendingRemoteImages) {
+      if (pending.expiresAt > now) continue;
+      this.releasePendingRemoteImage(id);
+    }
+  }
+
+  private scheduleRemoteExpiry(): void {
+    if (this.remoteExpiryTimer) clearTimeout(this.remoteExpiryTimer);
+    this.remoteExpiryTimer = null;
+    if (this.closing || !this.pendingRemoteImages.size) return;
+    const nextExpiry = Math.min(
+      ...[...this.pendingRemoteImages.values()].map((item) => item.expiresAt),
+    );
+    this.remoteExpiryTimer = setTimeout(
+      () => {
+        this.remoteExpiryTimer = null;
+        this.expirePendingRemoteImages();
+        this.scheduleRemoteExpiry();
+      },
+      Math.max(1, nextExpiry - Date.now()),
+    );
+    this.remoteExpiryTimer.unref?.();
+  }
+
+  private releasePendingRemoteImage(id: string): void {
+    const pending = this.pendingRemoteImages.get(id);
+    if (!pending) return;
+    this.pendingRemoteImages.delete(id);
+    if (pending.previewRequestId) this.activeRequests.get(pending.previewRequestId)?.abort();
+    if (pending.preview)
+      this.pendingRemotePreviewBytes = Math.max(
+        0,
+        this.pendingRemotePreviewBytes - pending.preview.byteLength,
+      );
+    pending.preview = null;
+    this.scheduleRemoteExpiry();
+  }
+
+  discardRemoteImages(ids: unknown): void {
+    if (!Array.isArray(ids) || ids.length > IMAGE_STUDIO_MAX_PENDING_REMOTE_IMAGES)
+      throw new Error("待确认图片标识无效。");
+    for (const id of new Set(ids)) {
+      if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) continue;
+      const pending = this.pendingRemoteImages.get(id);
+      if (!pending) continue;
+      if (pending.saveRequestId) this.activeRequests.get(pending.saveRequestId)?.abort();
+      this.releasePendingRemoteImage(id);
+    }
   }
 
   polishPrompt(input: ImageStudioPolishInput): Promise<ImageStudioServiceResult> {
@@ -1736,8 +2185,8 @@ export class ImageStudioService {
   ): Promise<ImageStudioServiceResult> {
     const reference = optionalModelReference(input.model);
     if (!reference) throw new Error("请选择支持图片输入的语言模型。");
-    const { model } = this.resolveModel(reference);
-    if (!isVisionTextModel(model))
+    const { provider, model } = this.resolveModel(reference);
+    if (provider.protocol === "openai_images" || !isVisionTextModel(model))
       throw new Error("所选语言模型未启用图片输入，请到设置中开启视觉输入。");
     return this.withRequest(input.requestId, TEXT_HTTP_TIMEOUT_MS, async (signal) => {
       const assetData = await this.queueAssetRead(input.assetId, signal);
@@ -1764,6 +2213,10 @@ export class ImageStudioService {
     if (this.disposal) return this.disposal;
     this.closing = true;
     for (const controller of this.activeRequests.values()) controller.abort();
+    this.pendingRemoteImages.clear();
+    this.pendingRemotePreviewBytes = 0;
+    if (this.remoteExpiryTimer) clearTimeout(this.remoteExpiryTimer);
+    this.remoteExpiryTimer = null;
     this.disposal = Promise.allSettled([...this.operations]).then(() => undefined);
     return this.disposal;
   }
@@ -1799,7 +2252,8 @@ export class ImageStudioService {
     workspacePrompt: string;
     workspaceNegativePrompt: string;
     model: ModelReference;
-    addToActiveCanvas: boolean;
+    targetDocumentId: string | null;
+    preserveWorkspacePrompts?: boolean;
     signal: AbortSignal;
   }): Promise<ImageStudioWorkspace> {
     if (!input.generated.length || input.generated.length > IMAGE_STUDIO_MAX_GENERATED_COUNT)
@@ -1852,11 +2306,11 @@ export class ImageStudioService {
       }
 
       let documents = previous.documents;
-      if (input.addToActiveCanvas && previous.activeDocumentId) {
+      if (input.targetDocumentId) {
         const columns = Math.ceil(Math.sqrt(assets.length));
         const rows = Math.ceil(assets.length / columns);
         documents = documents.map((document) => {
-          if (document.id !== previous.activeDocumentId) return document;
+          if (document.id !== input.targetDocumentId) return document;
           const layers = [...document.layers];
           assets.forEach((asset, index) => {
             if (layers.length >= IMAGE_STUDIO_MAX_LAYERS) return;
@@ -1900,7 +2354,7 @@ export class ImageStudioService {
         ...previous,
         assets: [...previous.assets, ...assets],
         documents,
-        prompt: input.workspacePrompt,
+        prompt: input.preserveWorkspacePrompts ? previous.prompt : input.workspacePrompt,
       };
       const changes = await this.persistWorkspaceCanvases(workspace);
       try {
@@ -1936,8 +2390,16 @@ export class ImageStudioService {
     signal: AbortSignal,
   ): Promise<TextModelResult> {
     const { provider, model } = this.resolveModel(reference);
-    if (!isTextModel(model)) throw new Error("所选模型不是文本输出模型，请选择视觉语言模型。");
-    const apiKey = this.providerService.getActiveApiKey(provider.id);
+    if (provider.protocol === "openai_images" || !isTextModel(model))
+      throw new Error("所选模型不是文本输出模型，请选择视觉语言模型。");
+    this.managedPolicy?.assertOperational("图片工作台文本模型");
+    this.managedPolicy?.assertProvider(provider.id, model.id, { approved: true });
+    this.managedPolicy?.assertCapability("provider.request", { approved: true });
+    this.managedPolicy?.assertCapability("network.request", { approved: true });
+    const apiKey = this.providerService.getActiveApiKey(provider.id, {
+      approved: true,
+      modelConfigId: model.id,
+    });
     const request = this.buildTextRequest(provider, model, prompt, imageDataUrl);
     const response = await fetch(`${provider.baseUrl}${request.path}`, {
       method: "POST",
@@ -1975,6 +2437,8 @@ export class ImageStudioService {
   ): { path: string; body: Record<string, unknown> } {
     const maxOutputTokens = Math.min(2_048, Math.max(1, model.maxOutputTokens));
     switch (provider.protocol) {
+      case "openai_images":
+        throw new Error("所选模型不是文本输出模型，请选择视觉语言模型。");
       case "openai_chat_completions":
         return {
           path: "/chat/completions",
@@ -2234,25 +2698,33 @@ export class ImageStudioService {
     requestId: string,
     timeoutMs: number,
     run: (signal: AbortSignal) => Promise<T>,
+    options: { isCommittedResult?: () => boolean } = {},
   ): Promise<T> {
     this.assertOpen();
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) throw new Error("生图请求标识格式无效。");
     if (this.activeRequests.has(requestId)) throw new Error("该生图请求正在运行，请勿重复提交。");
     const controller = new AbortController();
-    const timeout = AbortSignal.timeout(timeoutMs);
-    const signal = AbortSignal.any([controller.signal, timeout]);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(`请求超过 ${Math.round(timeoutMs / 1_000)} 秒，已自动终止。`));
+    }, timeoutMs);
+    timeout.unref?.();
+    const signal = controller.signal;
     this.activeRequests.set(requestId, controller);
     try {
       const result = await run(signal);
-      signal.throwIfAborted();
-      this.assertOpen();
+      if (!options.isCommittedResult?.()) {
+        signal.throwIfAborted();
+        this.assertOpen();
+      }
       return result;
     } catch (cause) {
+      if (timedOut) throw new Error(`请求超过 ${Math.round(timeoutMs / 1_000)} 秒，已自动终止。`);
       if (controller.signal.aborted) throw new Error("请求已取消。");
-      if (timeout.aborted)
-        throw new Error(`请求超过 ${Math.round(timeoutMs / 1_000)} 秒，已自动终止。`);
       throw cause;
     } finally {
+      clearTimeout(timeout);
       if (this.activeRequests.get(requestId) === controller) this.activeRequests.delete(requestId);
     }
   }

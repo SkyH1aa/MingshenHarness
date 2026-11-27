@@ -696,7 +696,10 @@ describe("memory runtime", () => {
     vi.stubGlobal("fetch", fetch);
     await f.run();
     expect(requests.map(memoryStage)).toEqual(["chat", "extract"]);
-    expect(f.getActiveApiKey.mock.calls).toEqual([[f.provider.id], [f.provider.id]]);
+    expect(f.getActiveApiKey.mock.calls).toEqual([
+      [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+      [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+    ]);
     expect(requests[1]?.model).toBe(f.model.modelId);
     expect(requests[1]?.tools ?? []).toEqual([]);
     const prompt = memoryInput(requests[1] as ModelRequest);
@@ -788,7 +791,10 @@ describe("memory runtime", () => {
       await f.run();
       expect(requests.map(memoryStage)).toEqual(["chat", "extract"]);
       expect(requests.map((body) => body.model)).toEqual([f.model.modelId, f.model.modelId]);
-      expect(f.getActiveApiKey.mock.calls).toEqual([[f.provider.id], [f.provider.id]]);
+      expect(f.getActiveApiKey.mock.calls).toEqual([
+        [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+        [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+      ]);
       expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(0);
       expect(
         f.events.findLast(
@@ -919,7 +925,10 @@ describe("memory runtime", () => {
     expect(requests[1]?.url).toBe("https://memory-primary.invalid/v1/responses");
     expect(requests[1]?.key).toBe(`Bearer fixture-${primary.providerId}`);
     expect(requests[1]?.body.tools ?? []).toEqual([]);
-    expect(f.getActiveApiKey.mock.calls).toEqual([[f.provider.id], [primary.providerId]]);
+    expect(f.getActiveApiKey.mock.calls).toEqual([
+      [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+      [primary.providerId, { approved: true, modelConfigId: primary.modelId }],
+    ]);
     expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(1);
     expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
   });
@@ -964,7 +973,10 @@ describe("memory runtime", () => {
         primary ? ["fixture", "memory-backup"] : ["fixture", "fixture", "memory-backup"],
       );
       expect((await f.chat.getProjectMemory(f.session.id)).memories).toBe(1);
-      expect(f.getActiveApiKey).toHaveBeenLastCalledWith(backup.providerId);
+      expect(f.getActiveApiKey).toHaveBeenLastCalledWith(backup.providerId, {
+        approved: true,
+        modelConfigId: backup.modelId,
+      });
       expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
       expect(f.events.some((event) => event.type === "run_failed")).toBe(false);
     },
@@ -1019,9 +1031,9 @@ describe("memory runtime", () => {
       );
       expect(requests[2]?.instructions).toBe(requests[1]?.instructions);
       expect(f.getActiveApiKey.mock.calls).toEqual([
-        [f.provider.id],
-        [primary.providerId],
-        [backup.providerId],
+        [f.provider.id, { approved: true, modelConfigId: f.model.id }],
+        [primary.providerId, { approved: true, modelConfigId: primary.modelId }],
+        [backup.providerId, { approved: true, modelConfigId: backup.modelId }],
       ]);
       expect(recordError).toHaveBeenCalledWith("memory.analysis", expect.any(Error), {
         sessionId: f.session.id,

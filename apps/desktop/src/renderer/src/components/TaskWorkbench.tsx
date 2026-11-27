@@ -26,6 +26,7 @@ import type { LiveRun } from "../lib/chat-types";
 import { planStepState } from "../lib/plan-status";
 import { AgentWorkflowPanel } from "./AgentWorkflowPanel";
 import { ExpandableText } from "./ExpandableText";
+import { OfficeDeliveryPanel } from "./OfficeDeliveryPanel";
 import { SubagentOutput } from "./SubagentOutput";
 import { useUiPreferences } from "./UiPreferences";
 
@@ -233,6 +234,19 @@ export function TaskWorkbench({
   }, [session.id]);
   const plan = state?.plan;
   const steps = plan?.steps ?? [];
+  const activeClaims = plan?.activeClaims ?? [];
+  const claimStatusText = (status: string) =>
+    status === "active"
+      ? en
+        ? "running"
+        : "执行中"
+      : status === "stale"
+        ? en
+          ? "lease expired - verify"
+          : "租约过期，需核实"
+        : en
+          ? "stop requested"
+          : "已请求停止";
   const completed = steps.filter((step) => step.status === "completed").length;
   const resumable =
     state?.checkpoint &&
@@ -260,6 +274,7 @@ export function TaskWorkbench({
     setDependencyDrafts({});
     setEditRevision(plan?.revision ?? 0);
   };
+  const deliveryBusy = busy || ["running", "waiting_approval"].includes(session.status);
   if (
     !docked &&
     steps.length === 0 &&
@@ -269,7 +284,7 @@ export function TaskWorkbench({
     !error &&
     !(onDraft && session.workspacePath && !session.parentSessionId)
   )
-    return null;
+    return <OfficeDeliveryPanel sessionId={session.id} busy={deliveryBusy} />;
   return (
     <section
       className={`task-workbench${docked ? " task-workbench--docked" : ""}${orbit ? " task-workbench--orbit" : ""}`}
@@ -440,6 +455,7 @@ export function TaskWorkbench({
             ) : null}
           </div>
           <div className="task-workbench__body" ref={workbenchBody} role="tabpanel">
+            <OfficeDeliveryPanel sessionId={session.id} busy={deliveryBusy} />
             {onDraft && session.workspacePath && !session.parentSessionId ? (
               <AgentWorkflowPanel
                 key={session.id}
@@ -479,91 +495,108 @@ export function TaskWorkbench({
                     });
                   }}
                 >
-                  {editing.map((step, index) => (
-                    <div className="plan-edit-row" key={step.id}>
-                      <input
-                        aria-label={tr("步骤 {0}", [index + 1])}
-                        value={step.content}
-                        maxLength={4000}
-                        required
-                        onChange={(event) =>
-                          setEditing(
-                            (items) =>
-                              items?.map((item) =>
-                                item.id === step.id
-                                  ? { ...item, content: event.target.value }
-                                  : item,
-                              ) ?? null,
-                          )
-                        }
-                      />
-                      <select
-                        aria-label={tr("步骤状态")}
-                        value={step.status}
-                        onChange={(event) =>
-                          setEditing(
-                            (items) =>
-                              items?.map((item) =>
-                                item.id === step.id
-                                  ? { ...item, status: event.target.value as SessionTodo["status"] }
-                                  : item,
-                              ) ?? null,
-                          )
-                        }
-                      >
-                        {["pending", "in_progress", "completed", "cancelled"].map((status) => (
-                          <option value={status} key={status}>
-                            {tr(
-                              status === "pending"
-                                ? "待开始"
-                                : status === "in_progress"
-                                  ? "进行中"
-                                  : status === "completed"
-                                    ? "已完成"
-                                    : "已取消",
-                            )}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="icon-button"
-                        type="button"
-                        aria-label={tr("删除步骤")}
-                        onClick={() =>
-                          setEditing(
-                            (items) =>
-                              items
-                                ?.filter((item) => item.id !== step.id)
-                                .map((item) => ({
-                                  ...item,
-                                  dependsOn: item.dependsOn?.filter((id) => id !== step.id) ?? [],
-                                })) ?? null,
-                          )
-                        }
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                      <label className="plan-edit-row__dependencies">
-                        {tr("依赖步骤")}
+                  {editing.map((step, index) => {
+                    const claim = activeClaims.find((item) => item.stepId === step.id);
+                    return (
+                      <div className="plan-edit-row" key={step.id}>
                         <input
-                          aria-label={tr("步骤 {0} 的依赖编号", [index + 1])}
-                          placeholder="1, 2"
-                          value={
-                            dependencyDrafts[step.id] ??
-                            (step.dependsOn ?? [])
-                              .map((id) => editing.findIndex((item) => item.id === id) + 1)
-                              .join(", ")
+                          aria-label={tr("步骤 {0}", [index + 1])}
+                          value={step.content}
+                          maxLength={4000}
+                          required
+                          disabled={Boolean(claim)}
+                          onChange={(event) =>
+                            setEditing(
+                              (items) =>
+                                items?.map((item) =>
+                                  item.id === step.id
+                                    ? { ...item, content: event.target.value }
+                                    : item,
+                                ) ?? null,
+                            )
                           }
-                          onChange={(event) => {
-                            setDependencyDrafts((current) => ({
-                              ...current,
-                              [step.id]: event.target.value,
-                            }));
-                          }}
                         />
-                      </label>
-                    </div>
-                  ))}
+                        <select
+                          aria-label={tr("步骤状态")}
+                          value={step.status}
+                          disabled={Boolean(claim)}
+                          onChange={(event) =>
+                            setEditing(
+                              (items) =>
+                                items?.map((item) =>
+                                  item.id === step.id
+                                    ? {
+                                        ...item,
+                                        status: event.target.value as SessionTodo["status"],
+                                      }
+                                    : item,
+                                ) ?? null,
+                            )
+                          }
+                        >
+                          {["pending", "in_progress", "completed", "cancelled"].map((status) => (
+                            <option value={status} key={status}>
+                              {tr(
+                                status === "pending"
+                                  ? "待开始"
+                                  : status === "in_progress"
+                                    ? "进行中"
+                                    : status === "completed"
+                                      ? "已完成"
+                                      : "已取消",
+                              )}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          disabled={Boolean(claim)}
+                          aria-label={tr("删除步骤")}
+                          onClick={() =>
+                            setEditing(
+                              (items) =>
+                                items
+                                  ?.filter((item) => item.id !== step.id)
+                                  .map((item) => ({
+                                    ...item,
+                                    dependsOn: item.dependsOn?.filter((id) => id !== step.id) ?? [],
+                                  })) ?? null,
+                            )
+                          }
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                        <label className="plan-edit-row__dependencies">
+                          {tr("依赖步骤")}
+                          <input
+                            aria-label={tr("步骤 {0} 的依赖编号", [index + 1])}
+                            placeholder="1, 2"
+                            disabled={Boolean(claim)}
+                            value={
+                              dependencyDrafts[step.id] ??
+                              (step.dependsOn ?? [])
+                                .map((id) => editing.findIndex((item) => item.id === id) + 1)
+                                .join(", ")
+                            }
+                            onChange={(event) => {
+                              setDependencyDrafts((current) => ({
+                                ...current,
+                                [step.id]: event.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+                        {claim ? (
+                          <small className="plan-edit-row__claim">
+                            {en
+                              ? `Locked by ${claim.ownerSessionId} / ${claim.ownerRunId}: ${claimStatusText(claim.status)}`
+                              : `由 ${claim.ownerSessionId} / ${claim.ownerRunId} 锁定：${claimStatusText(claim.status)}`}
+                          </small>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                   <footer className="plan-edit-actions">
                     <button
                       type="button"
@@ -606,6 +639,7 @@ export function TaskWorkbench({
               ) : steps.length ? (
                 <ol className="plan-steps">
                   {steps.map((step, index) => {
+                    const claim = activeClaims.find((item) => item.stepId === step.id);
                     const display = planStepState(
                       step,
                       session,
@@ -617,11 +651,12 @@ export function TaskWorkbench({
                         key={step.id}
                         className={`plan-step plan-step--${step.status}${display.spinning ? "" : " plan-step--static"}`}
                         data-step-state={display.label}
+                        data-claim-status={claim?.status}
                       >
                         <button
                           type="button"
                           className="icon-button"
-                          disabled={busy}
+                          disabled={busy || Boolean(claim)}
                           aria-label={tr(
                             step.status === "completed" ? "标记为待开始" : "标记为已完成",
                           )}
@@ -667,11 +702,15 @@ export function TaskWorkbench({
                             </small>
                           ) : null}
                         </span>
-                        <small>{tr(display.label)}</small>
+                        <small>
+                          {claim
+                            ? `${claim.ownerSessionId} · ${claimStatusText(claim.status)}`
+                            : tr(display.label)}
+                        </small>
                         <button
                           type="button"
                           className="icon-button"
-                          disabled={busy}
+                          disabled={busy || Boolean(claim)}
                           aria-pressed={plan?.breakpoints.includes(step.id)}
                           aria-label={tr("开始此步骤前暂停")}
                           title={tr("开始此步骤前暂停")}

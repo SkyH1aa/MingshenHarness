@@ -18,9 +18,9 @@ suspected vulnerabilities as described under Reporting below.
 
 Explicit confirmation authorizes downloading and launching a newer version. Metadata comes from the fixed Supabase latest-release RPC; the original RPC stays available to older clients. ZIP downloads use public HTTPS, validate up to five redirects, omit app/model credentials and browser cookies, and support system proxies in an isolated Chromium session. Direct connections revalidate the actual socket DNS lookup; a configured proxy remains a trusted DNS/network boundary. ZIPs require a metadata SHA-256, bounded byte counts (2 GiB) and one root installer matching the version and x64 artifact name. Traversal, duplicate paths, links, additional scripts/executables and excessive extraction ratios are rejected. The installer is hashed again before handoff. Active tasks drain first; handoff blocks new runs and closes services and SQLite before Electron relaunches the installer. Failure/cancellation does not execute it. Hashes are not publisher signing or protection against a compromised release account/Windows user. SmartScreen and installer policy remain in force.
 
-Local database migrations are permanent and transaction-based, with every historical step included. Future schemas fail closed, without downgrade or history wipe. Back up complete data before important upgrades. Migration tests are not formal NSIS installation/rollback certification.
+Local database migrations are permanent and transaction-based, with every historical step included. Schema 11 adds persisted runs, admission records, replayable events, plan claims and Office-delivery receipts. Upgrading from schema 10 first creates a complete `.pre-v11-backup-*.sqlite` copy with `VACUUM INTO`; a failed migration leaves the primary database on schema 10. Future schemas fail closed, without downgrade or history wipe. Back up complete data before important upgrades, and restore the pre-upgrade database before returning to a schema-10 build. Migration tests are not formal NSIS installation/rollback certification.
 
-Mingshen Harness 1.3.4 is a local desktop agent, not a certified
+Mingshen Harness 1.3.7 is a local desktop agent, not a certified
 enterprise security product. An approval prompt is authorization, not proof that a
 command or extension is harmless.
 
@@ -31,6 +31,144 @@ preprocessing. The current request and tool batch are not aborted. Pending updat
 enter only a later model-request context, outside open tool call/result pairs;
 failed, stopped or restarted runs do not silently dispatch them as new tasks.
 Quick Chat accepts guidance IPC only for its own Chat session.
+
+## Runtime Governance and Recovery (1.3.7)
+
+- A user turn is persisted and assigned a `runId` before attachment processing,
+  command preprocessing or a provider request. A same-session
+  `Idempotency-Key` with an identical request returns the original run; the same
+  key with different content is rejected. This prevents an uncertain client
+  retry from silently starting a second model request or tool side effect.
+- Run state, accepted requests and important lifecycle events are local SQLite
+  records. Token deltas are transient; final messages, tool results and the
+  session snapshot are authoritative after reconnect. Persisted events default
+  to a 30-day / 256 MiB retention budget. An expired cursor returns
+  `410 CURSOR_EXPIRED` and requires a fresh snapshot rather than an assumed
+  complete replay.
+- Exact cancellation is bound to one `runId`. HTTP acceptance means only that
+  the stop request was accepted; callers must observe that run until it reaches
+  a terminal state. A stop request cannot cancel a later run in the same
+  conversation.
+- Startup recovery marks unfinished runs as interrupted. It does not replay a
+  provider request, an unfinished tool-argument stream, a command or a remote
+  operation. After a crash, the user must inspect messages, task state, files and
+  other possible side effects before continuing from the next confirmed step.
+  Network failover has a narrower scope and never reruns completed tools.
+- The model watchdog limits network waiting for one model request, not total
+  task or SubAgent lifetime. Defaults are five minutes for the first meaningful
+  response and fifteen minutes of stream idle time; either may be disabled with
+  `0`. Meaningful text, reasoning or tool-argument progress resets idle time;
+  heartbeats and usage-only events do not. Time spent waiting for a tool,
+  approval or user answer is excluded. A timeout uses the existing bounded
+  retry budget, user cancellation is not retried, and incomplete tool calls are
+  never executed.
+
+## Managed Policy and Tool Outcomes (1.3.7)
+
+- Machine policy is read from
+  `%ProgramData%\MingshenHarness\managed-policy.json`. User application policy,
+  machine policy, built-in safety limits, Agent mode, project trust and
+  isolation restrictions are combined with deny precedence. A lower layer,
+  project file, Agent prompt or Full Access selection can only tighten or
+  comply; it cannot relax a manager denial or an invalid policy.
+- If the machine policy file does not exist, no machine layer is configured. If
+  it exists but is unreadable, linked, oversized, malformed, has unknown fields,
+  uses an unsupported version or fails bounds validation, new model, tool,
+  extension, Office-verification and developer-dispatch work is paused. History,
+  diagnostics, exact-run stopping and cleanup remain available. Authenticated
+  diagnostic reads of existing history, session snapshots, runs and effective
+  policy remain available, but do not authorize mutations, claims or Office
+  checks. The application
+  re-reads the policy before the next invocation and does not claim Windows ACL
+  enforcement or undo side effects that already occurred.
+- `ToolOutcome` distinguishes execution status, whether a side effect is
+  confirmed or uncertain, structural validation, business verification,
+  retryability, reason codes, evidence and retained-output references while
+  preserving legacy `output/isError`. Validation occurs after execution but
+  before ledger/checkpoint settlement, PostToolUse hooks and success storage.
+  Invalid output cannot be recorded as success. If a write may already have
+  occurred, a validation or transport failure retains the write barrier and
+  requires inspection before any retry.
+- Built-in and MCP results use declared schemas where available. MCP
+  `outputSchema`/`structuredContent` is checked and bounded. Legacy text tools
+  without a schema may run only as `not_declared`; their prose output is not
+  promoted to structurally validated evidence.
+- Activity-plan claims use the existing conversation plan as the sole task
+  source, with generation checks, atomic ownership, one-minute heartbeats and a
+  five-minute lease. Expiry triggers liveness inspection rather than killing a
+  task or automatically transferring a write. A stale owner or old plan
+  generation cannot overwrite newer state.
+
+## Office Delivery Evidence (1.3.7)
+
+- Office-delivery receipts are bound to the final file SHA-256 and separate
+  package, structure, content, formula, recalculation, render and visual stages.
+  A changed file invalidates the old receipt as `stale`. A successful tool write
+  is not a verified delivery.
+- The service can use a controlled copy of an installed Microsoft Office or
+  LibreOffice to recalculate and render supported files. It never installs
+  Office, runs macros, overrides an application already in use or overwrites the
+  source file. PDF signature or successful export does not establish visual
+  approval.
+- Visual review sends rendered page images to the current image-capable model or
+  a separately selected vision model. This may disclose document content and
+  incur additional provider cost. Defaults are 12 pages / 12 MiB per batch,
+  200 pages / 200 MiB per file per round, and a 24-hour / 512 MiB temporary
+  evidence cache. Truncation is reported as partial coverage, never complete
+  verification.
+- Main CodeAgent and WorkAgent sessions running on the host with full access and
+  a workspace automatically create receipts for changed DOCX, XLSX, PPTX and
+  PDF artifacts after a tool batch. Repairable receipt issues are returned to
+  the model for a bounded per-artifact repair loop (0–3 rounds). A changed file
+  invalidates the prior hash before rechecking, and exhausting the budget blocks
+  further host writes to that artifact in the current run. Existing receipts
+  and unfinished visual batches can still be inspected or continued from the
+  task workbench. ChatAgent, child sessions and sandboxed execution do not gain
+  host-side receipt privileges, and missing Office/LibreOffice, a vision model,
+  or page budget remains explicitly unverified rather than passing by default.
+
+## Versioned Local API (1.3.7)
+
+- The `/v1` API attaches to the already-running desktop or tray process and binds
+  only to `127.0.0.1`. Except for explicitly public legacy health,
+  authentication requires a random Bearer token. A service restart rotates the
+  token; clients must obtain the current token again.
+- Request bodies are limited to 2 MiB at the HTTP boundary, with smaller
+  attachment and model-context limits inside the normal services. `/v1` adds no
+  arbitrary local-path read endpoint. File, Office, MCP, Skill and plugin work
+  still passes through the session workspace, Profile, approval, isolation and
+  writer-lease boundaries.
+- Task claims support bounded `claim`, `heartbeat`, `settle` and `recover`
+  actions through `GET|POST /v1/tasks/claims`. A heartbeat advances the claim
+  version. External settlement requires that caller-read version as a positive
+  safe integer `expectedVersion`; an omitted or malformed value is rejected, and
+  a version made stale by heartbeat or another mutation returns `409`. Direct
+  settlement accepts only `completed` or `released` for an active, live,
+  CAS-matched owner with no retained tool, command, cleanup, file-lease,
+  execution-safety or workspace barrier; stale and cancel-requested claims
+  require recovery. External Office
+  receipt writes support only host-governed `prepare` and `check` through
+  `GET|POST /v1/office/receipts`.
+  Receipt preparation accepts only a session-workspace-relative path and rejects
+  absolute paths, traversal and symlink escapes. These mutations remain subject
+  to managed policy, session/run ownership and the normal Office services.
+  Capability discovery does not grant permission, and a policy denial or
+  unavailable handler remains a refusal.
+- External `visual-batch` and `record-visual` evidence is rejected with
+  `OFFICE_EXTERNAL_VISUAL_EVIDENCE_UNTRUSTED`; a local API client cannot submit
+  pages or claims that become host verification. The external `check` path runs
+  through the same unarchived main CodeAgent/WorkAgent, host, Full Access and
+  workspace closure as the desktop workflow. The task workbench keeps a separate
+  trusted internal visual-continuation path.
+- A run retains its admission `policyRevision` and separately stores the latest
+  bounded `lastPolicyDenial` revision, code, reason, scope, sources and time.
+  The denial row update and `runtime.policy_denied` event are transactional;
+  the latest denial remains queryable after replay events are pruned.
+- The bundled SDK and CLI require Node.js 24 or newer. They attach to the running
+  app and fail explicitly when the token has rotated or the service is stopped.
+  ACP cancellation targets the exact active run with a bounded wait; an HTTP,
+  network or timeout failure reports that remote stopping is unconfirmed rather
+  than claiming success.
 
 ## Agent Modes (1.3.3)
 
@@ -102,11 +240,63 @@ Quick Chat accepts guidance IPC only for its own Chat session.
   counts, response bytes and GIF frames have separate bounds. PNG, JPEG, WebP and
   GIF assets must pass a bounded complete pixel decode; APNG is unsupported.
   Animated GIF/WebP validation checks every frame within the frame/pixel budget.
-- Image requests use the configured OpenAI Images-compatible endpoint and accept
-  Base64 output. URL-only image responses are rejected; model credentials are not
-  forwarded to arbitrary image-download targets. Text-only application flows reject
+- Image requests use the dedicated OpenAI Images provider protocol or the
+  previously supported image-only configurations under Responses / Chat
+  Completions. The dedicated protocol accepts only pure image-output models with
+  tool and parallel-tool execution disabled; an omitted output modality defaults
+  to image, while explicit text or mixed output still fails closed. Those
+  providers are excluded from text, approval, compaction, polishing and
+  reverse-prompt model selection. Text prompt-cache settings are rejected for the
+  dedicated protocol, and switching a provider into it removes any previously
+  stored cache configuration. Its
+  Base URL must end in `/v1`; a full generation or edit endpoint is rejected
+  instead of being rewritten. Generation uses `/images/generations` JSON and
+  reference editing uses `/images/edits` multipart. The current transport is
+  standard synchronous Images; no third-party private asynchronous task polling
+  or fallback to a text protocol is implied.
+- Image responses may contain Base64 output, remote image URLs or a mixture of
+  both. Base64 bytes follow the existing bounded decode and save path. URL results
+  are untrusted candidates. To
+  display a preview, the main process downloads the image into bounded memory using
+  a request with no model API key, Cookies, browser credentials or provider
+  authorization; this is not yet a material-library asset. Explicit confirmation
+  saves the validated in-memory image to the fixed asset store. Closing the preview
+  or choosing Review later does not immediately discard the candidate, which remains
+  available to the current application for about 30 minutes; expiry, explicit
+  discard or application shutdown ends that availability. The main process permits
+  only credential-free public HTTPS targets and rejects private, loopback, local,
+  reserved, unsafe-redirect and DNS-rebinding destinations. It validates and pins DNS
+  for the actual connection and applies bounded redirect, header, 25 MiB image,
+  100 MiB result and 90-second download limits. The 500 MiB budgets for manual
+  import/drag-and-drop and batch export/ZIP are separate flows. Returned bytes still
+  require complete format and pixel validation before an asset or prompt record is
+  committed. Successful retrieval and decoding do not establish content safety,
+  licensing or copyright compliance. Text-only application flows reject
   image-output-only model configurations. This separation does not establish that
-  every third-party image gateway is compatible or trustworthy.
+  every third-party image gateway or image host is compatible or trustworthy.
+- Image Studio and the main process independently cap concurrent generation at
+  three requests. Each request has its own status and abort control and may continue
+  in the background after the user switches surfaces. A generation has a
+  600-second total budget covering provider transport, response parsing and result
+  submission. Remote URL preview download remains a separate 90-second operation;
+  text polishing, reverse prompting, web requests and other existing timeouts do
+  not inherit the generation budget. Submission snapshots prompts, reference
+  selections and a validated target-canvas identifier. Completion preserves later
+  user edits and the current active canvas, and it cannot recreate a canvas the user
+  closed or deleted while the request was running.
+- A remote-image preview may offer **Open in browser** while loading, after a load
+  failure and when ready. The renderer sends only an opaque candidate ID and request
+  ID. The main process revalidates the candidate, expiry, literal network target,
+  operational state and both `network.request` and `browser.use` policy. For a
+  hostname it performs a bounded five-second all-A/AAAA lookup and requires every
+  returned address to be public. Candidate expiry, operational state and both
+  policies are checked again after resolution and immediately before
+  `shell.openExternal`. This action neither joins nor cancels the preview queue, and
+  it does not change save or discard state. The launched browser is a separate trust
+  domain: its Cookies, sign-in state and CAPTCHA result do not return to Mingshen
+  Harness, and its subsequent DNS resolution, redirects and navigation are not
+  protected by the controlled image downloader. A browser view therefore is not
+  evidence that the in-app download passed host, DNS, redirect or content validation.
 - Generated assets store prompt provenance locally with a bounded, versioned record:
   the user's positive and negative prompt is kept separately from any provider
   revision, and only a generated asset with matching provenance can be offered for
@@ -168,6 +358,12 @@ cleanup retains a retryable record and must be reported rather than represented
 as a successful process exit. Directory identity checks cannot eliminate every
 check/spawn race. A Shell that exits independently may leave detached descendants;
 this host terminal is not a process or filesystem isolation boundary.
+
+Creating a terminal must evaluate the current `command.execute` managed policy
+and existing terminal permission gates before starting the Shell or its profile.
+An `ask` result is fail-closed and is not treated as interactive-terminal
+approval. A denied, ask or invalid policy cannot launch a nominally empty PTY as
+a side door around command execution.
 
 ## Local Plugin Interface (1.3.3)
 
@@ -637,11 +833,13 @@ process-keyed digests and safe comparisons, not request bodies, paths or keys;
 the random key is not persisted and a restart creates a new baseline.
 
 Provider creation/editing can explicitly select OpenAI, Claude, Gemini or DeepSeek
-families for confirmed compatible gateways. Automatic detection matches exact
-official endpoints and protocols rather than model/provider names. Unknown
+families for confirmed compatible gateways. OpenAI Images is a separate provider
+protocol rather than a cache/model-family switch: it accepts only pure image-output
+models and does not expose prompt-caching controls. Automatic detection matches
+exact official endpoints and protocols rather than model/provider names. Unknown
 gateways require explicit selection and native-field forwarding. Automatic Gemini
-and DeepSeek adaptation uses implicit prefix reuse without foreign cache hints
-or billable explicit-cache resource creation. Family selection never translates
+and DeepSeek adaptation uses implicit prefix reuse without foreign cache hints or
+billable explicit-cache resource creation. Family selection never translates
 protocols or changes authorization. Missing cache usage remains unknown; an
 explicit zero is a zero hit, and no hit-rate or per-model eligibility guarantee is
 implied. See [provider caching notes](docs/PROVIDER_CACHING.md).
@@ -698,8 +896,8 @@ Runtime downloads use official endpoints and integrity checks. Embiody's EULA do
 not permit bundling without authorization. Docker Desktop has separate licensing
 and Windows prerequisite requirements.
 
-Packaging preflight checks the current source inventory (13,865 resources and
-production dependencies in the 1.3.4 preflight). TencentDB source/runtime/license
+Packaging preflight checks the current source inventory (13,871 resources and
+production dependencies in the current 1.3.7 preflight). TencentDB source/runtime/license
 hashes, complete MIT text and the emitted ESM dependency closure are checked before
 packaging and in afterPack. Missing or inconsistent files fail the check. These
 checks establish consistency with the pinned inventory, not publisher authenticity

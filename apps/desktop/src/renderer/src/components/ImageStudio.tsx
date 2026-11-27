@@ -5,6 +5,7 @@ import {
   CheckCheck,
   Copy,
   Download,
+  ExternalLink,
   Film,
   FolderOpen,
   Image as ImageIcon,
@@ -32,8 +33,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type WheelEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import type { ProviderView } from "../../../shared/domain";
 import {
   alignImageStudioDimension,
@@ -53,10 +54,13 @@ import {
   type ImageStudioCanvas,
   type ImageStudioCanvasSummary,
   type ImageStudioExportProgress,
+  type ImageStudioGenerateInput,
   type ImageStudioGenerationSettings,
   type ImageStudioGenerationWarning,
   type ImageStudioLayer,
   type ImageStudioQuality,
+  type ImageStudioRemoteImage,
+  type ImageStudioRemotePreview,
   type ImageStudioResolution,
   type ImageStudioWorkspace,
   imageStudioAssetPromptRestore,
@@ -75,12 +79,16 @@ import {
   renderGifSource,
   safeExportName,
 } from "../lib/image-studio-rendering";
+import { attachImageStudioWheelZoom, imageStudioZoomAt } from "../lib/image-studio-viewport";
 import {
   ImageStudioUrlCache,
   ImageStudioWorkspaceQueue,
   mergeAssetResult,
+  mergeCanvasMutationResult,
+  mergeConcurrentGenerationResult,
   mergeGeneratedResult,
   mergeRemovedAssets,
+  shouldDispatchImageGeneration,
 } from "../lib/image-studio-workspace";
 import { useDialog } from "./DialogProvider";
 import { ModelPicker } from "./ModelPicker";
@@ -109,7 +117,35 @@ interface CanvasBundle {
   assets: Array<{ id: string; name: string; dataUrl: string }>;
 }
 
+interface RemotePreviewState {
+  status: "loading" | "ready" | "saving" | "error";
+  preview?: ImageStudioRemotePreview;
+  error?: string;
+}
+
+type RemoteOpenState = { status: "opening" } | { status: "error"; error: string };
+
+type GenerationRequestStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled";
+
+interface GenerationRequestView {
+  id: string;
+  prompt: string;
+  modelId: string;
+  targetDocumentId: string | null;
+  status: GenerationRequestStatus;
+  startedAt: number;
+  finishedAt: number | null;
+  savedCount: number;
+  remoteCount: number;
+  warnings: ImageStudioGenerationWarning[];
+  remoteWarnings: string[];
+  error: string | null;
+  cancelledLate: boolean;
+}
+
 const CANVAS_BUNDLE_FORMAT = ["ming", "shen", "image", "canvas"].join(".");
+const IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS = 3;
+const IMAGE_STUDIO_MAX_FINISHED_GENERATION_VIEWS = 6;
 const assetUrlPromises = new Map<string, Promise<string>>();
 const assetUrlValues = new ImageStudioUrlCache(32 * 1024 * 1024);
 const workspaceQueue = new ImageStudioWorkspaceQueue((workspace) =>
@@ -435,6 +471,369 @@ function CanvasLayerImage({
   );
 }
 
+function remoteImageTimeLeft(expiresAt: string, now: number): number {
+  const expires = Date.parse(expiresAt);
+  return Number.isFinite(expires) ? Math.max(0, expires - now) : 0;
+}
+
+function appendGenerationRequest(
+  current: GenerationRequestView[],
+  request: GenerationRequestView,
+): GenerationRequestView[] {
+  let finished = 0;
+  return [request, ...current].filter((item) => {
+    if (item.status === "running" || item.status === "cancelling") return true;
+    finished += 1;
+    return finished <= IMAGE_STUDIO_MAX_FINISHED_GENERATION_VIEWS;
+  });
+}
+
+function RemoteImageDialog({
+  items,
+  selectedId,
+  previews,
+  openStates,
+  now,
+  warning,
+  tx,
+  onSelect,
+  onRetry,
+  onOpen,
+  onSave,
+  onDiscard,
+  onLater,
+}: {
+  items: ImageStudioRemoteImage[];
+  selectedId: string;
+  previews: Record<string, RemotePreviewState>;
+  openStates: Record<string, RemoteOpenState>;
+  now: number;
+  warning: string | null;
+  tx: (zh: string, english: string) => string;
+  onSelect: (id: string) => void;
+  onRetry: (id: string) => void;
+  onOpen: (id: string) => void;
+  onSave: (id: string) => void;
+  onDiscard: (id: string) => void;
+  onLater: () => void;
+}) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const onLaterRef = useRef(onLater);
+  onLaterRef.current = onLater;
+  const selectedIndex = Math.max(
+    0,
+    items.findIndex((item) => item.id === selectedId),
+  );
+  const selected = items[selectedIndex] ?? items[0];
+  const state = selected ? previews[selected.id] : undefined;
+  const expired = selected ? remoteImageTimeLeft(selected.expiresAt, now) <= 0 : true;
+  const hasPreview = Boolean(state?.preview);
+  const saving = state?.status === "saving";
+  const saveFailed = state?.status === "error" && hasPreview;
+  const openState = selected ? openStates[selected.id] : undefined;
+  const opening = openState?.status === "opening";
+  const minutesLeft = selected
+    ? Math.ceil(remoteImageTimeLeft(selected.expiresAt, now) / 60_000)
+    : 0;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    closeRef.current?.focus({ preventScroll: true });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onLaterRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]):not([tabindex="-1"]), summary',
+      );
+      const first = focusable?.[0];
+      const last = focusable?.[focusable.length - 1];
+      if (!first || !last) return;
+      if (
+        event.shiftKey &&
+        (document.activeElement === first || !dialogRef.current?.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        last.focus();
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last || !dialogRef.current?.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected)
+        previousFocus.focus({ preventScroll: true });
+    };
+  }, []);
+
+  if (!selected) return null;
+
+  return createPortal(
+    <div className="mingshen-dialog-backdrop image-remote-backdrop" role="presentation">
+      <button
+        type="button"
+        className="mingshen-dialog-backdrop__dismiss"
+        aria-label={tx("稍后处理远程图片", "Review remote images later")}
+        tabIndex={-1}
+        onClick={onLater}
+      />
+      <section
+        ref={dialogRef}
+        className="mingshen-dialog image-remote-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="image-remote-title"
+        aria-describedby="image-remote-description"
+        data-testid="image-remote-dialog"
+      >
+        <header className="mingshen-dialog__header">
+          <span className="mingshen-dialog__icon" aria-hidden="true">
+            <Download size={18} />
+          </span>
+          <div>
+            <h2 id="image-remote-title">
+              {tx("供应商返回了图片链接", "The provider returned image links")}
+            </h2>
+            <p id="image-remote-description">
+              {tx(
+                "先预览，再决定是否下载到素材库。确认前不会写入本地，也不会用当前输入框覆盖生成时的提示词。",
+                "Preview each result before saving it. Nothing is written locally until you confirm, and your current prompt will not replace the prompt saved with this generation.",
+              )}
+            </p>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            className="icon-button"
+            aria-label={tx("稍后处理", "Review later")}
+            title={tx("稍后处理", "Review later")}
+            onClick={onLater}
+          >
+            <X aria-hidden="true" size={17} />
+          </button>
+        </header>
+
+        {items.length > 1 ? (
+          <div
+            className="image-remote__tabs"
+            role="tablist"
+            aria-label={tx("待处理图片", "Images awaiting review")}
+          >
+            {items.map((item, index) => {
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={item.id === selected.id}
+                  className={item.id === selected.id ? "is-active" : ""}
+                  data-testid={`image-remote-candidate-${index + 1}`}
+                  onClick={() => onSelect(item.id)}
+                >
+                  <ImageIcon aria-hidden="true" size={14} />
+                  <span>{tx(`图片 ${index + 1}`, `Image ${index + 1}`)}</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        <div className="image-remote__preview">
+          {hasPreview && state?.preview ? (
+            <img
+              src={state.preview.dataUrl}
+              alt={tx("供应商返回的图片预览", "Provider image preview")}
+              data-testid="image-remote-preview"
+            />
+          ) : (
+            <div
+              className="image-remote__state"
+              role={state?.status === "error" ? "alert" : "status"}
+            >
+              {state?.status === "error" || expired ? (
+                <AlertTriangle aria-hidden="true" size={22} />
+              ) : (
+                <LoaderCircle className="spin" aria-hidden="true" size={22} />
+              )}
+              <strong>
+                {expired
+                  ? tx("预览已过期", "Preview expired")
+                  : state?.status === "error"
+                    ? tx("无法加载这张图片", "This image could not be loaded")
+                    : tx("正在安全加载预览", "Loading a safe preview")}
+              </strong>
+              {state?.status === "error" ? <p>{state.error}</p> : null}
+              {state?.status === "error" && !expired ? (
+                <button
+                  type="button"
+                  className="btn btn--secondary"
+                  onClick={() => onRetry(selected.id)}
+                >
+                  <LoaderCircle aria-hidden="true" size={14} />
+                  {tx("重新预览", "Preview again")}
+                </button>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="image-remote__meta">
+          <span>
+            {tx(
+              `远程图片 ${selectedIndex + 1} / ${items.length}`,
+              `Remote image ${selectedIndex + 1} of ${items.length}`,
+            )}
+          </span>
+          {state?.preview ? (
+            <span>
+              {state.preview.width} × {state.preview.height} ·{" "}
+              {(state.preview.size / 1024 / 1024).toFixed(2)} MiB
+            </span>
+          ) : null}
+          <span>
+            {expired
+              ? tx("已过期", "Expired")
+              : tx(`剩余约 ${minutesLeft} 分钟`, `About ${minutesLeft} min left`)}
+          </span>
+        </div>
+        {state?.preview ? (
+          <div className="image-remote__provenance">
+            <div className="image-remote__source">
+              <ImageIcon aria-hidden="true" size={14} />
+              <span>{tx("图片来源", "Image source")}</span>
+              <code title={state.preview.sourceHost}>{state.preview.sourceHost}</code>
+            </div>
+            <details className="image-remote__prompts" data-testid="image-remote-prompts">
+              <summary>
+                <Sparkles aria-hidden="true" size={14} />
+                {tx("本次生成提示词", "Prompts used for this generation")}
+              </summary>
+              <div>
+                <section>
+                  <strong>{tx("正面提示词", "Positive prompt")}</strong>
+                  <p>{state.preview.prompt}</p>
+                </section>
+                <section>
+                  <strong>{tx("负面提示词", "Negative prompt")}</strong>
+                  <p>
+                    {state.preview.negativePrompt ||
+                      tx(
+                        "本次生成未设置负面提示词。",
+                        "No negative prompt was set for this generation.",
+                      )}
+                  </p>
+                </section>
+                {state.preview.revisedPrompt ? (
+                  <section>
+                    <strong>{tx("供应商修订提示词", "Provider-revised prompt")}</strong>
+                    <p>{state.preview.revisedPrompt}</p>
+                  </section>
+                ) : null}
+              </div>
+            </details>
+          </div>
+        ) : null}
+        {saveFailed ? (
+          <div className="image-remote__warning" role="alert">
+            <AlertTriangle aria-hidden="true" size={15} />
+            <span>
+              {tx(
+                `下载到素材库失败：${state?.error ?? "未知错误"}。图片预览已保留，可以重试下载。`,
+                `Could not download to the library: ${state?.error ?? "Unknown error"}. The preview is kept so you can retry.`,
+              )}
+            </span>
+          </div>
+        ) : null}
+        {openState?.status === "error" ? (
+          <div className="image-remote__warning" role="alert" data-testid="image-remote-open-error">
+            <AlertTriangle aria-hidden="true" size={15} />
+            <span>
+              {tx(
+                `无法在默认浏览器中打开：${openState.error}。预览和下载状态未改变，可以重试。`,
+                `Could not open the default browser: ${openState.error}. Preview and download state were not changed; you can retry.`,
+              )}
+            </span>
+          </div>
+        ) : null}
+        {warning ? (
+          <div className="image-remote__warning" role="status">
+            <AlertTriangle aria-hidden="true" size={15} />
+            <span>{warning}</span>
+          </div>
+        ) : null}
+
+        <footer className="mingshen-dialog__actions image-remote__actions">
+          <button
+            type="button"
+            className="btn btn--ghost"
+            data-testid="image-remote-later"
+            onClick={onLater}
+          >
+            {tx("稍后处理", "Review later")}
+          </button>
+          <button
+            type="button"
+            className="btn btn--secondary"
+            data-testid="image-remote-discard"
+            disabled={saving}
+            onClick={() => onDiscard(selected.id)}
+          >
+            <X aria-hidden="true" size={14} />
+            {tx("不保存这张", "Discard this image")}
+          </button>
+          <button
+            type="button"
+            className="btn btn--secondary"
+            data-testid="image-remote-open-browser"
+            data-opening={opening ? "true" : "false"}
+            disabled={expired}
+            aria-busy={opening}
+            onClick={() => onOpen(selected.id)}
+          >
+            {opening ? (
+              <LoaderCircle className="spin" aria-hidden="true" size={14} />
+            ) : (
+              <ExternalLink aria-hidden="true" size={14} />
+            )}
+            {opening
+              ? tx("正在打开浏览器", "Opening browser")
+              : tx("在浏览器打开", "Open in browser")}
+          </button>
+          <button
+            type="button"
+            className="btn btn--primary"
+            data-testid="image-remote-save"
+            disabled={!hasPreview || expired || saving}
+            onClick={() => onSave(selected.id)}
+          >
+            {saving ? (
+              <LoaderCircle className="spin" aria-hidden="true" size={14} />
+            ) : (
+              <Download aria-hidden="true" size={14} />
+            )}
+            {saving
+              ? tx("正在保存", "Saving")
+              : saveFailed
+                ? tx("重试下载", "Retry download")
+                : tx("下载到素材库", "Download to library")}
+          </button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 export function ImageStudio({ active, providers, onOpenProviderSettings }: ImageStudioProps) {
   const en = useLocale() === "en";
   const tx = (zh: string, english: string) => (en ? english : zh);
@@ -450,6 +849,14 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [generationWarnings, setGenerationWarnings] = useState<ImageStudioGenerationWarning[]>([]);
+  const [generationRequests, setGenerationRequests] = useState<GenerationRequestView[]>([]);
+  const [remoteImages, setRemoteImages] = useState<ImageStudioRemoteImage[]>([]);
+  const [remotePreviews, setRemotePreviews] = useState<Record<string, RemotePreviewState>>({});
+  const [remoteOpenStates, setRemoteOpenStates] = useState<Record<string, RemoteOpenState>>({});
+  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
+  const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
+  const [remoteWarning, setRemoteWarning] = useState<string | null>(null);
+  const [remoteNow, setRemoteNow] = useState(() => Date.now());
   const [promptPreview, setPromptPreview] = useState<{
     text: string;
     sourcePrompt: string;
@@ -482,9 +889,21 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
   const workspaceRef = useRef(workspace);
   const busyRef = useRef<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
+  const generationRequestsRef = useRef<GenerationRequestView[]>([]);
+  const activeGenerationRequestIds = useRef(new Set<string>());
+  const dispatchedGenerationRequestIds = useRef(new Set<string>());
+  const cancellingGenerationRequestIds = useRef(new Set<string>());
+  const generationMergeTail = useRef(Promise.resolve());
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelRenameRef = useRef<string | null>(null);
   const imageDropDepth = useRef(0);
+  const activeRef = useRef(active);
+  const remoteImagesRef = useRef(remoteImages);
+  const remotePreviewRequests = useRef(new Map<string, string>());
+  const remoteOpenRequests = useRef(new Set<string>());
+  const expiringRemoteIds = useRef(new Set<string>());
+  activeRef.current = active;
+  remoteImagesRef.current = remoteImages;
 
   useEffect(() => {
     if (!renamingCanvasId) return;
@@ -529,6 +948,14 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
     return () => {
       mounted.current = false;
       if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+      for (const previewRequestId of remotePreviewRequests.current.values()) {
+        void window.mingshen.cancelImageStudioRequest(previewRequestId).catch(() => undefined);
+      }
+      remotePreviewRequests.current.clear();
+      for (const generationRequestId of activeGenerationRequestIds.current) {
+        void window.mingshen.cancelImageStudioRequest(generationRequestId).catch(() => undefined);
+      }
+      activeGenerationRequestIds.current.clear();
       const requestId = activeRequestId.current;
       activeRequestId.current = null;
       if (requestId)
@@ -536,6 +963,113 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
       if (loadedRef.current) void workspaceQueue.flush().catch(() => undefined);
     };
   }, []);
+
+  useEffect(() => {
+    if (active) return;
+    setRemoteDialogOpen(false);
+  }, [active]);
+
+  useEffect(() => {
+    if (!remoteImages.length) return;
+    const nextExpiry = Math.min(
+      ...remoteImages.map((item) => {
+        const value = Date.parse(item.expiresAt);
+        return Number.isFinite(value) ? value : Date.now();
+      }),
+    );
+    const timer = setTimeout(
+      () => setRemoteNow(Date.now()),
+      Math.min(2_147_483_647, Math.max(0, nextExpiry - Date.now() + 50)),
+    );
+    return () => clearTimeout(timer);
+  }, [remoteImages]);
+
+  useEffect(() => {
+    const expiredIds = remoteImages
+      .filter(
+        (item) =>
+          remoteImageTimeLeft(item.expiresAt, remoteNow) <= 0 &&
+          remotePreviews[item.id]?.status !== "saving" &&
+          !expiringRemoteIds.current.has(item.id),
+      )
+      .map((item) => item.id);
+    if (!expiredIds.length) return;
+    for (const id of expiredIds) {
+      expiringRemoteIds.current.add(id);
+      const previewRequestId = remotePreviewRequests.current.get(id);
+      if (previewRequestId)
+        void window.mingshen.cancelImageStudioRequest(previewRequestId).catch(() => undefined);
+      remotePreviewRequests.current.delete(id);
+    }
+    const removeExpired = () => {
+      const expired = new Set(expiredIds);
+      const remaining = remoteImagesRef.current.filter((item) => !expired.has(item.id));
+      remoteImagesRef.current = remaining;
+      setRemoteImages(remaining);
+      setRemotePreviews((current) => {
+        const next = { ...current };
+        for (const id of expiredIds) delete next[id];
+        return next;
+      });
+      setSelectedRemoteId((current) =>
+        current && expired.has(current) ? (remaining[0]?.id ?? null) : current,
+      );
+      if (!remaining.length) {
+        setRemoteDialogOpen(false);
+        setRemoteWarning(null);
+      }
+      for (const id of expiredIds) expiringRemoteIds.current.delete(id);
+    };
+    void window.mingshen
+      .discardImageStudioRemoteImages(expiredIds)
+      .catch(() => undefined)
+      .finally(removeExpired);
+  }, [remoteImages, remoteNow, remotePreviews]);
+
+  useEffect(() => {
+    if (!remoteDialogOpen || !selectedRemoteId) return;
+    const item = remoteImages.find((candidate) => candidate.id === selectedRemoteId);
+    if (!item || remoteImageTimeLeft(item.expiresAt, Date.now()) <= 0) return;
+    const current = remotePreviews[selectedRemoteId];
+    if (current) return;
+    const requestId = crypto.randomUUID();
+    remotePreviewRequests.current.set(item.id, requestId);
+    setRemotePreviews((previews) => ({
+      ...previews,
+      [item.id]: { status: "loading" },
+    }));
+    void window.mingshen
+      .previewImageStudioRemoteImage({ id: item.id, requestId })
+      .then((preview) => {
+        if (
+          !mounted.current ||
+          !remoteImagesRef.current.some((candidate) => candidate.id === item.id)
+        )
+          return;
+        setRemotePreviews((previews) => ({
+          ...previews,
+          [item.id]: { status: "ready", preview },
+        }));
+      })
+      .catch((cause) => {
+        if (
+          !mounted.current ||
+          !remoteImagesRef.current.some((candidate) => candidate.id === item.id)
+        )
+          return;
+        setRemotePreviews((previews) => ({
+          ...previews,
+          [item.id]: {
+            status: "error",
+            error: cause instanceof Error ? cause.message : String(cause),
+          },
+        }));
+      })
+      .finally(() => {
+        if (remotePreviewRequests.current.get(item.id) === requestId)
+          remotePreviewRequests.current.delete(item.id);
+      });
+  }, [remoteDialogOpen, remoteImages, remotePreviews, selectedRemoteId]);
 
   useEffect(() => {
     let active = true;
@@ -680,9 +1214,184 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
     if (mounted.current) setBusy(next);
   };
 
+  const updateGenerationRequest = (
+    requestId: string,
+    update:
+      | Partial<GenerationRequestView>
+      | ((current: GenerationRequestView) => GenerationRequestView),
+  ) => {
+    const next = generationRequestsRef.current.map((request) => {
+      if (request.id !== requestId) return request;
+      return typeof update === "function" ? update(request) : { ...request, ...update };
+    });
+    generationRequestsRef.current = next;
+    if (mounted.current) setGenerationRequests(next);
+  };
+
+  const isGenerationRunning = (requestId: string) =>
+    activeGenerationRequestIds.current.has(requestId);
+
   const applyWorkspaceSnapshot = (next: ImageStudioWorkspace) => {
     workspaceRef.current = next;
     if (mounted.current) setWorkspace(next);
+  };
+
+  const commitWorkspaceUpdate = (
+    update: (current: ImageStudioWorkspace) => ImageStudioWorkspace,
+    notifySaved = false,
+  ) =>
+    workspaceQueue.commit(
+      () => workspaceRef.current,
+      update,
+      (next) => {
+        applyWorkspaceSnapshot(next);
+        if (mounted.current) setError(null);
+      },
+      (result) => {
+        if (!mounted.current) return;
+        if (result.status === "saved") {
+          if (notifySaved) showNotice(tx("已保存", "Saved"));
+        } else {
+          setError(result.error instanceof Error ? result.error.message : String(result.error));
+        }
+      },
+    );
+
+  const removeRemoteImages = (ids: string[]) => {
+    const removed = new Set(ids);
+    const remaining = remoteImagesRef.current.filter((item) => !removed.has(item.id));
+    remoteImagesRef.current = remaining;
+    setRemoteImages(remaining);
+    setRemotePreviews((current) => {
+      const next = { ...current };
+      for (const id of ids) delete next[id];
+      return next;
+    });
+    setRemoteOpenStates((current) => {
+      const next = { ...current };
+      for (const id of ids) delete next[id];
+      return next;
+    });
+    for (const id of ids) remoteOpenRequests.current.delete(id);
+    setSelectedRemoteId((current) =>
+      current && removed.has(current) ? (remaining[0]?.id ?? null) : current,
+    );
+    if (!remaining.length) {
+      setRemoteDialogOpen(false);
+      setRemoteWarning(null);
+    }
+  };
+
+  const discardRemoteImage = async (id: string) => {
+    const previewRequestId = remotePreviewRequests.current.get(id);
+    if (previewRequestId)
+      void window.mingshen.cancelImageStudioRequest(previewRequestId).catch(() => undefined);
+    try {
+      await window.mingshen.discardImageStudioRemoteImages([id]);
+      removeRemoteImages([id]);
+    } catch (cause) {
+      setRemotePreviews((current) => ({
+        ...current,
+        [id]: {
+          status: "error",
+          error: cause instanceof Error ? cause.message : String(cause),
+        },
+      }));
+    }
+  };
+
+  const retryRemotePreview = (id: string) => {
+    setRemotePreviews((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setRemoteNow(Date.now());
+  };
+
+  const openRemoteImage = async (id: string) => {
+    const item = remoteImagesRef.current.find((candidate) => candidate.id === id);
+    if (!item || remoteImageTimeLeft(item.expiresAt, Date.now()) <= 0) {
+      setRemoteOpenStates((current) => ({
+        ...current,
+        [id]: { status: "error", error: tx("远程图片已过期。", "The remote image expired.") },
+      }));
+      return;
+    }
+    if (remoteOpenRequests.current.has(id)) return;
+    remoteOpenRequests.current.add(id);
+    setRemoteOpenStates((current) => {
+      const next = { ...current };
+      delete next[id];
+      next[id] = { status: "opening" };
+      return next;
+    });
+    try {
+      await window.mingshen.openImageStudioRemoteImage({
+        id,
+        requestId: crypto.randomUUID(),
+      });
+      if (!mounted.current || !remoteImagesRef.current.some((candidate) => candidate.id === id))
+        return;
+      setRemoteOpenStates((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    } catch (cause) {
+      if (!mounted.current || !remoteImagesRef.current.some((candidate) => candidate.id === id))
+        return;
+      setRemoteOpenStates((current) => ({
+        ...current,
+        [id]: {
+          status: "error",
+          error: cause instanceof Error ? cause.message : String(cause),
+        },
+      }));
+    } finally {
+      remoteOpenRequests.current.delete(id);
+    }
+  };
+
+  const saveRemoteImage = async (id: string) => {
+    const current = remotePreviews[id];
+    if (!current?.preview || current.status === "loading" || current.status === "saving") return;
+    const preview = current.preview;
+    setRemotePreviews((previews) => ({
+      ...previews,
+      [id]: { status: "saving", preview },
+    }));
+    try {
+      const result = await window.mingshen.saveImageStudioRemoteImage({
+        id,
+        requestId: crypto.randomUUID(),
+      });
+      if (!mounted.current) return;
+      await commitWorkspaceUpdate((currentWorkspace) =>
+        mergeGeneratedResult(currentWorkspace, result),
+      );
+      if (!mounted.current) return;
+      if (result.warnings.length)
+        setGenerationWarnings((currentWarnings) => [...currentWarnings, ...result.warnings]);
+      setAssetsExpanded(true);
+      removeRemoteImages([id]);
+      showNotice(
+        tx(
+          `已下载 ${result.generatedAssets.length} 张图片到素材库`,
+          `Downloaded ${result.generatedAssets.length} image${result.generatedAssets.length === 1 ? "" : "s"} to the library`,
+        ),
+      );
+    } catch (cause) {
+      if (!mounted.current) return;
+      setRemotePreviews((previews) => ({
+        ...previews,
+        [id]: {
+          status: "error",
+          error: cause instanceof Error ? cause.message : String(cause),
+          preview,
+        },
+      }));
+    }
   };
 
   const refreshCanvasProjects = async () => {
@@ -702,9 +1411,15 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
     setOperation(operation);
     setError(null);
     try {
-      const next = await workspaceQueue.run(action);
+      await workspaceQueue.commitCanonical(
+        () => workspaceRef.current,
+        action,
+        mergeCanvasMutationResult,
+        (next) => {
+          if (mounted.current) applyWorkspaceSnapshot(next);
+        },
+      );
       if (!mounted.current) return false;
-      applyWorkspaceSnapshot(next);
       setSelectedLayerId(null);
       await refreshCanvasProjects();
       return true;
@@ -721,11 +1436,8 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
   ) => {
     const next = typeof update === "function" ? update(workspaceRef.current) : update;
     if (next === workspaceRef.current) return;
-    workspaceRef.current = next;
-    if (mounted.current) {
-      setError(null);
-      setWorkspace(next);
-    }
+    applyWorkspaceSnapshot(next);
+    if (mounted.current) setError(null);
     if (loadedRef.current)
       workspaceQueue.schedule(next, (result) => {
         if (!mounted.current) return;
@@ -1280,17 +1992,29 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
         confirmLabel: tx("覆盖并导入", "Replace and import"),
       });
       if (!accepted || !mounted.current) return;
-      const current = workspaceRef.current;
-      const currentAsset = current.assets.find((item) => item.id === asset.id);
-      const currentRestore = currentAsset ? imageStudioAssetPromptRestore(currentAsset) : null;
-      if (
-        current.prompt !== before.prompt ||
-        current.negativePrompt !== before.negativePrompt ||
-        !currentRestore ||
-        currentRestore.prompt !== restored.prompt ||
-        currentRestore.negativePrompt !== restored.negativePrompt ||
-        currentRestore.replacesNegativePrompt !== restored.replacesNegativePrompt
-      ) {
+      let changedWhileConfirming = false;
+      await commitWorkspaceUpdate((latest) => {
+        const currentAsset = latest.assets.find((item) => item.id === asset.id);
+        const currentRestore = currentAsset ? imageStudioAssetPromptRestore(currentAsset) : null;
+        if (
+          latest.prompt !== before.prompt ||
+          latest.negativePrompt !== before.negativePrompt ||
+          !currentRestore ||
+          currentRestore.prompt !== restored.prompt ||
+          currentRestore.negativePrompt !== restored.negativePrompt ||
+          currentRestore.replacesNegativePrompt !== restored.replacesNegativePrompt
+        ) {
+          changedWhileConfirming = true;
+          return latest;
+        }
+        return {
+          ...latest,
+          prompt: restored.prompt,
+          negativePrompt: restored.negativePrompt ?? latest.negativePrompt,
+        };
+      });
+      if (!mounted.current) return;
+      if (changedWhileConfirming) {
         setError(
           tx(
             "确认期间工作区提示词或素材已更改，未覆盖任何内容。请重新导入并确认。",
@@ -1299,11 +2023,6 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
         );
         return;
       }
-      updateWorkspace((latest) => ({
-        ...latest,
-        prompt: restored.prompt,
-        negativePrompt: restored.negativePrompt ?? latest.negativePrompt,
-      }));
       setPromptPreview(null);
       setInspectorExpanded(true);
       showNotice(tx("提示词已导入", "Prompts imported"));
@@ -1315,8 +2034,16 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
   };
 
   const generate = async () => {
-    if (busyRef.current) return;
     const snapshot = workspaceRef.current;
+    if (activeGenerationRequestIds.current.size >= IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS) {
+      setError(
+        tx(
+          `同时最多运行 ${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} 个生图请求，请先等待或取消其中一个。`,
+          `Up to ${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} image requests can run at once. Wait for one or cancel one first.`,
+        ),
+      );
+      return;
+    }
     if (!snapshot.imageModel) {
       setError(tx("请先选择图片生成模型。", "Choose an image model first."));
       return;
@@ -1338,46 +2065,158 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
       );
       return;
     }
-    setOperation("generate");
     setError(null);
-    setGenerationWarnings([]);
     const requestId = crypto.randomUUID();
-    activeRequestId.current = requestId;
+    const request: GenerationRequestView = {
+      id: requestId,
+      prompt: snapshot.prompt,
+      modelId: imageModel.modelId,
+      targetDocumentId: snapshot.activeDocumentId,
+      status: "running",
+      startedAt: Date.now(),
+      finishedAt: null,
+      savedCount: 0,
+      remoteCount: 0,
+      warnings: [],
+      remoteWarnings: [],
+      error: null,
+      cancelledLate: false,
+    };
+    const queuedRequests = appendGenerationRequest(generationRequestsRef.current, request);
+    generationRequestsRef.current = queuedRequests;
+    activeGenerationRequestIds.current.add(requestId);
+    setGenerationRequests(queuedRequests);
     try {
-      await workspaceQueue.run(async () => {
-        if (!mounted.current || activeRequestId.current !== requestId) return;
-        const result = await window.mingshen.generateImageStudioImage({
+      await workspaceQueue.flush();
+      if (!mounted.current || !activeGenerationRequestIds.current.has(requestId)) return;
+      if (
+        !shouldDispatchImageGeneration(
+          activeGenerationRequestIds.current,
+          cancellingGenerationRequestIds.current,
           requestId,
-          model: imageModel,
-          prompt: snapshot.prompt,
-          negativePrompt: snapshot.negativePrompt,
-          generation: snapshot.generation,
-          addToActiveCanvas: true,
-          ...(snapshot.generation.referenceEnabled
-            ? { referenceAssetIds: requestReferenceIds }
-            : {}),
+        )
+      ) {
+        activeGenerationRequestIds.current.delete(requestId);
+        cancellingGenerationRequestIds.current.delete(requestId);
+        updateGenerationRequest(requestId, {
+          status: "cancelled",
+          finishedAt: Date.now(),
+          error: null,
         });
-        if (!mounted.current || activeRequestId.current !== requestId) return;
-        updateWorkspace((current) => mergeGeneratedResult(current, result));
-        setGenerationWarnings(result.warnings);
-        setAssetsExpanded(true);
-        setInspectorExpanded(false);
-        setSearch("");
-        showNotice(
-          tx(
-            `已生成 ${result.generatedAssets.length} 张并保存到素材库`,
-            `Generated ${result.generatedAssets.length} images and saved them to the library`,
-          ),
-        );
-      });
-    } catch (cause) {
-      if (mounted.current && activeRequestId.current === requestId)
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (activeRequestId.current === requestId) {
-        activeRequestId.current = null;
-        setOperation(null);
+        return;
       }
+      const generateInput: ImageStudioGenerateInput = {
+        requestId,
+        model: imageModel,
+        prompt: snapshot.prompt,
+        negativePrompt: snapshot.negativePrompt,
+        generation: snapshot.generation,
+        addToActiveCanvas: true,
+        targetDocumentId: request.targetDocumentId,
+        ...(snapshot.generation.referenceEnabled ? { referenceAssetIds: requestReferenceIds } : {}),
+      };
+      dispatchedGenerationRequestIds.current.add(requestId);
+      const result = await window.mingshen.generateImageStudioImage(generateInput);
+      if (!mounted.current || !isGenerationRunning(requestId)) return;
+      generationMergeTail.current = generationMergeTail.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!mounted.current || !isGenerationRunning(requestId)) return;
+          await commitWorkspaceUpdate((current) =>
+            mergeConcurrentGenerationResult(current, result, request.targetDocumentId),
+          );
+          if (!mounted.current || !isGenerationRunning(requestId)) return;
+          const remoteResults = result.remoteImages ?? [];
+          const remoteWarnings = result.remoteWarnings ?? [];
+          const cancelledLate = cancellingGenerationRequestIds.current.has(requestId);
+          activeGenerationRequestIds.current.delete(requestId);
+          cancellingGenerationRequestIds.current.delete(requestId);
+          updateGenerationRequest(requestId, {
+            status: "completed",
+            finishedAt: Date.now(),
+            savedCount: result.generatedAssets.length,
+            remoteCount: remoteResults.length,
+            warnings: result.warnings,
+            remoteWarnings,
+            error: null,
+            cancelledLate,
+          });
+          if (result.warnings.length)
+            setGenerationWarnings((currentWarnings) => [
+              ...currentWarnings.filter(
+                (warning) =>
+                  !result.warnings.some(
+                    (next) =>
+                      next.imageIndex === warning.imageIndex &&
+                      next.actualWidth === warning.actualWidth &&
+                      next.actualHeight === warning.actualHeight &&
+                      next.requestedWidth === warning.requestedWidth &&
+                      next.requestedHeight === warning.requestedHeight,
+                  ),
+              ),
+              ...result.warnings,
+            ]);
+          if (remoteResults.length) {
+            const merged = new Map(remoteImagesRef.current.map((item) => [item.id, item]));
+            for (const remote of remoteResults) merged.set(remote.id, remote);
+            const nextRemoteImages = [...merged.values()];
+            remoteImagesRef.current = nextRemoteImages;
+            setRemoteImages(nextRemoteImages);
+            setSelectedRemoteId(remoteResults[0]?.id ?? nextRemoteImages[0]?.id ?? null);
+            setRemoteWarning(remoteWarnings.join("\n") || null);
+            setRemoteNow(Date.now());
+            if (activeRef.current) setRemoteDialogOpen(true);
+          }
+          setAssetsExpanded(true);
+          setInspectorExpanded(false);
+          setSearch("");
+          const savedCount = result.generatedAssets.length;
+          if (cancelledLate) {
+            showNotice(
+              tx(
+                `取消较晚；供应商已提交结果，${savedCount ? `已保存 ${savedCount} 张` : "结果已处理"}${remoteResults.length ? `，另有 ${remoteResults.length} 张待确认` : ""}。`,
+                `Cancellation was too late; the provider had already committed the result.${savedCount ? ` ${savedCount} image${savedCount === 1 ? "" : "s"} saved` : ""}${remoteResults.length ? `, with ${remoteResults.length} awaiting review` : ""}.`,
+              ),
+            );
+          } else if (savedCount && remoteResults.length) {
+            showNotice(
+              tx(
+                `已保存 ${savedCount} 张，另有 ${remoteResults.length} 张链接图片待确认`,
+                `Saved ${savedCount}; ${remoteResults.length} linked image${remoteResults.length === 1 ? "" : "s"} awaiting review`,
+              ),
+            );
+          } else if (remoteResults.length) {
+            showNotice(
+              tx(
+                `收到 ${remoteResults.length} 张链接图片，请先预览再下载`,
+                `${remoteResults.length} linked image${remoteResults.length === 1 ? "" : "s"} received. Preview before downloading.`,
+              ),
+            );
+          } else {
+            showNotice(
+              tx(
+                `已生成 ${savedCount} 张并保存到素材库`,
+                `Generated ${savedCount} image${savedCount === 1 ? "" : "s"} and saved them to the library`,
+              ),
+            );
+          }
+        });
+      await generationMergeTail.current;
+    } catch (cause) {
+      if (mounted.current && isGenerationRunning(requestId)) {
+        const wasCancelling = cancellingGenerationRequestIds.current.has(requestId);
+        activeGenerationRequestIds.current.delete(requestId);
+        cancellingGenerationRequestIds.current.delete(requestId);
+        updateGenerationRequest(requestId, {
+          status: wasCancelling ? "cancelled" : "failed",
+          finishedAt: Date.now(),
+          error: wasCancelling ? null : cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    } finally {
+      activeGenerationRequestIds.current.delete(requestId);
+      dispatchedGenerationRequestIds.current.delete(requestId);
+      cancellingGenerationRequestIds.current.delete(requestId);
     }
   };
 
@@ -1448,6 +2287,53 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
         setOperation(null);
       }
     }
+  };
+
+  const cancelGeneration = (requestId: string) => {
+    const request = generationRequestsRef.current.find((item) => item.id === requestId);
+    if (
+      !activeGenerationRequestIds.current.has(requestId) ||
+      cancellingGenerationRequestIds.current.has(requestId) ||
+      request?.status !== "running"
+    )
+      return;
+    if (!dispatchedGenerationRequestIds.current.has(requestId)) {
+      activeGenerationRequestIds.current.delete(requestId);
+      updateGenerationRequest(requestId, {
+        status: "cancelled",
+        finishedAt: Date.now(),
+        error: null,
+      });
+      showNotice(tx("已取消尚未发出的生图请求", "Cancelled before the image request was sent"));
+      return;
+    }
+    cancellingGenerationRequestIds.current.add(requestId);
+    updateGenerationRequest(requestId, {
+      status: "cancelling",
+      finishedAt: null,
+      error: null,
+    });
+    void window.mingshen.cancelImageStudioRequest(requestId).catch((cause) => {
+      if (
+        !mounted.current ||
+        !activeGenerationRequestIds.current.has(requestId) ||
+        !cancellingGenerationRequestIds.current.has(requestId)
+      )
+        return;
+      updateGenerationRequest(requestId, {
+        status: "cancelling",
+        error: tx(
+          `取消指令未能送达，正在等待原请求结束：${cause instanceof Error ? cause.message : String(cause)}`,
+          `The cancellation request could not be delivered; waiting for the original request to finish: ${cause instanceof Error ? cause.message : String(cause)}`,
+        ),
+      });
+    });
+    showNotice(
+      tx(
+        "正在取消；若供应商已经提交，结果仍会保留",
+        "Cancelling; a result already committed by the provider will still be kept",
+      ),
+    );
   };
 
   const cancelNetworkRequest = () => {
@@ -1642,16 +2528,9 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
 
   const setViewportZoom = (nextZoom: number, center?: { x: number; y: number }) => {
     if (!currentDocument || !viewportRef.current) return;
-    const zoom = clamp(nextZoom, 0.12, 4);
     const rect = viewportRef.current.getBoundingClientRect();
     const anchor = center ?? { x: rect.width / 2, y: rect.height / 2 };
-    const worldX = (anchor.x - currentDocument.offsetX) / currentDocument.zoom;
-    const worldY = (anchor.y - currentDocument.offsetY) / currentDocument.zoom;
-    patchDocument(currentDocument.id, {
-      zoom,
-      offsetX: anchor.x - worldX * zoom,
-      offsetY: anchor.y - worldY * zoom,
-    });
+    patchDocument(currentDocument.id, imageStudioZoomAt(currentDocument, nextZoom, anchor));
   };
 
   const fitCanvas = () => {
@@ -1672,15 +2551,19 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
     });
   };
 
-  const onWheel = (event: WheelEvent<HTMLDivElement>) => {
-    if (!currentDocument) return;
-    event.preventDefault();
-    const rect = event.currentTarget.getBoundingClientRect();
-    setViewportZoom(currentDocument.zoom * (event.deltaY > 0 ? 0.9 : 1.1), {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-    });
-  };
+  const patchDocumentRef = useRef(patchDocument);
+  patchDocumentRef.current = patchDocument;
+  useEffect(() => {
+    if (!loaded || !viewportRef.current) return;
+    return attachImageStudioWheelZoom(
+      viewportRef.current,
+      () => {
+        const current = workspaceRef.current;
+        return current.documents.find((canvas) => canvas.id === current.activeDocumentId) ?? null;
+      },
+      (id, patch) => patchDocumentRef.current(id, patch),
+    );
+  }, [loaded]);
 
   const beginBackgroundPan = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!currentDocument || event.button !== 0) return;
@@ -1785,6 +2668,17 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
     busy === "canvas-delete" ||
     busy === "canvas-duplicate" ||
     busy === "canvas-rename";
+  const activeGenerationCount = generationRequests.filter(
+    (request) => request.status === "running" || request.status === "cancelling",
+  ).length;
+  const generationCapacityReached =
+    activeGenerationCount >= IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS;
+  const finishedGenerationCount = generationRequests.filter(
+    (request) =>
+      request.status === "completed" ||
+      request.status === "failed" ||
+      request.status === "cancelled",
+  ).length;
 
   return (
     <section
@@ -2093,6 +2987,35 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
                       </button>
                     </div>
                   </div>
+                  {remoteImages.length ? (
+                    <button
+                      type="button"
+                      className="image-library__remote-pending"
+                      data-testid="image-remote-pending"
+                      onClick={() => {
+                        setRemoteNow(Date.now());
+                        setSelectedRemoteId((current) =>
+                          current && remoteImages.some((item) => item.id === current)
+                            ? current
+                            : (remoteImages[0]?.id ?? null),
+                        );
+                        setRemoteDialogOpen(true);
+                      }}
+                    >
+                      <Download aria-hidden="true" size={15} />
+                      <span>
+                        <strong>
+                          {tx(
+                            `${remoteImages.length} 张图片等待确认`,
+                            `${remoteImages.length} image${remoteImages.length === 1 ? "" : "s"} awaiting review`,
+                          )}
+                        </strong>
+                        <small>
+                          {tx("预览后再下载到素材库", "Preview before adding to library")}
+                        </small>
+                      </span>
+                    </button>
+                  ) : null}
                   <fieldset className="image-library__batch-actions">
                     <legend className="visually-hidden">
                       {tx("素材批量操作", "Batch image actions")}
@@ -2506,7 +3429,6 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
           <div
             ref={viewportRef}
             className={currentDocument ? "image-viewport" : "image-viewport image-viewport--empty"}
-            onWheel={onWheel}
             onPointerDown={beginBackgroundPan}
             onPointerMove={onPointerMove}
             onPointerUp={endInteraction}
@@ -2997,24 +3919,155 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
                 disabled={
                   !workspace.imageModel ||
                   !workspace.prompt.trim() ||
-                  busy !== null ||
+                  generationCapacityReached ||
                   (workspace.generation.referenceEnabled && !referenceAssetIds.length)
                 }
                 title={
-                  workspace.generation.referenceEnabled && !referenceAssetIds.length
-                    ? tx("请先勾选或上传参考图", "Select or upload a reference image first")
-                    : undefined
+                  generationCapacityReached
+                    ? tx(
+                        `已有 ${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} 个生图请求在运行`,
+                        `${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} image requests are already running`,
+                      )
+                    : workspace.generation.referenceEnabled && !referenceAssetIds.length
+                      ? tx("请先勾选或上传参考图", "Select or upload a reference image first")
+                      : undefined
                 }
                 onClick={() => void generate()}
               >
-                {busy === "generate" ? (
+                {activeGenerationCount ? (
                   <LoaderCircle className="spin" aria-hidden="true" size={14} />
                 ) : (
                   <Sparkles aria-hidden="true" size={14} />
                 )}
-                {tx("生成图片", "Generate")}
+                {activeGenerationCount
+                  ? tx(
+                      `继续生成 ${activeGenerationCount}/${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS}`,
+                      `Generate ${activeGenerationCount}/${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS}`,
+                    )
+                  : tx("生成图片", "Generate")}
               </button>
             </div>
+            {generationRequests.length ? (
+              <section
+                className="image-generation-requests"
+                aria-label={tx("生图请求", "Image requests")}
+                data-testid="image-generation-requests"
+              >
+                <header className="image-generation-requests__header">
+                  <span>
+                    <strong>{tx("生成队列", "Generation queue")}</strong>
+                    <small data-testid="image-generation-active-count">
+                      {tx(
+                        `运行中 ${activeGenerationCount}/${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS}`,
+                        `${activeGenerationCount}/${IMAGE_STUDIO_MAX_CONCURRENT_GENERATIONS} running`,
+                      )}
+                    </small>
+                  </span>
+                  {finishedGenerationCount ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--compact"
+                      data-testid="image-generation-clear-finished"
+                      onClick={() => {
+                        const next = generationRequestsRef.current.filter(
+                          (request) =>
+                            request.status === "running" || request.status === "cancelling",
+                        );
+                        generationRequestsRef.current = next;
+                        setGenerationRequests(next);
+                      }}
+                    >
+                      {tx("清除已结束", "Clear finished")}
+                    </button>
+                  ) : null}
+                </header>
+                <div className="image-generation-requests__list" role="log" aria-live="polite">
+                  {generationRequests.map((request) => {
+                    const statusLabel =
+                      request.status === "running"
+                        ? tx("正在生成", "Generating")
+                        : request.status === "cancelling"
+                          ? tx("正在取消", "Cancelling")
+                          : request.status === "completed"
+                            ? tx("已完成", "Completed")
+                            : request.status === "cancelled"
+                              ? tx("已取消", "Cancelled")
+                              : tx("失败", "Failed");
+                    const detail =
+                      request.status === "completed"
+                        ? tx(
+                            `${request.cancelledLate ? "取消较晚，结果已保存 · " : ""}保存 ${request.savedCount} 张${request.remoteCount ? ` · ${request.remoteCount} 张待确认` : ""}`,
+                            `${request.cancelledLate ? "Cancellation was too late, so the result was saved · " : ""}${request.savedCount} saved${request.remoteCount ? ` · ${request.remoteCount} awaiting review` : ""}`,
+                          )
+                        : request.error ||
+                          (request.status === "running"
+                            ? tx(
+                                "模型返回前可以继续提交其他任务",
+                                "You can submit more work while this runs",
+                              )
+                            : request.status === "cancelling"
+                              ? tx(
+                                  "正在等待供应商确认；槽位会保留到原请求结束",
+                                  "Waiting for the provider; this slot stays occupied until the request settles",
+                                )
+                              : statusLabel);
+                    return (
+                      <article
+                        key={request.id}
+                        className="image-generation-request"
+                        data-testid="image-generation-request"
+                        data-request-id={request.id}
+                        data-status={request.status}
+                      >
+                        <span className="image-generation-request__status" aria-hidden="true">
+                          {request.status === "running" || request.status === "cancelling" ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : request.status === "completed" ? (
+                            <CheckCheck size={14} />
+                          ) : request.status === "cancelled" ? (
+                            <X size={14} />
+                          ) : (
+                            <AlertTriangle size={14} />
+                          )}
+                        </span>
+                        <span className="image-generation-request__copy">
+                          <strong title={request.prompt}>{request.prompt}</strong>
+                          <small>
+                            <span>{statusLabel}</span>
+                            <span>{detail}</span>
+                          </small>
+                          {request.warnings.length || request.remoteWarnings.length ? (
+                            <em>
+                              {[
+                                ...request.remoteWarnings,
+                                ...request.warnings.map((warning) =>
+                                  tx(
+                                    `第 ${warning.imageIndex} 张实际尺寸 ${warning.actualWidth}×${warning.actualHeight}`,
+                                    `Image ${warning.imageIndex} returned at ${warning.actualWidth}×${warning.actualHeight}`,
+                                  ),
+                                ),
+                              ].join(" · ")}
+                            </em>
+                          ) : null}
+                        </span>
+                        {request.status === "running" ? (
+                          <button
+                            type="button"
+                            className="icon-button"
+                            data-testid="image-generation-cancel"
+                            aria-label={tx("取消这个生图请求", "Cancel this image request")}
+                            title={tx("取消这个生图请求", "Cancel this image request")}
+                            onClick={() => cancelGeneration(request.id)}
+                          >
+                            <X aria-hidden="true" size={14} />
+                          </button>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
             {!workspace.imageModel || !workspace.textModel ? (
               <button
                 type="button"
@@ -3337,6 +4390,26 @@ export function ImageStudio({ active, providers, onOpenProviderSettings }: Image
             <X aria-hidden="true" size={14} />
           </button>
         </div>
+      ) : null}
+      {remoteDialogOpen && remoteImages.length ? (
+        <RemoteImageDialog
+          items={remoteImages}
+          selectedId={selectedRemoteId ?? remoteImages[0]?.id ?? ""}
+          previews={remotePreviews}
+          openStates={remoteOpenStates}
+          now={remoteNow}
+          warning={remoteWarning}
+          tx={tx}
+          onSelect={(id) => {
+            setSelectedRemoteId(id);
+            setRemoteNow(Date.now());
+          }}
+          onRetry={retryRemotePreview}
+          onOpen={(id) => void openRemoteImage(id)}
+          onSave={(id) => void saveRemoteImage(id)}
+          onDiscard={(id) => void discardRemoteImage(id)}
+          onLater={() => setRemoteDialogOpen(false)}
+        />
       ) : null}
     </section>
   );

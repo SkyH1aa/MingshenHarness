@@ -28,11 +28,17 @@ function model(
 describe("text model selection", () => {
   it("requires text input and output, and skips ineligible providers and models", () => {
     const image = model("image", ["text"], ["image"]);
+    const malformedImageProtocolText = model("fake-text", ["text"], ["text"]);
     const noTextInput = model("vision-only-input", ["image"], ["text"]);
     const text = model("text", ["text", "image"], ["text"]);
     const mixed = model("mixed", ["text"], ["text", "image"]);
     const providers: ProviderView[] = [
       { id: "images", models: [image] } as ProviderView,
+      {
+        id: "images-protocol",
+        protocol: "openai_images",
+        models: [malformedImageProtocolText],
+      } as ProviderView,
       {
         id: "provider",
         models: [noTextInput, model("disabled", ["text"], ["text"], false), text, mixed],
@@ -42,6 +48,7 @@ describe("text model selection", () => {
     expect(isTextModel(image)).toBe(false);
     expect(isTextModel(noTextInput)).toBe(false);
     expect(isTextModel(text)).toBe(true);
+    expect(isTextModel(malformedImageProtocolText)).toBe(true);
     const eligible = textOutputProviders(providers);
     expect(eligible.map((provider) => provider.id)).toEqual(["provider"]);
     expect(eligible[0]?.models.map((candidate) => candidate.id)).toEqual(["text", "mixed"]);

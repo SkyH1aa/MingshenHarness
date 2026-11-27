@@ -8,8 +8,10 @@ import { fileURLToPath } from "node:url";
 import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import ExcelJS from "exceljs";
 import { strFromU8, strToU8, type Unzipped, unzipSync, zipSync } from "fflate";
+import { MAX_OFFICE_RENDER_OUTPUT_BYTES } from "../../shared/office-delivery";
 import { readDocxStructure } from "./document-edit";
 import { validateDocumentArchive } from "./document-extractor";
+import { readBoundedOfficeFile } from "./office-bounded-file";
 import {
   assertOfficeInputExtensions,
   type OfficeCellStyle,
@@ -27,10 +29,15 @@ import { type OfficePalette, resolveOfficeVisual } from "./office-visuals";
 const MAX_OFFICE_BYTES = 25 * 1024 * 1024;
 const MAX_INSPECT_CELLS = 2_000;
 const MAX_INSPECT_OBJECTS = 2_000;
+const MAX_DELIVERY_FORMULA_CELLS = 500_000;
+const MAX_FORMULA_SAMPLES = 50;
+const MAX_FORMULA_SAMPLE_TEXT = 1_000;
 const MAX_COM_OUTPUT = 64 * 1024;
 const OFFICE_OWNER_FILE = "office-owner.json";
 const OFFICE_CLEANUP_TIMEOUT_MS = 10_000;
 const SPREADSHEET_WORKSHEET_PART = /^xl\/worksheets\/[^/]+\.xml$/i;
+const EXCEL_ERROR_VALUE =
+  /^#(?:NULL!|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|N\/A|GETTING_DATA|SPILL!|CALC!|FIELD!|BLOCKED!|CONNECT!|BUSY!|UNKNOWN!)$/i;
 const INSPECTION_LIMIT_REACHED = Symbol("inspection-limit-reached");
 const EXCEL_MUTABLE = [
   /^\[Content_Types\]\.xml$/i,
@@ -67,11 +74,17 @@ export interface OfficeVerification {
   recalculation: "verified" | "not_requested" | "unavailable" | "failed" | "partial";
 }
 
+export interface OfficeStructureCheck {
+  structure: OfficeVerification["status"];
+  content: OfficeVerification["status"];
+}
+
 export interface OfficeDocumentResult {
   output: string;
   warnings: string[];
   bytes?: Buffer;
   verification?: OfficeVerification;
+  structureCheck?: OfficeStructureCheck;
   rendition?: {
     extension: ".pdf";
     bytes: Buffer;
@@ -191,6 +204,8 @@ type PresentationStructure = {
   text: string;
   slideNames: string[];
   archive: Unzipped;
+  indexedObjects: number;
+  partial: boolean;
 };
 
 function sha256(bytes: Buffer): string {
@@ -655,7 +670,7 @@ function displayCellValue(cell: ExcelJS.Cell, calculatedByOffice: boolean): unkn
   if (cell.formula !== undefined) {
     return {
       formula: cell.formula,
-      result: cell.result ?? null,
+      result: excelErrorCode(cell.result) ?? cell.result ?? null,
       cached: cell.result !== undefined,
       calculation_verified_by_microsoft_excel: calculatedByOffice,
     };
@@ -679,6 +694,47 @@ function displayCellValue(cell: ExcelJS.Cell, calculatedByOffice: boolean): unkn
     }
   }
   return String(value);
+}
+
+function excelErrorCode(value: unknown): string | null {
+  const candidate =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object" && "error" in value
+        ? String((value as { error: unknown }).error)
+        : "";
+  return EXCEL_ERROR_VALUE.test(candidate) ? candidate.toUpperCase() : null;
+}
+
+function cellErrorCode(cell: ExcelJS.Cell): string | null {
+  return excelErrorCode(cell.result) ?? excelErrorCode(cell.value);
+}
+
+function formulaSampleResult(cell: ExcelJS.Cell): string | null {
+  if (cell.result === undefined || cell.result === null) return null;
+  const error = excelErrorCode(cell.result);
+  if (error) return error;
+  const value = cell.result;
+  const text =
+    typeof value === "string"
+      ? value
+      : (() => {
+          try {
+            return JSON.stringify(value) ?? String(value);
+          } catch {
+            return String(value);
+          }
+        })();
+  return text.length > MAX_FORMULA_SAMPLE_TEXT
+    ? `${text.slice(0, MAX_FORMULA_SAMPLE_TEXT)}...`
+    : text;
+}
+
+function formulaText(cell: ExcelJS.Cell): string {
+  const formula = String(cell.formula ?? "");
+  return formula.length > MAX_FORMULA_SAMPLE_TEXT
+    ? `${formula.slice(0, MAX_FORMULA_SAMPLE_TEXT)}...`
+    : formula;
 }
 
 async function inspectSpreadsheet(
@@ -716,11 +772,7 @@ async function inspectSpreadsheet(
               if (cell.result === undefined) uncachedFormulas += 1;
             }
             const value = displayCellValue(cell, calculatedByOffice);
-            if (
-              (value && typeof value === "object" && "error" in value) ||
-              /^#(?:N\/A|VALUE!|REF!|DIV\/0!|NUM!|NAME\?|NULL!)$/.test(String(cell.result ?? ""))
-            )
-              errors += 1;
+            if (cellErrorCode(cell)) errors += 1;
             records.push({ cell: cell.address, value });
           });
         });
@@ -756,6 +808,71 @@ async function inspectSpreadsheet(
     uncachedFormulas,
     errors,
     truncated,
+  };
+}
+
+export interface OfficeFormulaCoverage {
+  formulas: number;
+  uncachedFormulas: number;
+  errors: number;
+  inspectedCells: number;
+  complete: boolean;
+  sampleLimit: number;
+  samples: Array<{
+    sheet: string;
+    cell: string;
+    formula: string;
+    cached: boolean;
+    result: string | null;
+  }>;
+}
+
+export async function inspectSpreadsheetFormulaCoverage(
+  bytes: Buffer,
+): Promise<OfficeFormulaCoverage> {
+  const workbook = await loadWorkbook(bytes);
+  let inspectedCells = 0;
+  let formulas = 0;
+  let uncachedFormulas = 0;
+  let errors = 0;
+  let complete = true;
+  const samples: OfficeFormulaCoverage["samples"] = [];
+  try {
+    for (const sheet of workbook.worksheets) {
+      sheet.eachRow({ includeEmpty: false }, (row) => {
+        row.eachCell({ includeEmpty: false }, (cell) => {
+          if (inspectedCells >= MAX_DELIVERY_FORMULA_CELLS) {
+            complete = false;
+            throw INSPECTION_LIMIT_REACHED;
+          }
+          inspectedCells += 1;
+          if (cell.formula !== undefined) {
+            formulas += 1;
+            if (cell.result === undefined) uncachedFormulas += 1;
+            if (samples.length < MAX_FORMULA_SAMPLES)
+              samples.push({
+                sheet: sheet.name,
+                cell: cell.address,
+                formula: formulaText(cell),
+                cached: cell.result !== undefined,
+                result: formulaSampleResult(cell),
+              });
+          }
+          if (cellErrorCode(cell)) errors += 1;
+        });
+      });
+    }
+  } catch (error) {
+    if (error !== INSPECTION_LIMIT_REACHED) throw error;
+  }
+  return {
+    formulas,
+    uncachedFormulas,
+    errors,
+    inspectedCells,
+    complete,
+    sampleLimit: MAX_FORMULA_SAMPLES,
+    samples,
   };
 }
 
@@ -973,13 +1090,22 @@ function presentationStructure(input: { archive: Unzipped; bytes: Buffer }): Pre
   const slideNames = orderedSlideParts(input.archive);
   if (!slideNames.length) throw new Error("PPTX 中没有可读取的幻灯片。");
   let objectCount = 0;
+  let partial = false;
   const records: unknown[] = [];
+  const includeObject = (): boolean => {
+    if (objectCount >= MAX_INSPECT_OBJECTS) {
+      partial = true;
+      return false;
+    }
+    objectCount += 1;
+    return true;
+  };
   for (const [slideIndex, slideName] of slideNames.entries()) {
     const bytes = input.archive[slideName];
     if (!bytes) continue;
     const slide = parseXml(bytes, slideName);
     for (const shape of Array.from(slide.getElementsByTagNameNS(PPT_P, "sp"))) {
-      if (objectCount++ >= MAX_INSPECT_OBJECTS) break;
+      if (!includeObject()) break;
       const body = directChild(shape, "txBody", PPT_P);
       if (!body) continue;
       records.push({
@@ -991,7 +1117,7 @@ function presentationStructure(input: { archive: Unzipped; bytes: Buffer }): Pre
     }
     const tables = Array.from(slide.getElementsByTagNameNS(PPT_A, "tbl"));
     for (const [tableIndex, table] of tables.entries()) {
-      if (objectCount++ >= MAX_INSPECT_OBJECTS) break;
+      if (!includeObject()) break;
       const rows = Array.from(table.getElementsByTagNameNS(PPT_A, "tr"));
       const frame = table.parentNode?.parentNode;
       records.push({
@@ -1022,6 +1148,8 @@ function presentationStructure(input: { archive: Unzipped; bytes: Buffer }): Pre
     text: records.map((record) => JSON.stringify(record)).join("\n"),
     slideNames,
     archive: input.archive,
+    indexedObjects: objectCount,
+    partial,
   };
 }
 
@@ -1031,6 +1159,8 @@ async function inspectPresentation(
 ): Promise<{
   text: string;
   warnings: string[];
+  indexedObjects: number;
+  partial: boolean;
 }> {
   let archive = validatedArchive;
   if (!archive) {
@@ -1044,7 +1174,14 @@ async function inspectPresentation(
     warnings: [
       "PPTX 结构编号绑定源 SHA-256；修改后必须重新检查。",
       "替换只修改受支持形状、表格单元格或备注中的文字，未改 OOXML 部件按源字节保留。",
+      ...(structure.partial
+        ? [
+            `PPTX 结构索引达到 ${MAX_INSPECT_OBJECTS} 个形状/表格上限；后续对象未展开，检查结果为 partial。`,
+          ]
+        : []),
     ],
+    indexedObjects: structure.indexedObjects,
+    partial: structure.partial,
   };
 }
 
@@ -1186,9 +1323,9 @@ async function structuralVerification(
   if (extension === ".pptx") {
     const result = await inspectPresentation(bytes, archive);
     return {
-      text: `PPTX 结构通过：${result.text.split("\n").length} 个可索引对象。SHA-256 ${sha256(bytes)}。`,
+      text: `PPTX 结构${result.partial ? "有界检查为 partial" : "通过"}：${result.indexedObjects} 个形状/表格已索引。SHA-256 ${sha256(bytes)}。`,
       warnings: result.warnings,
-      partial: false,
+      partial: result.partial,
     };
   }
   const result = await inspectDocx(bytes, true);
@@ -1519,10 +1656,21 @@ export async function verifyWithMicrosoftOffice(
           outputPath,
         ]),
       };
-    const renderedPdf = render && existsSync(outputPath) ? await readFile(outputPath) : undefined;
+    const renderedPdf =
+      render && existsSync(outputPath)
+        ? await readBoundedOfficeFile(
+            outputPath,
+            "Microsoft Office PDF render",
+            MAX_OFFICE_RENDER_OUTPUT_BYTES,
+          )
+        : undefined;
     const recalculatedBytes =
       recalculate && extension === ".xlsx" && existsSync(inputPath)
-        ? await readFile(inputPath)
+        ? await readBoundedOfficeFile(
+            inputPath,
+            "Microsoft Office recalculated workbook",
+            MAX_OFFICE_RENDER_OUTPUT_BYTES,
+          )
         : undefined;
     return {
       status: "verified",
@@ -1554,6 +1702,13 @@ async function verifyOffice(
   canUseOffice = false,
 ): Promise<OfficeDocumentResult> {
   const structural = await structuralVerification(bytes, input.path);
+  const structuralStatus: OfficeVerification["status"] = structural.partial
+    ? "partial"
+    : "verified";
+  const structureCheck: OfficeStructureCheck = {
+    structure: structuralStatus,
+    content: structuralStatus,
+  };
   if ((!input.render && !input.recalculate) || !canUseOffice) {
     const officeUnavailable = input.render || input.recalculate;
     return {
@@ -1569,6 +1724,7 @@ async function verifyOffice(
         render: input.render ? "unavailable" : "not_requested",
         recalculation: input.recalculate ? "unavailable" : "not_requested",
       },
+      structureCheck,
     };
   }
   signal?.throwIfAborted();
@@ -1597,6 +1753,7 @@ async function verifyOffice(
         render: input.render ? "unavailable" : "not_requested",
         recalculation: input.recalculate ? "unavailable" : "not_requested",
       },
+      structureCheck,
     };
   }
   const rendered = await verifyWithMicrosoftOffice(
@@ -1718,6 +1875,7 @@ async function verifyOffice(
       : {}),
     ...(recalculatedOutput ? { recalculatedBytes: recalculatedOutput } : {}),
     verification,
+    structureCheck,
   };
 }
 

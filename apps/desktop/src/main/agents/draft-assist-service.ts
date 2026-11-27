@@ -15,6 +15,7 @@ import {
   type ProjectToneView,
 } from "../../shared/draft-assist";
 import { MODEL_RETRY_SETTING, normalizeModelRetrySettings } from "../../shared/model-retry";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import { auxiliaryReasoning } from "../providers/auxiliary-model";
 import { streamModelTurn } from "../providers/model-stream";
 import type { ProviderService } from "../providers/provider-service";
@@ -156,6 +157,7 @@ function eligibleTextModel(
 
 export class DraftAssistService {
   private closing = false;
+  private managedPolicy: ManagedPolicyService | null;
   private readonly requests = new Map<
     string,
     { sessionId: string; controller: AbortController; promise: Promise<DraftPolishResult> }
@@ -164,7 +166,14 @@ export class DraftAssistService {
   constructor(
     private readonly repository: Repository,
     private readonly providers: ProviderService,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
 
   settings(): DraftAssistSettings {
     const stored = this.repository.getSetting(SETTINGS_KEY);
@@ -319,12 +328,23 @@ export class DraftAssistService {
       reference.providerId,
       reference.modelId,
     );
-    const apiKey = this.providers.getActiveApiKey(provider.id);
+    this.managedPolicy?.assertOperational("草稿润色");
+    this.managedPolicy?.assertProvider(provider.id, model.id, { approved: true });
+    this.managedPolicy?.assertCapability("provider.request", { approved: true });
+    this.managedPolicy?.assertCapability("network.request", { approved: true });
+    const apiKey = this.providers.getActiveApiKey(provider.id, {
+      approved: true,
+      modelConfigId: model.id,
+    });
     const projectTone =
       session.agentMode === "chat"
         ? storedProjectTone(this.repository, null)
         : storedProjectTone(this.repository, session.workspacePath);
     const tone = toneInstruction(projectTone);
+    const policyHook =
+      typeof this.providers.managedPolicyRequestHook === "function"
+        ? this.providers.managedPolicyRequestHook({ approved: true })
+        : undefined;
     let polished = "";
     try {
       for await (const event of streamModelTurn({
@@ -356,6 +376,7 @@ export class DraftAssistService {
         temperature: 0.35,
         maxOutputTokens: Math.min(16_384, model.maxOutputTokens),
         signal,
+        ...(policyHook ? { beforeEachRequest: policyHook } : {}),
         retry: {
           ...normalizeModelRetrySettings(this.repository.getSetting(MODEL_RETRY_SETTING)),
           onRetry: () => {

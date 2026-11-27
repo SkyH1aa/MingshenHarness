@@ -746,8 +746,10 @@ const required = [...new Set([
   'docs/TERMS_OF_SERVICE.md', 'docs/TERMS_OF_SERVICE.en.md',
   'docs/PRIVACY_POLICY.md', 'docs/PRIVACY_POLICY.en.md',
   'docs/DISCLAIMER.md', 'docs/DISCLAIMER.en.md',
+  'docs/RUNTIME_GOVERNANCE.md', 'docs/DEVELOPER_API.md', 'docs/OFFICE_DELIVERY.md',
   'lsp/typescript/lib/tsserver.js', 'lsp/typescript/lib/typescript.js', 'lsp/typescript-language-server/lib/cli.mjs',
-  'sdk/mingshen-client.mjs', 'sdk/mingshen-acp.mjs', 'icon.png', 'icon.ico', 'THIRD_PARTY_NOTICES.md',
+  'sdk/mingshen-client.mjs', 'sdk/mingshen-acp.mjs', 'sdk/mingshen-cli.mjs',
+  'sdk/mingshen-cli.cmd', 'sdk/README.md', 'icon.png', 'icon.ico', 'THIRD_PARTY_NOTICES.md',
   'sdk/plugin-dev/mingshen-plugin.mjs', 'sdk/plugin-dev/README.md', 'docs/LOCAL_PLUGINS.md',
   ...bundledSkills,
 ])];

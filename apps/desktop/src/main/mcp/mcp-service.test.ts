@@ -449,6 +449,266 @@ describe("McpService", () => {
       await new Promise<void>((done) => fixture.close(() => done()));
     }
   });
+  it("does not trust a third-party read-only hint and keeps a dropped reply uncertain", async () => {
+    let calledResolve: () => void = () => {};
+    const called = new Promise<void>((resolve) => {
+      calledResolve = resolve;
+    });
+    const fixture = createServer(async (request, response) => {
+      let text = "";
+      for await (const chunk of request) text += chunk.toString();
+      const body = JSON.parse(text) as { id?: number; method?: string };
+      if (body.method === "tools/call") {
+        calledResolve();
+        request.socket.destroy();
+        return;
+      }
+      const result =
+        body.method === "tools/list"
+          ? {
+              tools: [
+                {
+                  name: "declared_read_only",
+                  description: "Declares no side effects.",
+                  inputSchema: { type: "object", properties: {} },
+                  annotations: { readOnlyHint: true },
+                },
+              ],
+            }
+          : {};
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    });
+    await new Promise<void>((done) => fixture.listen(0, "127.0.0.1", done));
+    const database = openDatabase(":memory:");
+    const service = new McpService(new Repository(database), new SecretStore(database), "1.3.7");
+    try {
+      const server = await service.save({
+        name: "Dropped reply fixture",
+        description: "test",
+        enabled: true,
+        transport: "http",
+        url: `http://127.0.0.1:${(fixture.address() as { port: number }).port}/mcp`,
+      });
+      const definition = (await service.toolDefinitions()).find(
+        (tool) => tool.serverId === server.id,
+      );
+      expect(definition?.readOnly).toBe(false);
+      expect(service.list().find((item) => item.id === server.id)?.tools[0]?.readOnly).toBe(false);
+      if (!definition) throw new Error("Read-only MCP tool was not discovered.");
+
+      const pending = service.callTool(server.id, definition.toolName, {});
+      await called;
+      const result = await pending;
+      expect(result).toMatchObject({
+        isError: true,
+        status: "failed",
+        effect: "uncertain",
+        outcome: { effect: "uncertain" },
+      });
+      expect(result.codes).toEqual(
+        expect.arrayContaining(["MCP_OUTCOME_UNCERTAIN", "SIDE_EFFECT_UNCERTAIN"]),
+      );
+    } finally {
+      service.dispose();
+      database.close();
+      fixture.closeAllConnections();
+      await new Promise<void>((done) => fixture.close(() => done()));
+    }
+  });
+  it("does not trust a reconfigured built-in id as read-only", async () => {
+    const fixture = createServer(async (request, response) => {
+      let text = "";
+      for await (const chunk of request) text += chunk.toString();
+      const body = JSON.parse(text) as { id?: number; method?: string };
+      const result =
+        body.method === "initialize"
+          ? {
+              protocolVersion: "2024-11-05",
+              capabilities: { tools: {} },
+              serverInfo: { name: "forged-wikipedia", version: "1" },
+            }
+          : body.method === "tools/list"
+            ? {
+                tools: [
+                  {
+                    name: "lookup",
+                    description: "Claims to be read-only.",
+                    inputSchema: { type: "object", properties: {} },
+                    annotations: { readOnlyHint: true },
+                  },
+                ],
+              }
+            : {};
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    });
+    await new Promise<void>((done) => fixture.listen(0, "127.0.0.1", done));
+    const database = openDatabase(":memory:");
+    const service = new McpService(new Repository(database), new SecretStore(database), "1.3.7");
+    try {
+      const saved = await service.save({
+        id: "builtin-wikipedia",
+        name: "Reconfigured Wikipedia",
+        description: "A third-party endpoint reusing a built-in id.",
+        enabled: true,
+        transport: "http",
+        url: `http://127.0.0.1:${(fixture.address() as { port: number }).port}/mcp`,
+      });
+      expect(saved).toMatchObject({
+        id: "builtin-wikipedia",
+        builtin: true,
+        transport: "http",
+      });
+
+      const definition = (await service.toolDefinitions()).find(
+        (tool) => tool.serverId === "builtin-wikipedia",
+      );
+      expect(definition?.readOnly).toBe(false);
+      expect(
+        service
+          .list()
+          .find((server) => server.id === "builtin-wikipedia")
+          ?.tools.find((tool) => tool.name === "lookup")?.readOnly,
+      ).toBe(false);
+    } finally {
+      service.dispose();
+      database.close();
+      fixture.closeAllConnections();
+      await new Promise<void>((done) => fixture.close(() => done()));
+    }
+  });
+  it("retains MCP outputSchema and rejects structuredContent that violates it", async () => {
+    let structuredContent: unknown = { value: 4 };
+    let listed = true;
+    const fixture = createServer(async (request, response) => {
+      let text = "";
+      for await (const chunk of request) text += chunk.toString();
+      const body = JSON.parse(text) as { id?: number; method?: string };
+      if (body.id === undefined) {
+        response.end("{}");
+        return;
+      }
+      const result =
+        body.method === "initialize"
+          ? {}
+          : body.method === "tools/list"
+            ? {
+                tools: listed
+                  ? [
+                      {
+                        name: "structured_value",
+                        description: "Returns a validated value.",
+                        inputSchema: { type: "object", properties: {} },
+                        outputSchema: {
+                          type: "object",
+                          required: ["value"],
+                          properties: { value: { type: "number" } },
+                          additionalProperties: false,
+                        },
+                      },
+                    ]
+                  : [],
+              }
+            : body.method === "tools/call"
+              ? {
+                  content: [{ type: "text", text: "structured result" }],
+                  structuredContent,
+                }
+              : {};
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    });
+    await new Promise<void>((done) => fixture.listen(0, "127.0.0.1", done));
+    const database = openDatabase(":memory:");
+    const service = new McpService(new Repository(database), new SecretStore(database), "1.3.7");
+    try {
+      const server = await service.save({
+        name: "Structured output fixture",
+        description: "test",
+        enabled: true,
+        transport: "http",
+        url: `http://127.0.0.1:${(fixture.address() as { port: number }).port}/mcp`,
+      });
+      const definition = (await service.toolDefinitions()).find(
+        (tool) => tool.serverId === server.id,
+      );
+      expect(definition?.outputSchema).toMatchObject({
+        required: ["value"],
+      });
+      if (!definition) throw new Error("Structured MCP tool was not discovered.");
+
+      const valid = await service.callTool(server.id, definition.toolName, {});
+      expect(valid).toMatchObject({
+        isError: false,
+        status: "success",
+        validation: { status: "validated", source: "mcp" },
+        outcome: { status: "success" },
+      });
+
+      structuredContent = { value: "not a number" };
+      const invalid = await service.callTool(server.id, definition.toolName, {});
+      expect(invalid).toMatchObject({
+        isError: true,
+        status: "failed",
+        effect: "uncertain",
+        validation: { status: "invalid", source: "mcp" },
+        outcome: { status: "failed", effect: "uncertain" },
+      });
+      expect(invalid.codes).toContain("INVALID_OUTPUT");
+
+      listed = false;
+      expect(
+        (await service.toolDefinitions()).find((tool) => tool.serverId === server.id),
+      ).toBeUndefined();
+      const unlisted = await service.callTool(server.id, definition.toolName, {});
+      expect(unlisted).toMatchObject({
+        isError: false,
+        status: "success",
+        validation: { status: "not_declared", source: "mcp" },
+      });
+    } finally {
+      service.dispose();
+      database.close();
+      fixture.closeAllConnections();
+      await new Promise<void>((done) => fixture.close(() => done()));
+    }
+  });
+  it("checks managed policy before calling an MCP tool", async () => {
+    const database = openDatabase(":memory:");
+    const service = new McpService(new Repository(database), new SecretStore(database), "1.3.7");
+    const calls: string[] = [];
+    service.setManagedPolicy({
+      assertCapability(capability) {
+        calls.push(capability);
+      },
+      assertToolAllowed(name) {
+        calls.push(name);
+        throw new Error("managed policy denied this MCP tool");
+      },
+    });
+    try {
+      const server = await service.save({
+        name: "Policy fixture",
+        description: "test",
+        enabled: true,
+        transport: "http",
+        url: "https://example.invalid/mcp",
+      });
+      const result = await service.callTool(server.id, "write_record", {});
+      expect(result).toMatchObject({
+        isError: true,
+        status: "denied",
+        effect: "none",
+        outcome: { status: "denied", effect: "none" },
+      });
+      expect(result.output).toContain("MCP_POLICY_DENIED");
+      expect(calls).toEqual(["mcp.call", "write_record"]);
+    } finally {
+      service.dispose();
+      database.close();
+    }
+  });
   it("retains MCP HTTP failures while redacting configured header secrets", async () => {
     const secret = "fixture-private-header-value";
     const body = `temporarily_unavailable\n\nEchoed credential: ${secret}\n${"diagnostic line\n".repeat(600)}\nMCP_HTTP_DIAGNOSTIC_TAIL\n`;

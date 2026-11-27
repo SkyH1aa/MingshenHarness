@@ -2,6 +2,7 @@ import { access, mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import { openDatabase } from "../storage/database";
 import { Repository } from "../storage/repository";
 import { ExtensionService } from "./extension-service";
@@ -48,7 +49,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const temporaryDirectories: string[] = [];
 const openDatabases: Array<ReturnType<typeof openDatabase>> = [];
 
-async function makeWorkspace(): Promise<{
+async function makeWorkspace(options: { managedPolicy?: ManagedPolicyService } = {}): Promise<{
   root: string;
   repository: Repository;
   service: ExtensionService;
@@ -62,7 +63,11 @@ async function makeWorkspace(): Promise<{
   return {
     root,
     repository,
-    service: new ExtensionService(repository, join(root, "installed")),
+    service: new ExtensionService(
+      repository,
+      join(root, "installed"),
+      options.managedPolicy ? { managedPolicy: options.managedPolicy } : {},
+    ),
     database,
   };
 }
@@ -83,6 +88,24 @@ afterEach(async () => {
 });
 
 describe("ExtensionService", () => {
+  it("rejects Skill installation before copying when managed policy denies it", async () => {
+    const assertCapability = vi.fn((capability: string) => {
+      if (capability === "skill.install") throw new Error("POLICY_BLOCKED");
+    });
+    const managedPolicy = {
+      assertOperational: vi.fn(),
+      assertCapability,
+    } as unknown as ManagedPolicyService;
+    const workspace = await makeWorkspace({ managedPolicy });
+    const source = join(workspace.root, "policy-skill");
+    await mkdir(source);
+    await writeFile(join(source, "SKILL.md"), "---\nname: policy-skill\n---\n# Skill");
+
+    await expect(workspace.service.importDirectory(source)).rejects.toThrow("POLICY_BLOCKED");
+    expect(assertCapability).toHaveBeenCalledWith("skill.install", { approved: true });
+    expect(workspace.repository.listExtensions()).toEqual([]);
+  });
+
   it.each([
     { files: 20_000, expectedError: "64 MiB" },
     { files: 20_001, expectedError: "20000" },

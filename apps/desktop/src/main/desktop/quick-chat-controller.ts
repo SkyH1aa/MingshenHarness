@@ -45,7 +45,6 @@ const SESSION_ID_FIRST_CHANNELS = new Set<string>([
   IPC_CHANNELS.contextUsage,
   IPC_CHANNELS.composerDraftGet,
   IPC_CHANNELS.composerDraftClear,
-  IPC_CHANNELS.chatStop,
   IPC_CHANNELS.chatCompact,
   IPC_CHANNELS.runSteeringGet,
 ]);
@@ -219,6 +218,13 @@ export class QuickChatController {
         this.acceptsDraftSession(asString(args[0])) &&
         typeof args[1] === "string" &&
         Boolean(args[1])
+      );
+    }
+    if (channel === IPC_CHANNELS.chatStop) {
+      return (
+        (args.length === 1 || args.length === 2) &&
+        this.acceptsSession(asString(args[0])) &&
+        (args.length === 1 || (typeof args[1] === "string" && Boolean(args[1].trim())))
       );
     }
     if (SESSION_ID_FIRST_CHANNELS.has(channel)) {

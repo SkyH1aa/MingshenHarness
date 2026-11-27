@@ -72,7 +72,7 @@ describe("persistent session paging and change feed", () => {
             ?.ciphertext as Uint8Array,
         ).toString(),
       ).toBe("encrypted-fixture");
-      expect(db.prepare("pragma user_version").get()?.user_version).toBe(9);
+      expect(db.prepare("pragma user_version").get()?.user_version).toBe(11);
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });
@@ -128,7 +128,7 @@ describe("persistent session paging and change feed", () => {
       expect(
         repo.sessionPage({ cursor: oldPage.nextCursor ?? "", limit: 1 }).sessions[0]?.id,
       ).not.toBe(oldPage.sessions[0]?.id);
-      expect(db.prepare("pragma user_version").get()?.user_version).toBe(9);
+      expect(db.prepare("pragma user_version").get()?.user_version).toBe(11);
       expect(() => repo.sessionPage({ cursor: "x".repeat(9000) })).toThrow("Invalid session page");
       expect(() => repo.sessionPage({ limit: Number.NaN })).toThrow("Invalid session page");
       expect(() => repo.sessionDelta(0, [42] as unknown as string[])).toThrow(

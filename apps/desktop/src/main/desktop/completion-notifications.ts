@@ -401,6 +401,13 @@ export class CompletionNotifications {
       }
     this.publish();
   }
+  markAllRead(): CompletionNotificationState {
+    this.unread.clear();
+    for (const toast of this.toasts.values()) toast.close();
+    this.toasts.clear();
+    this.publish();
+    return this.state();
+  }
   private publish(): void {
     this.repository.setSetting(UNREAD_KEY, [...this.unread.values()]);
     this.syncBadge();

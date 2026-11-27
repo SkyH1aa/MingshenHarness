@@ -21,6 +21,10 @@ function summarize(event: ChatStreamEvent): string {
       return "更新下一轮队列";
     case "run_steering_updated":
       return "更新运行中引导";
+    case "runtime_run_updated":
+      return `运行状态：${event.run.status}`;
+    case "office_delivery_updated":
+      return `办公交付检查：${event.receipt.fileName} · ${event.receipt.status}`;
     case "run_started":
       return event.kind === "compaction" ? "开始手动压缩上下文" : "Agent 开始执行";
     case "user_message":
@@ -63,6 +67,8 @@ export class TrajectoryService {
 
   record(event: ChatStreamEvent): void {
     if (
+      event.type === "assistant_delta" ||
+      event.type === "reasoning_delta" ||
       event.type === "session_updated" ||
       event.type === "workbench_updated" ||
       event.type === "browser_open_requested" ||

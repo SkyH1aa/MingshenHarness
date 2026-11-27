@@ -11,6 +11,7 @@ import type {
   ToolResultImage,
 } from "../../shared/domain";
 import { APP_VERSION } from "../../shared/release";
+import type { ToolOutcome } from "../../shared/tool-outcome";
 import { CodeIndexService, type IndexSnapshot } from "../agents/code-index-service";
 import { isMemoryPath, MEMORY_DIRECTORY } from "../agents/project-memory-service";
 import { chatToolRejection } from "../chat/agent-mode-policy";
@@ -100,6 +101,8 @@ export interface ToolExecutionResult {
   fileChanges?: FileChange[];
   images?: ToolResultImage[];
   commandSession?: { id: string; running: boolean; unreadOutputChars?: number };
+  /** Trusted normalization from an extension gateway, consumed before settlement. */
+  outcome?: ToolOutcome;
 }
 
 export interface ToolExecutionContext {

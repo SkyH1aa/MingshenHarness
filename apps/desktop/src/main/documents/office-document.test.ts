@@ -15,6 +15,7 @@ import {
   executeOfficeDocument,
   formatOfficeComDiagnostic,
   inspectOfficeComPackageBoundary,
+  inspectSpreadsheetFormulaCoverage,
   interpretOfficeComProcessResult,
   officeComStageLabel,
   officeDocumentAssets,
@@ -803,6 +804,59 @@ describe("office_document", () => {
     expect(revisedInspection.output).toContain("Revised speaker notes");
   });
 
+  it("marks PPTX inspection and structural verification partial beyond 2000 objects", async () => {
+    const source = await authorOfficeDocument(
+      documentAuthoringSchema.parse({
+        path: "large-deck.pptx",
+        title: "Large deck",
+        slides: [
+          {
+            title: "Large deck",
+            notes: "Bounded structure fixture",
+            blocks: [{ type: "paragraph", text: "Repeated object fixture" }],
+          },
+        ],
+      }),
+      new Map(),
+    );
+    const archive = unzipSync(source);
+    const slideName = Object.keys(archive).find((name) =>
+      /^ppt\/slides\/slide\d+\.xml$/i.test(name),
+    );
+    expect(slideName).toBeDefined();
+    const slideBytes = archive[slideName ?? ""];
+    expect(slideBytes).toBeDefined();
+    const slideXml = strFromU8(slideBytes ?? new Uint8Array());
+    const shape = slideXml.match(/<p:sp\b[\s\S]*?<\/p:sp>/)?.[0];
+    expect(shape).toBeTruthy();
+    archive[slideName ?? ""] = strToU8(
+      slideXml.replace("</p:spTree>", `${(shape ?? "").repeat(2_001)}</p:spTree>`),
+    );
+    const bytes = Buffer.from(zipSync(archive));
+
+    const inspection = await executeOfficeDocument(
+      { operation: "inspect", path: "large-deck.pptx" },
+      new Map([["large-deck.pptx", bytes]]),
+    );
+    expect(inspection.warnings.join("\n")).toContain("2000 个形状/表格上限");
+
+    const verification = await executeOfficeDocument(
+      {
+        operation: "verify",
+        path: "large-deck.pptx",
+        render: false,
+        recalculate: false,
+      },
+      new Map([["large-deck.pptx", bytes]]),
+    );
+    expect(verification.verification).toMatchObject({ status: "partial" });
+    expect(verification.structureCheck).toEqual({
+      structure: "partial",
+      content: "partial",
+    });
+    expect(verification.output).toContain("PPTX 结构有界检查为 partial");
+  });
+
   it("performs structural verification and explicitly omits host Office without capability", async () => {
     const source = await workbookBytes();
     const result = await executeOfficeDocument(
@@ -847,7 +901,56 @@ describe("office_document", () => {
       render: "not_requested",
       recalculation: "not_requested",
     });
+    expect(structuralOnly.structureCheck).toEqual({
+      structure: "partial",
+      content: "partial",
+    });
     expect(structuralOnly.output).toContain("公式扫描为 partial");
+  });
+
+  it("counts formulas beyond the display sample under the bounded delivery scanner", async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Formulas");
+    sheet.getCell("A1").value = {
+      formula: "1/0",
+      result: { error: "#DIV/0!" },
+    } as unknown as ExcelJS.CellValue;
+    sheet.getCell("A2").value = {
+      formula: "SEQUENCE(2)",
+      result: { error: "#SPILL!" },
+    } as unknown as ExcelJS.CellValue;
+    for (let row = 3; row <= 2_100; row++)
+      sheet.getCell(row, 1).value = { formula: `${row}+1`, result: row + 1 };
+    const source = Buffer.from(await workbook.xlsx.writeBuffer());
+    const coverage = await inspectSpreadsheetFormulaCoverage(source);
+    expect(coverage).toMatchObject({
+      formulas: 2_100,
+      uncachedFormulas: 0,
+      errors: 2,
+      inspectedCells: 2_100,
+      complete: true,
+      sampleLimit: 50,
+    });
+    expect(coverage.samples).toHaveLength(50);
+    expect(coverage.samples[0]).toMatchObject({
+      sheet: "Formulas",
+      cell: "A1",
+      formula: "1/0",
+      cached: true,
+      result: "#DIV/0!",
+    });
+    expect(coverage.samples[1]).toMatchObject({
+      sheet: "Formulas",
+      cell: "A2",
+      formula: "SEQUENCE(2)",
+      cached: true,
+      result: "#SPILL!",
+    });
+    const inspection = await executeOfficeDocument(
+      { operation: "inspect", path: "formula-errors.xlsx" },
+      new Map([["formula-errors.xlsx", source]]),
+    );
+    expect(inspection.output).toContain("错误值：2");
   });
 
   it("derives authoritative verification states for export and recalculation outcomes", () => {
@@ -1088,6 +1191,7 @@ describe("office_document", () => {
         await rm(root, { recursive: true, force: true });
       }
     },
+    15_000,
   );
 
   it.skipIf(process.platform !== "win32")(

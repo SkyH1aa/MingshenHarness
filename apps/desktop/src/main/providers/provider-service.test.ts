@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import {
   buildAuthHeaders,
   extractResponseText,
   extractUsage,
   normalizeBaseUrl,
+  ProviderService,
   parseModelIds,
 } from "./provider-service";
 
@@ -18,6 +20,21 @@ describe("normalizeBaseUrl", () => {
 
   it("rejects endpoints without v1", () => {
     expect(() => normalizeBaseUrl("https://example.com/api")).toThrow("/v1");
+  });
+
+  it("requires an OpenAI Images base URL at v1 instead of an image endpoint", () => {
+    expect(normalizeBaseUrl("https://api.example.com/v1///", "openai_images")).toBe(
+      "https://api.example.com/v1",
+    );
+    expect(() =>
+      normalizeBaseUrl("https://api.example.com/v1/images/generations", "openai_images"),
+    ).toThrow("不要包含 /images/generations 或 /images/edits");
+    expect(() =>
+      normalizeBaseUrl("https://api.example.com/v1/images/edits/", "openai_images"),
+    ).toThrow("不要包含 /images/generations 或 /images/edits");
+    expect(() => normalizeBaseUrl("https://api.example.com", "openai_images")).toThrow(
+      "必须以 /v1 结尾",
+    );
   });
 
   it("rejects embedded credentials and query strings", () => {
@@ -53,6 +70,32 @@ describe("buildAuthHeaders", () => {
         apiKey: "test-key",
       })["x-gateway-key"],
     ).toBe("test-key");
+  });
+});
+
+describe("managed policy model request hook", () => {
+  it("checks provider, provider.request and network.request before the request", async () => {
+    const service = new ProviderService({} as never, {} as never);
+    const calls: string[] = [];
+    service.setManagedPolicy({
+      assertProvider(providerId: string, modelId?: string, options?: { approved?: boolean }) {
+        calls.push(`provider:${providerId}/${modelId}:${String(options?.approved)}`);
+      },
+      assertCapability(capability: string, options?: { approved?: boolean }) {
+        calls.push(`${capability}:${String(options?.approved)}`);
+      },
+    } as unknown as ManagedPolicyService);
+
+    await service.managedPolicyRequestHook({ approved: true })?.(
+      { id: "provider" } as never,
+      { id: "model" } as never,
+    );
+
+    expect(calls).toEqual([
+      "provider:provider/model:true",
+      "provider.request:true",
+      "network.request:true",
+    ]);
   });
 });
 

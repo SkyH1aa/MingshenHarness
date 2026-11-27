@@ -24,7 +24,10 @@ export function textOutputProviders(providers: ProviderView[]): ProviderView[] {
   return providers
     .map((provider) => ({
       ...provider,
-      models: provider.models.filter((model) => model.enabled && isTextModel(model)),
+      models:
+        provider.protocol === "openai_images"
+          ? []
+          : provider.models.filter((model) => model.enabled && isTextModel(model)),
     }))
     .filter((provider) => provider.models.length > 0);
 }

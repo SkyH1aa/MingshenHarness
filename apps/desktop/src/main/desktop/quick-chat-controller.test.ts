@@ -362,6 +362,14 @@ describe("Quick chat ten minute sliding session", () => {
     ).toBe(false);
     expect(quick.permitsIpc(IPC_CHANNELS.composerDraftClear, [active.id, "revision"])).toBe(true);
     expect(quick.permitsIpc(IPC_CHANNELS.composerDraftClear, ["other", "revision"])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, [active.id])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, [active.id, "run-current"])).toBe(true);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, ["other", "run-current"])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, [active.id, ""])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, [active.id, 1])).toBe(false);
+    expect(quick.permitsIpc(IPC_CHANNELS.chatStop, [active.id, "run-current", "extra"])).toBe(
+      false,
+    );
     expect(
       quick.permitsIpc(IPC_CHANNELS.sessionUpdate, [
         {

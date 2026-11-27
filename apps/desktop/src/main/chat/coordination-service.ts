@@ -9,9 +9,29 @@ import type { Repository } from "../storage/repository";
 
 export interface CoordinationTaskInput {
   id: string;
+  planStepId?: string | null;
   label: string;
   agentProfileId: string;
   scope: string;
+}
+
+export interface CoordinationPlanAssociation {
+  taskId: string;
+  planStepId: string;
+  kind?: "task" | "qa";
+}
+
+export interface CoordinationServiceOptions {
+  requirePlanAssociation?: boolean;
+  linkPlanTasks?: (input: {
+    sessionId: string;
+    runId: string;
+    tasks: CoordinationTaskInput[];
+    qa: {
+      agentProfileId: string;
+      criteria: string;
+    };
+  }) => CoordinationPlanAssociation[];
 }
 
 export interface CoordinationStartInput {
@@ -21,6 +41,7 @@ export interface CoordinationStartInput {
   tasks: CoordinationTaskInput[];
   qaAgentProfileId: string;
   qaCriteria: string;
+  qaPlanStepId?: string | null;
 }
 
 type CoordinationActivityUpdater = (
@@ -72,6 +93,7 @@ export class CoordinationService {
   constructor(
     private readonly repository: Repository,
     private readonly changed?: CoordinationActivityUpdater,
+    private readonly options: CoordinationServiceOptions = {},
   ) {}
 
   state(sessionId: string): CoordinationStateView | null {
@@ -85,6 +107,14 @@ export class CoordinationService {
       !state.qa
     )
       return null;
+    state.tasks = state.tasks.map((task) => ({
+      ...task,
+      planStepId: typeof task.planStepId === "string" ? task.planStepId : null,
+    }));
+    state.qa = {
+      ...state.qa,
+      planStepId: typeof state.qa.planStepId === "string" ? state.qa.planStepId : null,
+    };
     if (isActivePhase(state.phase) && this.activeRuns.get(sessionId) !== state.runId) {
       const recovered = cancelledState(
         state,
@@ -106,14 +136,47 @@ export class CoordinationService {
     const current = this.state(input.sessionId);
     if (current && isActivePhase(current.phase))
       throw new Error("A coordinated run is already active for this session.");
+    if (this.options.requirePlanAssociation && !this.options.linkPlanTasks)
+      throw new Error(
+        "A canonical plan step linker is required before coordinated work can start.",
+      );
+    const linked = this.options.linkPlanTasks?.({
+      sessionId: input.sessionId,
+      runId: input.runId,
+      tasks: input.tasks,
+      qa: {
+        agentProfileId: input.qaAgentProfileId,
+        criteria: input.qaCriteria,
+      },
+    });
+    const linkedByTask = new Map(
+      linked?.filter((item) => item.kind !== "qa").map((item) => [item.taskId, item.planStepId]) ??
+        [],
+    );
+    const tasks = input.tasks.map((task) => ({
+      ...task,
+      planStepId: task.planStepId ?? linkedByTask.get(task.id) ?? null,
+    }));
+    const qaPlanStepId =
+      input.qaPlanStepId ?? linked?.find((item) => item.kind === "qa")?.planStepId ?? null;
+    if (this.options.requirePlanAssociation && tasks.some((task) => !task.planStepId))
+      throw new Error(
+        "Each coordinated work package must be linked to one canonical plan step before execution.",
+      );
+    if (this.options.requirePlanAssociation && !qaPlanStepId)
+      throw new Error("The coordinated QA check must be linked to one canonical plan step.");
     const timestamp = now();
     const state: CoordinationStateView = {
       sessionId: input.sessionId,
       runId: input.runId,
       goal: input.goal,
       phase: "planned",
-      tasks: input.tasks.map((task) => ({
-        ...task,
+      tasks: tasks.map((task) => ({
+        id: task.id,
+        planStepId: task.planStepId,
+        label: task.label,
+        agentProfileId: task.agentProfileId,
+        scope: task.scope,
         status: "queued",
         childSessionId: null,
         startedAt: null,
@@ -129,6 +192,7 @@ export class CoordinationService {
       },
       qa: {
         status: "not_run",
+        planStepId: qaPlanStepId,
         agentProfileId: input.qaAgentProfileId,
         childSessionId: null,
         criteria: input.qaCriteria,

@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ReleaseMetadata, UpdateStatus } from "../../shared/desktop";
 import { APP_VERSION } from "../../shared/release";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import {
   extractUpdateInstaller,
   fetchUpdateArchive,
@@ -72,8 +73,11 @@ export interface UpdateRuntime {
   cacheDirectory: string;
   fetchPackage: typeof fetch;
   activeTasks: () => number;
-  handoff: (installer: string) => Promise<boolean>;
+  handoff: (installer: string, options: { approved: boolean }) => Promise<boolean>;
   validateUrl?: (url: string | URL) => Promise<URL>;
+}
+interface UpdateActionOptions {
+  approved?: boolean;
 }
 export class UpdateService {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -87,6 +91,8 @@ export class UpdateService {
   private installing = false;
   private canceling = false;
   private stopped = false;
+  private pendingApproved = false;
+  private preparedUpdateApproved = false;
   private value: UpdateStatus = {
     state: "idle",
     currentVersion: APP_VERSION,
@@ -98,7 +104,16 @@ export class UpdateService {
     private readonly emit: (status: UpdateStatus, notify: boolean) => void,
     private readonly fetcher: typeof fetch = fetch,
     private readonly runtime?: UpdateRuntime,
+    private readonly managedPolicy?: ManagedPolicyService,
   ) {}
+  private assertNetwork(operation: string, approved?: boolean): void {
+    this.managedPolicy?.assertOperational(operation);
+    this.managedPolicy?.assertCapability("network.request", { approved: approved === true });
+  }
+  private assertCommand(operation: string, approved?: boolean): void {
+    this.managedPolicy?.assertOperational(operation);
+    this.managedPolicy?.assertCapability("command.execute", { approved: approved === true });
+  }
   status(): UpdateStatus {
     return { ...this.value };
   }
@@ -131,11 +146,20 @@ export class UpdateService {
     await this.operation;
     if (this.value.state !== "installing") await this.cleanCache();
   }
-  check(): Promise<UpdateStatus> {
+  check(options: UpdateActionOptions = {}): Promise<UpdateStatus> {
     if (this.operation || this.installer || this.canceling || this.value.state === "installing")
       return Promise.resolve(this.status());
-    this.pending ??= this.perform().finally(() => {
+    const approved = options.approved === true;
+    if (this.pending) {
+      if (!approved || this.pendingApproved) return this.pending;
+      return this.pending.then((status) =>
+        status.state === "error" ? this.check({ approved: true }) : status,
+      );
+    }
+    this.pendingApproved = approved;
+    this.pending = this.perform(approved).finally(() => {
       this.pending = null;
+      this.pendingApproved = false;
     });
     return this.pending;
   }
@@ -143,7 +167,7 @@ export class UpdateService {
     this.value = { ...this.value, ...patch };
     this.emit(this.status(), notify);
   }
-  async download(): Promise<UpdateStatus> {
+  async download(options: UpdateActionOptions = {}): Promise<UpdateStatus> {
     if (this.pending) await this.pending;
     if (this.operation || this.installer || this.canceling || this.value.state === "installing")
       return this.status();
@@ -154,9 +178,12 @@ export class UpdateService {
       throw new Error(
         "Automatic updates require a ZIP direct URL and its SHA-256 in release metadata.",
       );
+    const approved = options.approved === true;
+    this.assertNetwork("更新下载", approved);
     const controller = new AbortController();
     this.controller = controller;
     this.stopped = false;
+    this.preparedUpdateApproved = approved;
     this.publish({
       state: "downloading",
       error: null,
@@ -164,7 +191,7 @@ export class UpdateService {
       total: release.packageSize,
       installWhenIdle: true,
     });
-    this.operation = this.acquire(release, controller).finally(() => {
+    this.operation = this.acquire(release, controller, approved).finally(() => {
       this.operation = null;
       if (this.controller === controller) this.controller = null;
     });
@@ -184,6 +211,7 @@ export class UpdateService {
       this.publish({ installWhenIdle: false, waitingForTasks: 0 });
       await this.operation;
       this.installer = null;
+      this.preparedUpdateApproved = false;
       await this.cleanCache();
       this.publish({
         state: this.value.release ? "available" : "idle",
@@ -196,7 +224,7 @@ export class UpdateService {
       this.canceling = false;
     }
   }
-  async install(): Promise<UpdateStatus> {
+  async install(options: UpdateActionOptions = {}): Promise<UpdateStatus> {
     if (
       !this.installer ||
       !this.runtime ||
@@ -206,6 +234,8 @@ export class UpdateService {
       this.value.state === "installing"
     )
       return this.status();
+    if (options.approved === true) this.preparedUpdateApproved = true;
+    const approved = this.preparedUpdateApproved;
     const count = this.runtime.activeTasks();
     this.publish({ state: "ready", waitingForTasks: count, installWhenIdle: true, error: null });
     if (count) {
@@ -223,8 +253,9 @@ export class UpdateService {
         throw new Error("Prepared update installer was changed; download it again.");
       if (this.installer !== prepared || !this.value.installWhenIdle || this.stopped)
         return this.status();
+      this.assertCommand("更新安装器交接", approved);
       // Handoff rechecks idleness synchronously and blocks new runs before quitting.
-      const accepted = await this.runtime.handoff(this.installer.path);
+      const accepted = await this.runtime.handoff(this.installer.path, { approved });
       if (!accepted) {
         if (!this.stopped) {
           this.waitTimer = setInterval(() => void this.install(), 1000);
@@ -240,6 +271,7 @@ export class UpdateService {
         installWhenIdle: false,
       });
       this.installer = null;
+      this.preparedUpdateApproved = false;
       await this.cleanCache().catch((error) => recordRuntimeError("updates.cleanup", error));
     } finally {
       this.installing = false;
@@ -266,7 +298,11 @@ export class UpdateService {
     await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
     this.cache = null;
   }
-  private async acquire(release: ReleaseMetadata, controller: AbortController): Promise<void> {
+  private async acquire(
+    release: ReleaseMetadata,
+    controller: AbortController,
+    approved: boolean,
+  ): Promise<void> {
     const runtime = this.runtime;
     if (!runtime) return;
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30 * 60 * 1000)]);
@@ -275,6 +311,7 @@ export class UpdateService {
       await mkdir(runtime.cacheDirectory, { recursive: true });
       this.cache = await mkdtemp(join(runtime.cacheDirectory, `release-${release.version}-`));
       const archive = join(this.cache, "package.zip");
+      this.assertNetwork("更新下载", approved);
       const response = await fetchUpdateArchive(
         release.downloadUrl,
         signal,
@@ -348,6 +385,7 @@ export class UpdateService {
       this.publish({ state: "ready", waitingForTasks: runtime.activeTasks(), error: null }, true);
     } catch (cause) {
       this.installer = null;
+      this.preparedUpdateApproved = false;
       await this.cleanCache().catch((error) => recordRuntimeError("updates.cleanup", error));
       if (controller.signal.aborted) {
         this.publish({ state: "available", installWhenIdle: false, error: null });
@@ -364,7 +402,7 @@ export class UpdateService {
       }
     }
   }
-  private async perform(): Promise<UpdateStatus> {
+  private async perform(approved: boolean): Promise<UpdateStatus> {
     this.value = { ...this.value, state: "checking", error: null };
     this.emit(this.status(), false);
     try {
@@ -375,9 +413,11 @@ export class UpdateService {
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
       };
+      this.assertNetwork("更新检查", approved);
       let response = await this.fetcher(ZIP_RELEASE_RPC, request);
       if (response.status === 404) {
         await response.body?.cancel();
+        this.assertNetwork("更新检查（兼容回退）", approved);
         response = await this.fetcher(RELEASE_RPC, request);
       }
       if (!response.ok)

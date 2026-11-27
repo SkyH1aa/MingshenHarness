@@ -12,6 +12,7 @@ import type {
   McpToolSummary,
 } from "../../shared/domain";
 import { APP_VERSION } from "../../shared/release";
+import type { ToolOutcomeCompatibilityResult } from "../../shared/tool-outcome";
 import type { McpServerConfig } from "../agents/project-config-service";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
 import {
@@ -24,6 +25,7 @@ import type { StreamToolDefinition } from "../providers/model-stream";
 import { redactSecrets } from "../security/redact";
 import type { Repository } from "../storage/repository";
 import type { SecretStore } from "../storage/secret-store";
+import { ToolOutcomeService } from "../tools/tool-outcome-service";
 
 interface SecretConfig {
   headers: Record<string, string>;
@@ -72,6 +74,16 @@ export interface McpToolDefinition extends StreamToolDefinition {
   serverName: string;
   toolName: string;
   readOnly: boolean;
+  outputSchema?: Record<string, unknown>;
+}
+
+interface McpToolMetadata extends McpToolSummary {
+  outputSchema?: Record<string, unknown>;
+}
+
+interface ManagedPolicyGate {
+  assertCapability(capability: string, context?: { approved?: boolean }): void | Promise<void>;
+  assertToolAllowed(name: string, context?: { approved?: boolean }): void | Promise<void>;
 }
 
 const BUILTIN_SERVERS: Array<{
@@ -131,6 +143,12 @@ const BUILTIN_SERVERS: Array<{
 
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_HTTP_ERROR_BODY = 100_000;
+const BROWSERDO_READ_ONLY_TOOL_NAMES = new Set([
+  "browser_status",
+  "browser_take_snapshot",
+  "browser_read_pages",
+  "browser_get_window_info",
+]);
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -281,7 +299,7 @@ function parseSecretConfig(value: string): SecretConfig {
   }
 }
 
-function toolListFromResult(value: unknown): McpToolSummary[] {
+function toolListFromResult(value: unknown): McpToolMetadata[] {
   if (!value || typeof value !== "object") {
     return [];
   }
@@ -309,23 +327,35 @@ function toolListFromResult(value: unknown): McpToolSummary[] {
         tool.inputSchema && typeof tool.inputSchema === "object"
           ? (tool.inputSchema as Record<string, unknown>)
           : { type: "object", additionalProperties: true },
+      ...(tool.outputSchema &&
+      typeof tool.outputSchema === "object" &&
+      !Array.isArray(tool.outputSchema)
+        ? { outputSchema: tool.outputSchema as Record<string, unknown> }
+        : {}),
     }))
     .filter((tool) => tool.name);
 }
 
-function builtinReadOnly(serverId: string, tool: McpToolSummary): boolean {
-  if (tool.readOnly || serverId === "builtin-wikipedia") {
-    return true;
-  }
+function hasExactBuiltinConfig(server: McpServerView): boolean {
+  const expected = BUILTIN_SERVERS.find((candidate) => candidate.id === server.id);
+  if (!expected || !server.builtin) return false;
   return (
-    serverId === "builtin-browserdo" &&
-    [
-      "browser_status",
-      "browser_take_snapshot",
-      "browser_read_pages",
-      "browser_get_window_info",
-    ].includes(tool.name)
+    server.transport === expected.transport &&
+    server.command === (expected.command ?? "") &&
+    server.args.length === (expected.args?.length ?? 0) &&
+    server.args.every((argument, index) => argument === expected.args?.[index]) &&
+    server.cwd === "" &&
+    server.url === (expected.url ?? "") &&
+    server.headerKeys.length === 0 &&
+    server.envKeys.length === 0 &&
+    !server.oauthEnabled
   );
+}
+
+function builtinReadOnly(server: McpServerView, tool: McpToolSummary): boolean {
+  if (!hasExactBuiltinConfig(server)) return false;
+  if (server.id === "builtin-wikipedia") return true;
+  return server.id === "builtin-browserdo" && BROWSERDO_READ_ONLY_TOOL_NAMES.has(tool.name);
 }
 
 export class McpService {
@@ -333,6 +363,9 @@ export class McpService {
   private readonly httpConnections = new Map<string, HttpConnection>();
   private readonly initializations = new WeakMap<object, Promise<void>>();
   private readonly workspaceFingerprints = new Map<string, string>();
+  private readonly toolMetadata = new Map<string, McpToolMetadata>();
+  private readonly toolOutcomes = new ToolOutcomeService();
+  private managedPolicy: ManagedPolicyGate | null = null;
 
   constructor(
     private readonly repository: Repository,
@@ -340,6 +373,47 @@ export class McpService {
     private readonly appVersion: string,
   ) {
     this.ensureBuiltins();
+  }
+
+  setManagedPolicy(service: ManagedPolicyGate | null): void {
+    this.managedPolicy = service;
+  }
+
+  private toolMetadataKey(serverId: string, toolName: string): string {
+    return `${serverId}\u0000${toolName}`;
+  }
+
+  private forgetTools(serverId: string): void {
+    const prefix = `${serverId}\u0000`;
+    for (const key of this.toolMetadata.keys()) {
+      if (key.startsWith(prefix)) this.toolMetadata.delete(key);
+    }
+  }
+
+  private rememberTools(server: McpServerView, tools: McpToolMetadata[]): McpToolMetadata[] {
+    return tools.map((tool) => {
+      const sanitized = {
+        ...tool,
+        readOnly: builtinReadOnly(server, tool),
+      };
+      this.toolMetadata.set(this.toolMetadataKey(server.id, tool.name), sanitized);
+      return sanitized;
+    });
+  }
+
+  private async assertExecutionAllowed(
+    capability: "mcp.connect" | "mcp.call",
+    toolName: string,
+    approved: boolean,
+  ): Promise<string | null> {
+    if (!this.managedPolicy) return null;
+    try {
+      await this.managedPolicy.assertCapability(capability, { approved });
+      await this.managedPolicy.assertToolAllowed(toolName, { approved });
+      return null;
+    } catch (error) {
+      return errorText(error).slice(0, 4_000);
+    }
   }
 
   list(): McpServerView[] {
@@ -958,6 +1032,7 @@ export class McpService {
     workspacePath?: string | null,
     allowedProcesses?: Set<string>,
     allowedPluginServers?: ReadonlySet<string>,
+    policyApproved = false,
   ): Promise<McpToolDefinition[]> {
     const results: McpToolDefinition[] = [];
     const pluginServerIds = this.pluginMcpServerIds();
@@ -983,7 +1058,7 @@ export class McpService {
           (owner !== null && item.id.startsWith(`project-${owner}-`))),
     )) {
       try {
-        const tools = await this.discoverTools(server);
+        const tools = await this.discoverTools(server, undefined, policyApproved);
         this.repository.updateMcpServerStatus(server.id, {
           status: "connected",
           tools,
@@ -996,10 +1071,11 @@ export class McpService {
             serverId: server.id,
             serverName: server.name,
             toolName: tool.name,
-            readOnly: builtinReadOnly(server.id, tool),
+            readOnly: builtinReadOnly(server, tool),
             name: `mcp__${serverSlug}__${normalizeMcpName(tool.name)}`,
             description: `[MCP · ${server.name}] ${tool.description || tool.title}`,
             parameters: tool.parameters,
+            ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
           });
         }
       } catch (error) {
@@ -1018,14 +1094,42 @@ export class McpService {
     toolName: string,
     args: Record<string, unknown>,
     signal?: AbortSignal,
-  ): Promise<{ output: string; isError: boolean }> {
+    options?: { approved?: boolean },
+  ): Promise<ToolOutcomeCompatibilityResult> {
     const server = this.requireServer(serverId);
     if (!server.enabled || !this.isPluginServerAvailable(server.id)) {
-      return {
-        output: `MCP_SERVER_DISABLED: ${server.name} is disabled or its owning plugin is disabled.`,
-        isError: true,
-      };
+      return await this.toolOutcomes.normalize(
+        {
+          output: `MCP_SERVER_DISABLED: ${server.name} is disabled or its owning plugin is disabled.`,
+          isError: true,
+        },
+        {
+          source: "mcp",
+          toolName,
+          status: "denied",
+          effect: "none",
+          codes: ["MCP_SERVER_DISABLED"],
+        },
+      );
     }
+    const policyDenied = await this.assertExecutionAllowed(
+      "mcp.call",
+      toolName,
+      options?.approved === true,
+    );
+    if (policyDenied) {
+      return await this.toolOutcomes.normalize(
+        { output: `MCP_POLICY_DENIED: ${policyDenied}`, isError: true },
+        {
+          source: "mcp",
+          toolName,
+          status: "denied",
+          effect: "none",
+          codes: ["MCP_POLICY_DENIED"],
+        },
+      );
+    }
+    const metadata = this.toolMetadata.get(this.toolMetadataKey(serverId, toolName));
     try {
       signal?.throwIfAborted();
       const result =
@@ -1049,32 +1153,73 @@ export class McpService {
               false,
               signal,
             );
-      return {
-        output: formatToolResult(result),
-        isError: Boolean(
-          result &&
-            typeof result === "object" &&
-            (result as Record<string, unknown>).isError === true,
-        ),
-      };
+      const record =
+        result && typeof result === "object" && !Array.isArray(result)
+          ? (result as Record<string, unknown>)
+          : {};
+      const serverError = record.isError === true;
+      const structuredContent = record.structuredContent;
+      return await this.toolOutcomes.normalize(
+        {
+          output: formatToolResult(result),
+          isError: serverError,
+        },
+        {
+          source: "mcp",
+          toolName,
+          status: serverError ? "failed" : "success",
+          schema: serverError ? undefined : metadata?.outputSchema,
+          structuredContent,
+          mayHaveSideEffect: !metadata?.readOnly,
+          effect: metadata?.readOnly ? "none" : serverError ? "uncertain" : "confirmed",
+          signal,
+        },
+      );
     } catch (error) {
-      return {
-        output: `MCP_OUTCOME_UNCERTAIN: MCP ${server.name}: ${this.diagnostic(serverId, error)}\nThe transport failed or was cancelled; the server may have started this operation. Inspect server state before further side effects.`,
-        isError: true,
-      };
+      return await this.toolOutcomes.normalize(
+        {
+          output: `MCP_OUTCOME_UNCERTAIN: MCP ${server.name}: ${this.diagnostic(serverId, error)}\nThe transport failed or was cancelled; the server may have started this operation. Inspect server state before further side effects.`,
+          isError: true,
+        },
+        {
+          source: "mcp",
+          toolName,
+          status: signal?.aborted ? "cancelled" : "failed",
+          // readOnlyHint describes the intended operation, not proof that a
+          // dispatched request stopped before changing server-side state.
+          effect: "uncertain",
+          codes: ["MCP_OUTCOME_UNCERTAIN"],
+        },
+      );
     }
   }
 
   async executeExposedTool(
     exposedName: string,
     args: Record<string, unknown>,
-  ): Promise<{ output: string; isError: boolean }> {
-    const definitions = await this.toolDefinitions();
+    options?: { approved?: boolean },
+  ): Promise<ToolOutcomeCompatibilityResult> {
+    const definitions = await this.toolDefinitions(
+      false,
+      undefined,
+      undefined,
+      undefined,
+      options?.approved === true,
+    );
     const definition = definitions.find((item) => item.exposedName === exposedName);
     if (!definition) {
-      return { output: `MCP 工具不存在或服务器未启用：${exposedName}`, isError: true };
+      return await this.toolOutcomes.normalize(
+        { output: `MCP 工具不存在或服务器未启用：${exposedName}`, isError: true },
+        {
+          source: "mcp",
+          toolName: exposedName,
+          status: "failed",
+          effect: "none",
+          codes: ["MCP_TOOL_NOT_FOUND"],
+        },
+      );
     }
-    return await this.callTool(definition.serverId, definition.toolName, args);
+    return await this.callTool(definition.serverId, definition.toolName, args, undefined, options);
   }
 
   findServerByName(value: string): McpServerView | null {
@@ -1095,6 +1240,7 @@ export class McpService {
     workspacePath?: string | null,
     allowedProcesses?: Set<string>,
     allowedPluginServers?: ReadonlySet<string>,
+    policyApproved = false,
   ): Promise<McpToolDefinition | null> {
     return (
       (
@@ -1103,6 +1249,7 @@ export class McpService {
           workspacePath,
           allowedProcesses,
           allowedPluginServers,
+          policyApproved,
         )
       ).find((tool) => tool.name === name) ?? null
     );
@@ -1341,11 +1488,22 @@ export class McpService {
       : { headers: {}, env: {} };
   }
 
-  private async discoverTools(server: McpServerView): Promise<McpToolSummary[]> {
-    const tools: McpToolSummary[] = [];
+  private async discoverTools(
+    server: McpServerView,
+    signal?: AbortSignal,
+    approved = false,
+  ): Promise<McpToolMetadata[]> {
+    if (this.managedPolicy) await this.managedPolicy.assertCapability("mcp.connect", { approved });
+    this.forgetTools(server.id);
+    const tools: McpToolMetadata[] = [];
     let cursor: string | undefined;
     do {
-      const result = await this.httpOrStdioRequest(server, "tools/list", cursor ? { cursor } : {});
+      const result = await this.httpOrStdioRequest(
+        server,
+        "tools/list",
+        cursor ? { cursor } : {},
+        signal,
+      );
       tools.push(...toolListFromResult(result));
       const next =
         result && typeof result === "object"
@@ -1353,7 +1511,7 @@ export class McpService {
           : undefined;
       cursor = typeof next === "string" ? next : undefined;
     } while (cursor);
-    return tools;
+    return this.rememberTools(server, tools);
   }
 
   private async httpOrStdioRequest(

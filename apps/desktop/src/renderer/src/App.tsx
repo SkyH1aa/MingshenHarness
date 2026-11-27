@@ -6,6 +6,7 @@ import {
   Folder,
   Image,
   LoaderCircle,
+  MailCheck,
   MessagesSquare,
   Moon,
   Network,
@@ -95,6 +96,8 @@ import {
   SessionSelectionSequence,
 } from "./lib/companion-session-navigation";
 import { ComposerDraftHandoff } from "./lib/composer-draft-handoff";
+import { isActiveRuntimeRunStatus } from "./lib/format";
+import { PendingSubmissionKeys } from "./lib/pending-submission-keys";
 import {
   applyChatBatchResult,
   loadChatSessionSnapshot,
@@ -245,9 +248,20 @@ export function App() {
   const [chatGroups, setChatGroups] = useState<ChatGroupView[]>([]);
   const [completionNotifications, setCompletionNotifications] =
     useState<CompletionNotificationState | null>(null);
+  const unreadCompletionCount = completionNotifications?.unread.length ?? 0;
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [liveBySession, setLiveBySession] = useState<Record<string, LiveRun>>({});
   const [runsBySession, setRunsBySession] = useState<Record<string, SessionRunState>>({});
+  const runsBySessionRef = useRef<Record<string, SessionRunState>>({});
+  runsBySessionRef.current = runsBySession;
+  const updateRunsBySession = useCallback(
+    (update: (current: Record<string, SessionRunState>) => Record<string, SessionRunState>) => {
+      const next = update(runsBySessionRef.current);
+      runsBySessionRef.current = next;
+      setRunsBySession(next);
+    },
+    [],
+  );
   const [modeStartLockSessionIds, setModeStartLockSessionIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -343,6 +357,7 @@ export function App() {
   const [creatingWorkspaceSession, setCreatingWorkspaceSession] = useState(false);
   const [workspaceSessionError, setWorkspaceSessionError] = useState("");
   const creatingWorkspaceSessionRef = useRef(false);
+  const pendingSubmissionKeys = useRef(new PendingSubmissionKeys());
   const [loading, setLoading] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
   const updateModeStartLock = useCallback((sessionId: string, locked: boolean) => {
@@ -753,15 +768,15 @@ export function App() {
     });
     receiveApprovals(data.approvalState);
     receiveQuestions(data.questionState);
-    setRunsBySession((current) => {
+    updateRunsBySession((current) => {
       const ids = new Set([...loadedIds, ...data.sessions.map((session) => session.id)]);
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => ids.has(id)));
       for (const run of data.sessionRuns) {
         const previous = next[run.sessionId];
         if (
           previous?.runId === run.runId &&
-          previous.status !== "running" &&
-          run.status === "running"
+          !isActiveRuntimeRunStatus(previous.status) &&
+          isActiveRuntimeRunStatus(run.status)
         )
           continue;
         if (!previous || Date.parse(run.startedAt) >= Date.parse(previous.startedAt))
@@ -770,7 +785,7 @@ export function App() {
       return next;
     });
     return data;
-  }, [receiveApprovals, receiveQuestions, loadAllChatSessions, mergeSessions]);
+  }, [receiveApprovals, receiveQuestions, loadAllChatSessions, mergeSessions, updateRunsBySession]);
 
   useEffect(() => {
     const sync = async () => {
@@ -1009,8 +1024,44 @@ export function App() {
         scheduleQueuedPromptsRefresh(event.session.id);
         return;
       }
+      if (event.type === "runtime_run_updated") {
+        const previous = runsBySessionRef.current[event.sessionId];
+        const active = isActiveRuntimeRunStatus(event.run.status);
+        const sameRun = previous?.runId === event.run.runId;
+        if (sameRun && previous && !isActiveRuntimeRunStatus(previous.status)) return;
+        const startedAt = event.run.startedAt ?? event.run.createdAt;
+        if (previous && !sameRun && Date.parse(startedAt) < Date.parse(previous.startedAt)) return;
+        updateRunsBySession((current) => ({
+          ...current,
+          [event.sessionId]: {
+            sessionId: event.sessionId,
+            runId: event.run.runId,
+            startedAt,
+            completedAt: event.run.completedAt,
+            status: event.run.status,
+          },
+        }));
+        updateModeStartLock(event.sessionId, active);
+        updateModePreparationLock(
+          event.sessionId,
+          event.run.status === "accepted" || event.run.status === "preparing",
+        );
+        if (!active) {
+          setLiveBySession((current) =>
+            current[event.sessionId]?.runId === event.run.runId
+              ? Object.fromEntries(
+                  Object.entries(current).filter(([sessionId]) => sessionId !== event.sessionId),
+                )
+              : current,
+          );
+          void syncPendingRequests().catch(() => undefined);
+          scheduleQueuedPromptsRefresh(event.sessionId);
+        }
+        return;
+      }
 
       if (event.type === "session_removed") {
+        pendingSubmissionKeys.current.forgetSession(event.sessionId);
         queuedPromptLoadVersionsRef.current.set(
           event.sessionId,
           (queuedPromptLoadVersionsRef.current.get(event.sessionId) ?? 0) + 1,
@@ -1036,7 +1087,7 @@ export function App() {
           return next;
         });
         setSessions((current) => current.filter((session) => session.id !== event.sessionId));
-        setRunsBySession((current) => {
+        updateRunsBySession((current) => {
           const next = { ...current };
           delete next[event.sessionId];
           return next;
@@ -1062,9 +1113,12 @@ export function App() {
       }
 
       if (event.type === "run_started") {
+        const previous = runsBySessionRef.current[event.sessionId];
+        if (previous?.runId === event.runId && !isActiveRuntimeRunStatus(previous.status)) return;
         updateModeStartLock(event.sessionId, true);
+        updateModePreparationLock(event.sessionId, false);
         scheduleQueuedPromptsRefresh(event.sessionId);
-        setRunsBySession((current) => ({
+        updateRunsBySession((current) => ({
           ...current,
           [event.sessionId]: {
             sessionId: event.sessionId,
@@ -1117,7 +1171,7 @@ export function App() {
         );
         if (event.sessionId === selectedSessionRef.current)
           setMessages((current) => current.filter((message) => message.seq < event.fromSeq));
-        setRunsBySession((current) => {
+        updateRunsBySession((current) => {
           const next = { ...current };
           delete next[event.sessionId];
           return next;
@@ -1226,30 +1280,30 @@ export function App() {
         event.type === "run_completed" ||
         event.type === "run_failed"
       ) {
+        const previous = runsBySessionRef.current[event.sessionId];
+        if (!previous || previous.runId !== event.runId) return;
         updateModeStartLock(event.sessionId, false);
-        setRunsBySession((current) => {
-          const previous = current[event.sessionId];
-          return previous
-            ? {
-                ...current,
-                [event.sessionId]: {
-                  ...previous,
-                  completedAt: new Date().toISOString(),
-                  status:
-                    event.type === "run_completed"
-                      ? "completed"
-                      : event.type === "run_failed"
-                        ? "failed"
-                        : "interrupted",
-                },
-              }
-            : current;
-        });
-        setLiveBySession((current) => {
-          const next = { ...current };
-          delete next[event.sessionId];
-          return next;
-        });
+        updateModePreparationLock(event.sessionId, false);
+        updateRunsBySession((current) => ({
+          ...current,
+          [event.sessionId]: {
+            ...previous,
+            completedAt: new Date().toISOString(),
+            status:
+              event.type === "run_completed"
+                ? "completed"
+                : event.type === "run_failed"
+                  ? "failed"
+                  : "interrupted",
+          },
+        }));
+        setLiveBySession((current) =>
+          current[event.sessionId]?.runId === event.runId
+            ? Object.fromEntries(
+                Object.entries(current).filter(([sessionId]) => sessionId !== event.sessionId),
+              )
+            : current,
+        );
         void syncPendingRequests().catch(() => undefined);
         scheduleQueuedPromptsRefresh(event.sessionId);
       }
@@ -1264,16 +1318,27 @@ export function App() {
     setWorkspaceOpen,
     updateModePreparationLock,
     updateModeStartLock,
+    updateRunsBySession,
   ]);
 
+  const selectedRunState = selectedSessionId ? (runsBySession[selectedSessionId] ?? null) : null;
+  const selectedLiveRun = selectedSessionId ? (liveBySession[selectedSessionId] ?? null) : null;
+  const selectedRuntimeActive =
+    isActiveRuntimeRunStatus(selectedRunState?.status) || Boolean(selectedLiveRun);
   const visualRunState =
     selectedSessionId && questionsBySession[selectedSessionId]
       ? "question"
-      : selectedSession?.status === "waiting_approval"
-        ? "approval"
-        : selectedSession?.status === "running"
-          ? "running"
-          : "idle";
+      : selectedRunState
+        ? selectedRunState.status === "waiting_approval"
+          ? "approval"
+          : selectedRuntimeActive
+            ? "running"
+            : "idle"
+        : selectedSession?.status === "waiting_approval"
+          ? "approval"
+          : selectedSession?.status === "running"
+            ? "running"
+            : "idle";
   const visualRunLabel =
     visualRunState === "question"
       ? tr("等待回答")
@@ -1294,7 +1359,7 @@ export function App() {
           approvalsBySession[session.id] ||
           questionsBySession[session.id] ||
           liveBySession[session.id] ||
-          runsBySession[session.id]?.status === "running" ||
+          isActiveRuntimeRunStatus(runsBySession[session.id]?.status) ||
           modeStartLockSessionIds.has(session.id) ||
           modePreparationSessionIds.has(session.id)),
     );
@@ -1604,6 +1669,7 @@ export function App() {
       composerDrafts.forget([...removed]);
       draftHandoff.current.forget([...removed]);
       for (const id of removed) {
+        pendingSubmissionKeys.current.forgetSession(id);
         queuedPromptLoadVersionsRef.current.set(
           id,
           (queuedPromptLoadVersionsRef.current.get(id) ?? 0) + 1,
@@ -1618,7 +1684,7 @@ export function App() {
         Object.fromEntries(Object.entries(current).filter(([id]) => !removed.has(id)));
       setContextsBySession(withoutRemoved);
       setQueuedPromptsBySession(withoutRemoved);
-      setRunsBySession(withoutRemoved);
+      updateRunsBySession(withoutRemoved);
       setActivitiesBySession(withoutRemoved);
       setWorkbenchSessionId((current) => (current && removed.has(current) ? null : current));
     }
@@ -1680,22 +1746,31 @@ export function App() {
     draftRevision: string,
     turnOptions?: ChatTurnOptions,
   ) => {
-    if (!selectedSessionId) {
+    const sessionId = selectedSessionId;
+    if (!sessionId) {
       throw new Error(tr("\u8BF7\u5148\u9009\u62E9\u4F1A\u8BDD\u3002"));
     }
-    updateModeStartLock(selectedSessionId, true);
+    const identity = {
+      sessionId,
+      draftRevision,
+      temporaryInstruction: turnOptions?.temporaryInstruction,
+    };
+    const idempotencyKey = pendingSubmissionKeys.current.acquire(identity);
+    updateModeStartLock(sessionId, true);
     try {
       await window.mingshen.sendChat({
-        sessionId: selectedSessionId,
+        sessionId,
         text,
         attachments,
         draftRevision,
+        idempotencyKey,
         ...(turnOptions?.temporaryInstruction
           ? { temporaryInstruction: turnOptions.temporaryInstruction }
           : {}),
       });
+      pendingSubmissionKeys.current.release(identity);
     } catch (error) {
-      updateModeStartLock(selectedSessionId, false);
+      updateModeStartLock(sessionId, false);
       throw error;
     }
   };
@@ -1709,7 +1784,12 @@ export function App() {
 
   const stopRun = async () => {
     if (selectedSessionId) {
-      await window.mingshen.stopChat(selectedSessionId);
+      const runtimeRun = selectedRunState;
+      const runId =
+        runtimeRun && isActiveRuntimeRunStatus(runtimeRun.status)
+          ? runtimeRun.runId
+          : selectedLiveRun?.runId;
+      await window.mingshen.stopChat(selectedSessionId, runId);
     }
   };
 
@@ -2082,6 +2162,30 @@ export function App() {
               </div>
             ) : null}
             <div className="topbar-actions">
+              <button
+                className={`icon-button notification-read-all${unreadCompletionCount ? " notification-read-all--active" : ""}`}
+                type="button"
+                title={tr("一键已读")}
+                aria-label={
+                  unreadCompletionCount
+                    ? tr("一键已读，共 {0} 个未读会话", [unreadCompletionCount])
+                    : tr("没有未读会话")
+                }
+                disabled={unreadCompletionCount === 0}
+                onClick={() => {
+                  void window.mingshen
+                    .markAllCompletionNotificationsRead()
+                    .then(setCompletionNotifications)
+                    .catch((cause) => setSurfaceError(errorMessage(cause)));
+                }}
+              >
+                <MailCheck size={16} aria-hidden="true" />
+                {unreadCompletionCount ? (
+                  <span className="notification-read-all__count" aria-hidden="true">
+                    {unreadCompletionCount > 99 ? "99+" : unreadCompletionCount}
+                  </span>
+                ) : null}
+              </button>
               <button
                 className="icon-button"
                 type="button"

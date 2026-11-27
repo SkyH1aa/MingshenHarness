@@ -214,7 +214,7 @@ describe("automatic model request retries", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it.each(["openai_responses", "openai_chat_completions", "anthropic_messages"] as const)(
-    "renews the allowance and backoff for each recovered disconnection in one %s turn",
+    "keeps one total retry budget when truncated %s attempts emit partial progress",
     async (protocol) => {
       vi.useFakeTimers();
       const value = input(protocol);
@@ -227,27 +227,15 @@ describe("automatic model request retries", () => {
           : protocol === "anthropic_messages"
             ? { type: "content_block_delta", delta: { type: "text_delta", text } }
             : { choices: [{ delta: { content: text } }] };
-      const completion =
-        protocol === "openai_responses"
-          ? { type: "response.completed" }
-          : protocol === "anthropic_messages"
-            ? { type: "message_stop" }
-            : { choices: [{ delta: {}, finish_reason: "stop" }] };
       const fetcher = vi.fn(async () => {
         request++;
-        if (![3, 5, 7].includes(request)) return new Response("Unavailable", { status: 503 });
-        return request === 7
-          ? sse(delta("Recovered final output"), completion)
-          : sse(delta(request === 3 ? "First" : "First, then more progress"));
+        return sse(delta(`Partial response ${request}`));
       });
       vi.stubGlobal("fetch", fetcher);
-      const pending = expect(collect(value)).resolves.toContainEqual({
-        type: "text_delta",
-        text: "Recovered final output",
-      });
+      const pending = expect(collect(value)).rejects.toThrow("incomplete");
       await vi.runAllTimersAsync();
       await pending;
-      expect(fetcher).toHaveBeenCalledTimes(7);
+      expect(fetcher).toHaveBeenCalledTimes(3);
       const calls = vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => ({
         attempt: state.attempt,
         delayMs: state.delayMs,
@@ -255,16 +243,12 @@ describe("automatic model request retries", () => {
       expect(calls).toEqual([
         { attempt: 1, delayMs: 1000 },
         { attempt: 2, delayMs: 2000 },
-        { attempt: 1, delayMs: 1000 },
-        { attempt: 2, delayMs: 2000 },
-        { attempt: 1, delayMs: 1000 },
-        { attempt: 2, delayMs: 2000 },
       ]);
-      expect(value.retry.onRecovered).toHaveBeenCalledTimes(3);
+      expect(value.retry.onRecovered).not.toHaveBeenCalled();
     },
   );
   it.each(["reasoning", "tool arguments"])(
-    "recognizes forward %s progress after reconnection",
+    "does not renew retries for forward %s progress after reconnection",
     async (kind) => {
       vi.useFakeTimers();
       const value = input();
@@ -281,16 +265,16 @@ describe("automatic model request retries", () => {
       const fetcher = vi
         .fn()
         .mockResolvedValueOnce(new Response("Unavailable", { status: 503 }))
-        .mockResolvedValueOnce(sse(progress))
-        .mockResolvedValueOnce(sse({ type: "response.completed" }));
+        .mockResolvedValueOnce(sse(progress));
       vi.stubGlobal("fetch", fetcher);
-      const pending = collect(value);
+      const pending = expect(collect(value)).rejects.toThrow("incomplete");
       await vi.runAllTimersAsync();
       await pending;
       expect(vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => state.attempt)).toEqual([
-        1, 1,
+        1,
       ]);
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(value.retry.onRecovered).not.toHaveBeenCalled();
     },
   );
   it("does not renew retries for empty, usage-only or replayed incomplete output", async () => {
@@ -319,7 +303,7 @@ describe("automatic model request retries", () => {
     ]);
     expect(value.retry.onRecovered).not.toHaveBeenCalled();
   });
-  it("exhausts a fresh allowance if recovery is followed by persistent failure", async () => {
+  it("keeps the total allowance exhausted after an attempt makes partial progress", async () => {
     vi.useFakeTimers();
     const value = input();
     value.retry.maxRetries = 2;
@@ -327,19 +311,18 @@ describe("automatic model request retries", () => {
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(unavailable())
-      .mockResolvedValueOnce(unavailable())
       .mockResolvedValueOnce(sse({ type: "response.output_text.delta", delta: "New progress" }))
-      .mockImplementation(async () => unavailable());
+      .mockImplementation(async () => sse({ type: "response.output_text.delta", delta: "More" }));
     vi.stubGlobal("fetch", fetcher);
-    const pending = expect(collect(value)).rejects.toThrow("HTTP 503");
+    const pending = expect(collect(value)).rejects.toThrow("incomplete");
     await vi.runAllTimersAsync();
     await pending;
-    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => state.attempt)).toEqual([
-      1, 2, 1, 2,
+      1, 2,
     ]);
   });
-  it("recognizes different shorter output as recovery without depending on token chunk boundaries", async () => {
+  it("does not treat different shorter output as recovery", async () => {
     vi.useFakeTimers();
     const value = input();
     value.retry.maxRetries = 1;
@@ -349,25 +332,14 @@ describe("automatic model request retries", () => {
       .mockResolvedValueOnce(
         sse({ type: "response.output_text.delta", delta: "A long incomplete response" }),
       )
-      .mockResolvedValueOnce(sse({ type: "response.output_text.delta", delta: "New" }))
-      .mockResolvedValueOnce(
-        sse(
-          { type: "response.output_text.delta", delta: "New answer" },
-          { type: "response.completed" },
-        ),
-      );
+      .mockResolvedValueOnce(sse({ type: "response.output_text.delta", delta: "New" }));
     vi.stubGlobal("fetch", fetcher);
-    const pending = expect(collect(value)).resolves.toContainEqual({
-      type: "text_delta",
-      text: "New answer",
-    });
+    const pending = expect(collect(value)).rejects.toThrow("incomplete");
     await vi.runAllTimersAsync();
     await pending;
-    expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => state.attempt)).toEqual([
-      1, 1,
-    ]);
-    expect(value.retry.onRecovered).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => state.attempt)).toEqual([1]);
+    expect(value.retry.onRecovered).not.toHaveBeenCalled();
   });
   it.each(["openai_responses", "openai_chat_completions", "anthropic_messages"] as const)(
     "discards failed partial output and recovers a truncated %s stream",
@@ -483,5 +455,57 @@ describe("automatic model request retries", () => {
       .mockRejectedValue(new TypeError("fetch failed", { cause: { code: "CERT_HAS_EXPIRED" } }));
     await expect(collect(input())).rejects.toBeInstanceOf(ModelRequestError);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("retries only unsignalled AbortErrors from fetch and the response reader", async () => {
+    vi.useFakeTimers();
+    const value = input();
+    value.retry.maxRetries = 2;
+    let request = 0;
+    const unsignalledAbort = () => {
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      return error;
+    };
+    const fetcher = vi.fn(async () => {
+      request++;
+      if (request === 1) throw unsignalledAbort();
+      if (request === 2)
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Partial" })}\n\n`,
+                ),
+              );
+            },
+            pull(controller) {
+              controller.error(unsignalledAbort());
+            },
+          }),
+        );
+      return sse(
+        { type: "response.output_text.delta", delta: "Recovered" },
+        { type: "response.completed" },
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const pending = collect(value);
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(value.retry.onRetry).mock.calls.map(([state]) => state.attempt)).toEqual([
+      1, 2,
+    ]);
+
+    fetcher.mockClear();
+    const controller = new AbortController();
+    const userStop = new Error("User stopped the run");
+    userStop.name = "AbortError";
+    controller.abort(userStop);
+    const cancelled = input();
+    cancelled.signal = controller.signal;
+    await expect(collect(cancelled)).rejects.toThrow("User stopped the run");
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

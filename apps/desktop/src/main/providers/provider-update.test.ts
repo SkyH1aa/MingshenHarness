@@ -331,6 +331,36 @@ describe("saved provider connection editing", () => {
     },
   );
 
+  it.each(["auto", "off"] as const)(
+    "clears persisted %s cache settings when switching to OpenAI Images",
+    (mode) => {
+      const { provider, repository, service, input } = setup("openai_responses");
+      service.setPromptCaching(provider.id, { mode, ttl: "5m" });
+      expect(repository.hasSetting(providerPromptCachingKey(provider.id))).toBe(true);
+
+      const updated = service.updateProvider({ ...input, protocol: "openai_images" });
+
+      expect(updated.protocol).toBe("openai_images");
+      expect(repository.hasSetting(providerPromptCachingKey(provider.id))).toBe(false);
+    },
+  );
+
+  it("rolls back an OpenAI Images protocol switch when cache cleanup fails", () => {
+    const { provider, repository, service, input } = setup("openai_responses");
+    const settings: PromptCachingSettings = { mode: "off", ttl: "5m" };
+    service.setPromptCaching(provider.id, settings);
+    const before = service.getProvider(provider.id);
+    vi.spyOn(repository, "removeSetting").mockImplementationOnce(() => {
+      throw new Error("Injected cache cleanup failure.");
+    });
+
+    expect(() => service.updateProvider({ ...input, protocol: "openai_images" })).toThrow(
+      "Injected cache cleanup failure",
+    );
+    expect(service.getProvider(provider.id)).toEqual(before);
+    expect(repository.getSetting(providerPromptCachingKey(provider.id))).toEqual(settings);
+  });
+
   it("rolls back both connection and cache changes when cache persistence fails", () => {
     const { provider, repository, service, input } = setup();
     const settings: PromptCachingSettings = {

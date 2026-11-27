@@ -16,6 +16,8 @@ import { ChatView } from "./components/ChatView";
 import { setLocale, tr, useLocale } from "./i18n/index";
 import { runtimeText } from "./i18n/runtime";
 import type { LiveRun } from "./lib/chat-types";
+import { isActiveRuntimeRunStatus } from "./lib/format";
+import { PendingSubmissionKeys } from "./lib/pending-submission-keys";
 import {
   QuickChatTransitionWork,
   quickChatTransitionReady,
@@ -45,6 +47,22 @@ function runningState(sessionId: string, runId: string): SessionRunState {
     completedAt: null,
     status: "running",
   };
+}
+
+function runtimeSessionStatus(status: SessionRunState["status"]): SessionView["status"] {
+  switch (status) {
+    case "completed":
+      return "idle";
+    case "interrupted":
+      return "interrupted";
+    case "failed":
+    case "blocked_policy":
+      return "error";
+    case "waiting_approval":
+      return "waiting_approval";
+    default:
+      return "running";
+  }
 }
 
 function focusComposer(): void {
@@ -161,6 +179,7 @@ export function QuickChatApp() {
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [live, setLive] = useState<LiveRun | null>(null);
   const [runState, setRunState] = useState<SessionRunState | null>(null);
+  const runStateRef = useRef<SessionRunState | null>(null);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [context, setContext] = useState<QuickChatState["context"]>(null);
   const [error, setError] = useState<string | null>(null);
@@ -173,6 +192,7 @@ export function QuickChatApp() {
   const actionSequence = useRef(0);
   const actionBusyRef = useRef(false);
   const runEventVersion = useRef(0);
+  const pendingSubmissionKeys = useRef(new PendingSubmissionKeys());
   const transitionWork = useRef(new QuickChatTransitionWork()).current;
   const preparationFinishers = useRef(new Map<string, Array<() => void>>());
   const transitionRef = useRef<{ requestId: string; controller: AbortController } | null>(null);
@@ -187,6 +207,19 @@ export function QuickChatApp() {
         .finally(finish);
     },
     [transitionWork],
+  );
+
+  const commitRunState = useCallback(
+    (
+      next: SessionRunState | null | ((current: SessionRunState | null) => SessionRunState | null),
+    ) => {
+      const current = runStateRef.current;
+      const resolved = typeof next === "function" ? next(current) : next;
+      runStateRef.current = resolved;
+      setRunState(resolved);
+      return resolved;
+    },
+    [],
   );
 
   const onModePreparationChange = useCallback(
@@ -279,28 +312,31 @@ export function QuickChatApp() {
     };
   }, []);
 
-  const applySnapshot = useCallback((next: QuickChatState, focus = false) => {
-    snapshotGeneration.current += 1;
-    runEventVersion.current += 1;
-    const previousSessionId = currentSessionId.current;
-    const changed = previousSessionId !== (next.session?.id ?? null);
-    if (changed && previousSessionId && transitionRef.current) {
-      deferredConsumed.current.delete(previousSessionId);
-      composerDrafts.forget([previousSessionId]);
-    }
-    currentSessionId.current = next.session?.id ?? null;
-    setSnapshot(next);
-    setMessages(next.messages);
-    setRunState(next.runState);
-    setContext(next.context);
-    setError(next.error);
-    setInitialStatus("ready");
-    if (changed) {
-      setLive(null);
-      setActivities([]);
-    }
-    if (focus) focusComposer();
-  }, []);
+  const applySnapshot = useCallback(
+    (next: QuickChatState, focus = false) => {
+      snapshotGeneration.current += 1;
+      runEventVersion.current += 1;
+      const previousSessionId = currentSessionId.current;
+      const changed = previousSessionId !== (next.session?.id ?? null);
+      if (changed && previousSessionId && transitionRef.current) {
+        deferredConsumed.current.delete(previousSessionId);
+        composerDrafts.forget([previousSessionId]);
+      }
+      currentSessionId.current = next.session?.id ?? null;
+      setSnapshot(next);
+      setMessages(next.messages);
+      commitRunState(next.runState);
+      setContext(next.context);
+      setError(next.error);
+      setInitialStatus("ready");
+      if (changed) {
+        setLive(null);
+        setActivities([]);
+      }
+      if (focus) focusComposer();
+    },
+    [commitRunState],
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: initialRetry explicitly restarts startup loading.
   useEffect(() => {
@@ -348,6 +384,52 @@ export function QuickChatApp() {
                 : null;
       if (eventSessionId !== sessionId) return;
       switch (event.type) {
+        case "runtime_run_updated": {
+          runEventVersion.current += 1;
+          const startedAt = event.run.startedAt ?? event.run.createdAt;
+          const next: SessionRunState = {
+            sessionId: event.sessionId,
+            runId: event.run.runId,
+            startedAt,
+            completedAt: event.run.completedAt,
+            status: event.run.status,
+          };
+          const resolved = commitRunState((current) => {
+            if (!current) return next;
+            const previousStartedAt = Date.parse(current.startedAt);
+            const nextStartedAt = Date.parse(next.startedAt);
+            if (current.runId === next.runId) {
+              if (
+                !isActiveRuntimeRunStatus(current.status) &&
+                isActiveRuntimeRunStatus(next.status)
+              ) {
+                return current;
+              }
+              return next;
+            }
+            if (Number.isFinite(previousStartedAt) && nextStartedAt < previousStartedAt)
+              return current;
+            return next;
+          });
+          setSnapshot((snapshot) =>
+            currentSessionId.current === sessionId && snapshot?.session
+              ? {
+                  ...snapshot,
+                  session: {
+                    ...snapshot.session,
+                    status: runtimeSessionStatus(resolved?.status ?? event.run.status),
+                  },
+                }
+              : snapshot,
+          );
+          if (!isActiveRuntimeRunStatus(resolved?.status ?? event.run.status)) {
+            setLive((current) => (current?.runId === event.run.runId ? null : current));
+            if (resolved?.status === "failed" || resolved?.status === "blocked_policy") {
+              setError(runtimeText(event.run.terminalReason ?? resolved.status));
+            }
+          }
+          return;
+        }
         case "composer_draft_consumed":
           if (transitionRef.current) {
             const revisions = deferredConsumed.current.get(sessionId) ?? new Set<string>();
@@ -371,25 +453,36 @@ export function QuickChatApp() {
         case "session_removed":
           snapshotGeneration.current += 1;
           runEventVersion.current += 1;
+          pendingSubmissionKeys.current.forgetSession(event.sessionId);
           currentSessionId.current = null;
           setSnapshot((current) =>
             current ? { ...current, session: null, messages: [] } : current,
           );
           setMessages([]);
           setLive(null);
-          setRunState(null);
+          commitRunState(null);
           setContext(null);
           setActivities([]);
           return;
         case "run_started": {
           runEventVersion.current += 1;
           setError(null);
+          const previous = runStateRef.current;
+          if (previous && previous.runId !== event.runId) {
+            return;
+          }
+          if (previous?.runId === event.runId && !isActiveRuntimeRunStatus(previous.status)) {
+            return;
+          }
+          const next = runningState(sessionId, event.runId);
+          commitRunState((current) =>
+            current?.runId === event.runId ? { ...next, startedAt: current.startedAt } : next,
+          );
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current?.session
               ? { ...current, session: { ...current.session, status: "running" } }
               : current,
           );
-          setRunState(runningState(sessionId, event.runId));
           setActivities([]);
           if (event.kind !== "compaction")
             setLive({ runId: event.runId, text: "", reasoning: "", startedAt: Date.now() });
@@ -450,6 +543,10 @@ export function QuickChatApp() {
         case "run_interrupted":
         case "run_failed":
           runEventVersion.current += 1;
+          if (runStateRef.current && runStateRef.current.runId !== event.runId) {
+            setLive((current) => (current?.runId === event.runId ? null : current));
+            return;
+          }
           setSnapshot((current) =>
             currentSessionId.current === sessionId && current?.session
               ? {
@@ -466,7 +563,7 @@ export function QuickChatApp() {
                 }
               : current,
           );
-          setRunState((current) =>
+          commitRunState((current) =>
             currentSessionId.current === sessionId
               ? {
                   sessionId,
@@ -493,7 +590,7 @@ export function QuickChatApp() {
               ? { ...current, session: event.session }
               : current,
           );
-          setRunState(null);
+          commitRunState(null);
           setLive(null);
           void window.mingshen
             .getSessionMessages(sessionId)
@@ -507,7 +604,7 @@ export function QuickChatApp() {
       }
     });
     return unsubscribe;
-  }, [reconcileConsumedDraft]);
+  }, [commitRunState, reconcileConsumedDraft]);
 
   const action = useCallback(
     async (name: QuickChatAction) => {
@@ -573,24 +670,29 @@ export function QuickChatApp() {
   const send = useCallback(
     async (text: string, attachments: ChatAttachmentInput[], draftRevision: string) => {
       if (!session || session.archived) throw new Error(tr("当前对话不可用。"));
+      const sessionId = session.id;
+      const identity = { sessionId, draftRevision };
+      const idempotencyKey = pendingSubmissionKeys.current.acquire(identity);
       setError(null);
       const version = runEventVersion.current;
       const result = await window.mingshen.sendChat({
-        sessionId: session.id,
+        sessionId,
         text,
         attachments,
         draftRevision,
+        idempotencyKey,
       });
-      if (currentSessionId.current !== session.id || runEventVersion.current !== version) return;
+      pendingSubmissionKeys.current.release(identity);
+      if (currentSessionId.current !== sessionId || runEventVersion.current !== version) return;
       setSnapshot((current) =>
-        currentSessionId.current === session.id && current?.session
+        currentSessionId.current === sessionId && current?.session
           ? { ...current, session: { ...current.session, status: "running" } }
           : current,
       );
-      if (currentSessionId.current === session.id)
-        setRunState(runningState(session.id, result.runId));
+      if (currentSessionId.current === sessionId)
+        commitRunState(runningState(sessionId, result.runId));
     },
-    [session],
+    [commitRunState, session],
   );
 
   const rewrite = useCallback(
@@ -614,19 +716,20 @@ export function QuickChatApp() {
             : current,
         );
         if (currentSessionId.current === session.id)
-          setRunState(runningState(session.id, result.runId));
+          commitRunState(runningState(session.id, result.runId));
       } finally {
         finish();
       }
     },
-    [session, transitionWork],
+    [commitRunState, session, transitionWork],
   );
 
   const stop = useCallback(async () => {
     if (!session) return;
     const sessionId = session.id;
+    const runId = runStateRef.current?.runId;
     const version = runEventVersion.current;
-    await window.mingshen.stopChat(sessionId);
+    await window.mingshen.stopChat(sessionId, runId);
     if (currentSessionId.current !== sessionId || runEventVersion.current !== version) return;
     setLive(null);
     setSnapshot((current) =>
@@ -634,26 +737,30 @@ export function QuickChatApp() {
         ? { ...current, session: { ...current.session, status: "interrupted" } }
         : current,
     );
-    setRunState((current) =>
-      currentSessionId.current === sessionId && current
+    commitRunState((current) =>
+      currentSessionId.current === sessionId && current && (!runId || current.runId === runId)
         ? { ...current, completedAt: new Date().toISOString(), status: "interrupted" }
         : current,
     );
-  }, [session]);
+  }, [commitRunState, session]);
 
-  const compact = useCallback(async (sessionId: string) => {
-    const version = runEventVersion.current;
-    const result = await window.mingshen.compactChat(sessionId);
-    if (currentSessionId.current !== sessionId || runEventVersion.current !== version)
+  const compact = useCallback(
+    async (sessionId: string) => {
+      const version = runEventVersion.current;
+      const result = await window.mingshen.compactChat(sessionId);
+      if (currentSessionId.current !== sessionId || runEventVersion.current !== version)
+        return result;
+      setSnapshot((current) =>
+        currentSessionId.current === sessionId && current?.session
+          ? { ...current, session: { ...current.session, status: "running" } }
+          : current,
+      );
+      if (currentSessionId.current === sessionId)
+        commitRunState(runningState(sessionId, result.runId));
       return result;
-    setSnapshot((current) =>
-      currentSessionId.current === sessionId && current?.session
-        ? { ...current, session: { ...current.session, status: "running" } }
-        : current,
-    );
-    if (currentSessionId.current === sessionId) setRunState(runningState(sessionId, result.runId));
-    return result;
-  }, []);
+    },
+    [commitRunState],
+  );
 
   const syncPending = useCallback(async () => undefined, []);
   const ignoreApprovalDecision = useCallback(async () => undefined, []);

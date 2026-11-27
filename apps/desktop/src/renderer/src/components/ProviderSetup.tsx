@@ -74,7 +74,7 @@ function defaultModelDraft(modelId = "", protocol?: ProviderProtocol): ModelDraf
     reasoningLevels:
       protocol === "gemini_generate_content" ? "auto" : "none,low,medium,high,xhigh,max",
     anthropicNoneBehavior: "disabled",
-    imageOnly: false,
+    imageOnly: protocol === "openai_images",
     presetApplied: false,
     gptLongContextBilling: false,
   } satisfies ModelDraft);
@@ -275,7 +275,7 @@ function ProviderForm({
         apiKey,
         keyLabel,
         neverReveal,
-        promptCaching,
+        ...(protocol === "openai_images" ? {} : { promptCaching }),
       });
       setApiKey("");
       await onCreated();
@@ -358,6 +358,7 @@ function ProviderForm({
             <option value="anthropic_messages">Anthropic /v1/messages</option>
             <option value="openai_responses">OpenAI /v1/responses</option>
             <option value="openai_chat_completions">OpenAI /v1/chat/completions</option>
+            <option value="openai_images">OpenAI /v1/images</option>
             <option value="gemini_generate_content">Google Gemini /v1beta/models</option>
           </select>
         </label>
@@ -423,13 +424,15 @@ function ProviderForm({
         </span>
       </label>
 
-      <ProviderCacheFields
-        draft={promptCaching}
-        protocol={protocol}
-        baseUrl={baseUrl}
-        disabled={busy}
-        onChange={(change) => setPromptCaching((current) => ({ ...current, ...change }))}
-      />
+      {protocol !== "openai_images" ? (
+        <ProviderCacheFields
+          draft={promptCaching}
+          protocol={protocol}
+          baseUrl={baseUrl}
+          disabled={busy}
+          onChange={(change) => setPromptCaching((current) => ({ ...current, ...change }))}
+        />
+      ) : null}
       {error ? <p className="form-error">{error}</p> : null}
 
       <div className="form-actions">
@@ -749,11 +752,13 @@ function ProviderSection({
                 await onChanged();
               }}
             />
-            <ProviderCacheSettings
-              key={`${provider.baseUrl}:${provider.protocol}`}
-              provider={provider}
-              onChanged={onChanged}
-            />
+            {provider.protocol !== "openai_images" ? (
+              <ProviderCacheSettings
+                key={`${provider.baseUrl}:${provider.protocol}`}
+                provider={provider}
+                onChanged={onChanged}
+              />
+            ) : null}
           </>
         ) : null}
 
@@ -1177,6 +1182,7 @@ function ProviderConnectionSettings({
             <option value="anthropic_messages">Anthropic /v1/messages</option>
             <option value="openai_responses">OpenAI /v1/responses</option>
             <option value="openai_chat_completions">OpenAI /v1/chat/completions</option>
+            <option value="openai_images">OpenAI /v1/images</option>
             <option value="gemini_generate_content">Google Gemini /v1beta/models</option>
           </select>
         </label>
@@ -1291,7 +1297,7 @@ function ConnectionResult({
           <X aria-hidden="true" size={14} />
         </button>
       </div>
-      {result.responseText ? <p>{result.responseText}</p> : null}
+      {result.responseText ? <p>{runtimeText(result.responseText)}</p> : null}
       {result.error ? <p className="form-error">{runtimeText(result.error)}</p> : null}
       {result.responseBody ? (
         <details>
@@ -1325,10 +1331,12 @@ function ModelForm({
   const contextErrorId = useId();
   const outputHintId = useId();
   const outputErrorId = useId();
-  const contextWindow = draft.imageOnly ? 1 : parseModelTokenCount(draft.contextWindow);
-  const maxOutputTokens = draft.imageOnly ? 1 : parseModelTokenCount(draft.maxOutputTokens);
-  const invalidContext = !draft.imageOnly && validateTokenInputs && contextWindow === null;
-  const invalidOutput = !draft.imageOnly && validateTokenInputs && maxOutputTokens === null;
+  const forceImageOnly = provider.protocol === "openai_images";
+  const imageOnly = forceImageOnly || draft.imageOnly;
+  const contextWindow = imageOnly ? 1 : parseModelTokenCount(draft.contextWindow);
+  const maxOutputTokens = imageOnly ? 1 : parseModelTokenCount(draft.maxOutputTokens);
+  const invalidContext = !imageOnly && validateTokenInputs && contextWindow === null;
+  const invalidOutput = !imageOnly && validateTokenInputs && maxOutputTokens === null;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1337,12 +1345,12 @@ function ModelForm({
     }
     setError(null);
     setValidateTokenInputs(true);
-    if (!draft.imageOnly && (contextWindow === null || maxOutputTokens === null)) {
+    if (!imageOnly && (contextWindow === null || maxOutputTokens === null)) {
       (contextWindow === null ? contextInput : outputInput).current?.focus();
       return;
     }
     setBusy(true);
-    const reasoningLevels = draft.imageOnly
+    const reasoningLevels = imageOnly
       ? []
       : draft.reasoningLevels
           .split(",")
@@ -1358,7 +1366,7 @@ function ModelForm({
       reasoningLevels,
       anthropicNoneBehavior: draft.anthropicNoneBehavior,
     };
-    const modelValues = draft.imageOnly
+    const modelValues = imageOnly
       ? {
           contextWindow: 1,
           maxOutputTokens: 1,
@@ -1429,7 +1437,8 @@ function ModelForm({
       <label className="check-row model-form__image-only">
         <input
           type="checkbox"
-          checked={draft.imageOnly}
+          checked={imageOnly}
+          disabled={busy || forceImageOnly}
           onChange={(event) =>
             setDraft({
               ...draft,
@@ -1476,7 +1485,7 @@ function ModelForm({
             placeholder={tr("\u6A21\u578B\u663E\u793A\u540D\u79F0")}
           />
         </label>
-        <label className="field" hidden={draft.imageOnly}>
+        <label className="field" hidden={imageOnly}>
           <span>{tr("\u4E0A\u4E0B\u6587\u957F\u5EA6")}</span>
           <input
             ref={contextInput}
@@ -1488,7 +1497,7 @@ function ModelForm({
             aria-describedby={`${contextHintId}${invalidContext ? ` ${contextErrorId}` : ""}`}
             autoComplete="off"
             spellCheck={false}
-            disabled={busy}
+            disabled={busy || imageOnly}
             required
           />
           <small id={contextHintId}>
@@ -1500,7 +1509,7 @@ function ModelForm({
             </small>
           ) : null}
         </label>
-        <label className="field" hidden={draft.imageOnly}>
+        <label className="field" hidden={imageOnly}>
           <span>{tr("\u6700\u5927\u8F93\u51FA token")}</span>
           <input
             ref={outputInput}
@@ -1512,7 +1521,7 @@ function ModelForm({
             aria-describedby={`${outputHintId}${invalidOutput ? ` ${outputErrorId}` : ""}`}
             autoComplete="off"
             spellCheck={false}
-            disabled={busy}
+            disabled={busy || imageOnly}
             required
           />
           <small id={outputHintId}>{tr("支持 K/k（1000）、M/m（1000000），例如 100K、1M。")}</small>
@@ -1524,7 +1533,7 @@ function ModelForm({
         </label>
       </div>
 
-      {!draft.imageOnly && !draft.editingId && isGpt6ModelId(draft.modelId) ? (
+      {!imageOnly && !draft.editingId && isGpt6ModelId(draft.modelId) ? (
         <div className="field-group">
           <label className="check-row">
             <input
@@ -1540,7 +1549,7 @@ function ModelForm({
         </div>
       ) : null}
 
-      <fieldset className="field-group" hidden={draft.imageOnly}>
+      <fieldset className="field-group" hidden={imageOnly}>
         <legend>{tr("\u8F93\u5165\u6A21\u6001")}</legend>
         <div className="check-grid">
           {(["text", "image", "audio", "video", "file"] as const).map((modality) => (
@@ -1558,7 +1567,7 @@ function ModelForm({
         </div>
       </fieldset>
 
-      <div className="form-grid form-grid--two" hidden={draft.imageOnly}>
+      <div className="form-grid form-grid--two" hidden={imageOnly}>
         <label className="field">
           <span>{tr("\u601D\u8003\u7B49\u7EA7")}</span>
           <input
@@ -1623,7 +1632,7 @@ function ModelForm({
         )}
       </div>
 
-      {!draft.imageOnly && provider.protocol === "anthropic_messages" ? (
+      {!imageOnly && provider.protocol === "anthropic_messages" ? (
         <div className="check-grid">
           <label className="check-row">
             <input

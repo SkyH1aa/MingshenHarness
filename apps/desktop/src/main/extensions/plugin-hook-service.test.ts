@@ -1,14 +1,32 @@
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionView, SessionView } from "../../shared/domain";
+import type { ToolOutcome } from "../../shared/tool-outcome";
 import type { McpService } from "../mcp/mcp-service";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
-import { formatBeforeModelRequestContext, PluginHookService } from "./plugin-hook-service";
+import {
+  formatBeforeModelRequestContext,
+  PluginHookService,
+  runHookCommand,
+} from "./plugin-hook-service";
 
 function pluginToken(name: string): string {
   return ["$", "{", name, "}"].join("");
+}
+
+class HookProcessFixture extends EventEmitter {
+  readonly stdout = new EventEmitter();
+  readonly stderr = new EventEmitter();
+  readonly stdin = Object.assign(new EventEmitter(), { end: vi.fn() });
+  readonly kill = vi.fn(() => true);
+
+  constructor(readonly pid: number | null = 4242) {
+    super();
+  }
 }
 
 function pluginExtension(installedPath = process.cwd()): ExtensionView {
@@ -40,6 +58,7 @@ function fixture(
     activation?: string;
     installedPath?: string;
     mcpService?: Partial<McpService>;
+    managedPolicy?: ManagedPolicyService;
   } = {},
 ) {
   const extension = {
@@ -60,6 +79,7 @@ function fixture(
   const service = new PluginHookService(
     repository as unknown as Repository,
     (options.mcpService ?? {}) as McpService,
+    options.managedPolicy ? { managedPolicy: options.managedPolicy } : {},
   );
   const session = {
     id: "session",
@@ -220,6 +240,29 @@ describe("Plugin prompt context", () => {
         text: `Plugin root: ${extension.installedPath}`,
       },
     ]);
+  });
+
+  it("rejects prompt hooks before loading them when managed capability policy denies them", async () => {
+    const assertCapability = vi.fn((capability: string) => {
+      if (capability === "plugin.hooks") throw new Error("POLICY_BLOCKED");
+    });
+    const managedPolicy = {
+      assertOperational: vi.fn(),
+      assertCapability,
+    } as unknown as ManagedPolicyService;
+    const { service, session } = fixture(
+      {
+        UserPromptSubmit: [
+          {
+            hooks: [{ type: "prompt", text: "must not load" }],
+          },
+        ],
+      },
+      { managedPolicy },
+    );
+
+    await expect(service.loadPromptContext(session)).rejects.toThrow("POLICY_BLOCKED");
+    expect(assertCapability).toHaveBeenCalledWith("plugin.hooks");
   });
 
   it("loads bounded per-request prompt context for a run-activated plugin only", async () => {
@@ -613,7 +656,9 @@ describe("Run-activated plugin hooks", () => {
 
     expect(results).toMatchObject([{ status: "completed" }]);
     expect(approve).toHaveBeenCalledOnce();
-    expect(callTool).toHaveBeenCalledExactlyOnceWith("plugin-server", "record", {}, signal);
+    expect(callTool).toHaveBeenCalledExactlyOnceWith("plugin-server", "record", {}, signal, {
+      approved: true,
+    });
   });
 
   it("does not run an unselected required plugin even when given a run activation", async () => {
@@ -915,8 +960,194 @@ describe("Tool hook dispatch", () => {
         root: process.cwd(),
       }),
       expect.any(AbortSignal),
+      { approved: true },
     );
   });
+
+  it("forwards a structured MCP ToolOutcome without replacing or mutating it", async () => {
+    const outcome: ToolOutcome = {
+      output: "partial receipt",
+      isError: false,
+      status: "partial",
+      effect: "confirmed",
+      retryable: false,
+      codes: ["MCP_PARTIAL"],
+      validation: { status: "validated", source: "mcp" },
+      evidence: [{ kind: "output-schema", summary: "validated by MCP" }],
+    };
+    const callTool = vi.fn(async () => ({
+      output: outcome.output,
+      isError: outcome.isError,
+      status: outcome.status,
+      effect: outcome.effect,
+      retryable: outcome.retryable,
+      codes: outcome.codes,
+      validation: outcome.validation,
+      evidence: outcome.evidence,
+      outcome,
+    }));
+    const { service, session } = fixture(
+      {
+        PostToolUse: [
+          {
+            hooks: [{ type: "mcp_tool", server: "enabled", tool: "audit", input: {} }],
+          },
+        ],
+      },
+      {
+        mcpService: {
+          findServerByName: () =>
+            ({
+              id: "plugin-server",
+              name: "enabled",
+              enabled: true,
+              configured: true,
+              transport: "http",
+              tools: [],
+            }) as never,
+          callTool,
+        },
+      },
+    );
+
+    const results = await service.run(
+      "PostToolUse",
+      session,
+      "run",
+      new AbortController().signal,
+      async () => true,
+      { toolName: "write_file" },
+    );
+
+    expect(results[0]?.outcome).toBe(outcome);
+    expect(results[0]).toMatchObject({
+      status: "completed",
+      detail: expect.stringContaining("partial receipt"),
+    });
+  });
+
+  it("never reports a structured MCP outcome with uncertain effects as successful", async () => {
+    const outcome: ToolOutcome = {
+      output: "transport ended after dispatch",
+      isError: false,
+      status: "success",
+      effect: "uncertain",
+      retryable: false,
+      codes: ["MCP_REPLY_LOST"],
+      validation: { status: "unverified", source: "mcp" },
+      evidence: [{ kind: "side-effect", summary: "remote completion is unknown" }],
+    };
+    const callTool = vi.fn(async () => ({
+      output: outcome.output,
+      isError: outcome.isError,
+      outcome,
+    }));
+    const { service, session } = fixture(
+      {
+        PostToolUse: [
+          {
+            hooks: [{ type: "mcp_tool", server: "enabled", tool: "audit", input: {} }],
+          },
+        ],
+      },
+      {
+        mcpService: {
+          findServerByName: () =>
+            ({
+              id: "plugin-server",
+              name: "enabled",
+              enabled: true,
+              configured: true,
+              transport: "http",
+              tools: [],
+            }) as never,
+          callTool,
+        },
+      },
+    );
+
+    const results = await service.run(
+      "PostToolUse",
+      session,
+      "run",
+      new AbortController().signal,
+      async () => true,
+      { toolName: "write_file" },
+    );
+
+    expect(results[0]?.outcome).toBe(outcome);
+    expect(results[0]?.status).toBe("failed");
+    expect(results[0]?.detail).toContain("[EXTENSION_OUTCOME_UNCERTAIN]");
+  });
+
+  it.each([
+    {
+      label: "non-read-only",
+      readOnly: false,
+      effect: "uncertain",
+      requiresUncertaintyCode: true,
+    },
+    {
+      label: "read-only",
+      readOnly: true,
+      effect: "none",
+      requiresUncertaintyCode: false,
+    },
+  ] as const)(
+    "builds a conservative outcome for a legacy $label MCP failure",
+    async ({ readOnly, effect, requiresUncertaintyCode }) => {
+      const callTool = vi.fn(async () => ({ output: "legacy MCP failure", isError: true }));
+      const { service, session } = fixture(
+        {
+          PostToolUse: [
+            {
+              hooks: [{ type: "mcp_tool", server: "enabled", tool: "audit", input: {} }],
+            },
+          ],
+        },
+        {
+          mcpService: {
+            findServerByName: () =>
+              ({
+                id: "plugin-server",
+                name: "enabled",
+                enabled: true,
+                configured: true,
+                transport: "http",
+                tools: [
+                  {
+                    name: "audit",
+                    title: "Audit",
+                    description: "Fixture",
+                    readOnly,
+                    parameters: { type: "object" },
+                  },
+                ],
+              }) as never,
+            callTool,
+          },
+        },
+      );
+
+      const results = await service.run(
+        "PostToolUse",
+        session,
+        "run",
+        new AbortController().signal,
+        async () => true,
+        { toolName: "write_file" },
+      );
+      const outcome = results[0]?.outcome;
+      expect(results[0]?.status).toBe("failed");
+      expect(outcome).toMatchObject({
+        output: "legacy MCP failure",
+        isError: true,
+        status: "failed",
+        effect,
+      });
+      expect(outcome?.codes.includes("EXTENSION_OUTCOME_UNCERTAIN")).toBe(requiresUncertaintyCode);
+    },
+  );
 
   it("ignores plugins that are not selected and enabled", async () => {
     const { service, session } = fixture(
@@ -987,5 +1218,142 @@ describe("Plugin shell hook protection", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(results[0]).toMatchObject({ status: "failed" });
     expect(results[0]?.detail).toContain("cancelled");
+  });
+});
+
+describe("Plugin shell process-tree confirmation", () => {
+  function startCommand(
+    spawnProcess: ReturnType<typeof vi.fn>,
+    controller: AbortController,
+    terminationConfirmationTimeoutMs = 100,
+  ) {
+    return runHookCommand(
+      "Start-Sleep -Seconds 60",
+      process.cwd(),
+      60_000,
+      controller.signal,
+      {},
+      process.cwd(),
+      {
+        spawn: spawnProcess as never,
+        terminationConfirmationTimeoutMs,
+      },
+    );
+  }
+
+  it("confirms termination only after taskkill exits 0 and the target closes", async () => {
+    const commandProcess = new HookProcessFixture(101);
+    const killerProcess = new HookProcessFixture(202);
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(commandProcess)
+      .mockReturnValueOnce(killerProcess);
+    const controller = new AbortController();
+    const pending = startCommand(spawnProcess, controller);
+    await Promise.resolve();
+
+    commandProcess.emit("spawn");
+    controller.abort();
+    killerProcess.emit("close", 0);
+    commandProcess.emit("close", 1);
+
+    const result = await pending;
+    expect(result.outcome).toMatchObject({
+      status: "cancelled",
+      effect: "confirmed",
+      isError: true,
+    });
+    expect(result.outcome.codes).toContain("EXTENSION_COMMAND_CANCELLED");
+    expect(result.outcome.codes).not.toContain("EXTENSION_OUTCOME_UNCERTAIN");
+    expect(result.output).toContain("taskkill exit code 0");
+  });
+
+  it("retains uncertainty when taskkill exits nonzero", async () => {
+    const commandProcess = new HookProcessFixture(103);
+    const killerProcess = new HookProcessFixture(204);
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(commandProcess)
+      .mockReturnValueOnce(killerProcess);
+    const controller = new AbortController();
+    const pending = startCommand(spawnProcess, controller);
+    await Promise.resolve();
+
+    commandProcess.emit("spawn");
+    controller.abort();
+    killerProcess.emit("close", 1);
+    commandProcess.emit("close", 1);
+
+    const result = await pending;
+    expect(result.outcome).toMatchObject({
+      status: "cancelled",
+      effect: "uncertain",
+      isError: true,
+    });
+    expect(result.outcome.codes).toContain("EXTENSION_OUTCOME_UNCERTAIN");
+    expect(result.output).toContain("UNCONFIRMED");
+    expect(result.output).not.toContain("termination confirmed");
+  });
+
+  it("retains uncertainty when taskkill cannot be spawned", async () => {
+    const commandProcess = new HookProcessFixture(105);
+    const killerProcess = new HookProcessFixture(206);
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(commandProcess)
+      .mockReturnValueOnce(killerProcess);
+    const controller = new AbortController();
+    const pending = startCommand(spawnProcess, controller);
+    await Promise.resolve();
+
+    commandProcess.emit("spawn");
+    controller.abort();
+    killerProcess.emit("error", new Error("access denied"));
+
+    const result = await pending;
+    expect(result.outcome.effect).toBe("uncertain");
+    expect(result.outcome.codes).toContain("EXTENSION_OUTCOME_UNCERTAIN");
+    expect(result.output).toContain("error:access denied");
+    expect(result.output).toContain("child_close=missing");
+  });
+
+  it("reports no process effect when spawn fails before the command starts", async () => {
+    const commandProcess = new HookProcessFixture(null);
+    const spawnProcess = vi.fn().mockReturnValueOnce(commandProcess);
+    const pending = startCommand(spawnProcess, new AbortController());
+    await Promise.resolve();
+
+    commandProcess.emit("error", new Error("ENOENT"));
+
+    const result = await pending;
+    expect(result.outcome).toMatchObject({
+      status: "failed",
+      effect: "none",
+      retryable: true,
+      isError: true,
+    });
+    expect(result.outcome.codes).toContain("EXTENSION_COMMAND_SPAWN_FAILED");
+    expect(spawnProcess).toHaveBeenCalledOnce();
+  });
+
+  it("times out as uncertain when taskkill succeeds but the target never closes", async () => {
+    const commandProcess = new HookProcessFixture(107);
+    const killerProcess = new HookProcessFixture(208);
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(commandProcess)
+      .mockReturnValueOnce(killerProcess);
+    const controller = new AbortController();
+    const pending = startCommand(spawnProcess, controller, 10);
+    await Promise.resolve();
+
+    commandProcess.emit("spawn");
+    controller.abort();
+    killerProcess.emit("close", 0);
+
+    const result = await pending;
+    expect(result.outcome.effect).toBe("uncertain");
+    expect(result.outcome.codes).toContain("EXTENSION_OUTCOME_UNCERTAIN");
+    expect(result.output).toContain("child_close=missing");
   });
 });

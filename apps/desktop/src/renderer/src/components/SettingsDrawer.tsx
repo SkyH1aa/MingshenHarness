@@ -448,6 +448,14 @@ export function SettingsDrawer({
               <RuntimeToolingSettings
                 session={sessions.find((session) => session.id === activeSessionId) ?? null}
                 onOpenExternal={(url) => window.mingshen.openExternalUrl(url)}
+                providers={providers}
+                governanceAdapter={{
+                  load: () => window.mingshen.getRuntimeGovernance(),
+                  saveWatchdog: (settings) => window.mingshen.setModelWatchdogSettings(settings),
+                  saveManagedUserPolicy: (layer) => window.mingshen.saveManagedUserPolicy(layer),
+                  saveOfficeDelivery: (settings) =>
+                    window.mingshen.setOfficeDeliverySettings(settings),
+                }}
               />
             ) : null}
             {section === "about" ? <AboutSettings appInfo={appInfo} /> : null}

@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import type { MarketplaceInstallResult, MarketplaceSkill } from "../../shared/domain";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
 import type { ExtensionService } from "../extensions/extension-service";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 
 interface GitHubTreeEntry {
   path?: string;
@@ -139,13 +140,23 @@ async function mapWithConcurrency<T, R>(
 }
 
 export class SkillMarketplaceService {
+  private managedPolicy: ManagedPolicyService | null;
+
   constructor(
     private readonly cacheRoot: string,
     private readonly extensionService: ExtensionService,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
 
   async list(source: MarketplaceSource, forceRefresh = false): Promise<MarketplaceSkill[]> {
-    const cache = await this.loadCache(source, forceRefresh);
+    if (forceRefresh) this.assertMarketplaceOperation("技能市场刷新", true);
+    const cache = await this.loadCache(source, forceRefresh, forceRefresh);
     const installedNames = new Set(
       this.extensionService.list().map((extension) => extension.name.toLocaleLowerCase("en-US")),
     );
@@ -163,12 +174,14 @@ export class SkillMarketplaceService {
   }
 
   async install(source: MarketplaceSource, skillPath: string): Promise<MarketplaceInstallResult> {
+    this.assertMarketplaceOperation("技能市场安装", true);
+    this.managedPolicy?.assertCapability("skill.install", { approved: true });
     const sourceConfig = SOURCES[source];
     const normalizedPath = skillPath.trim().replaceAll("\\", "/").replace(/\/+$/, "");
     if (normalizedPath.split("/").includes("..")) {
       throw new Error("无效的技能路径。");
     }
-    const cache = await this.loadCache(source, false);
+    const cache = await this.loadCache(source, false, true);
     const skill = cache.skills.find((item) => item.path === normalizedPath);
     if (!skill) {
       throw new Error("技能市场中没有找到该技能，请刷新后重试。");
@@ -265,7 +278,11 @@ export class SkillMarketplaceService {
     }
   }
 
-  private async loadCache(source: MarketplaceSource, forceRefresh: boolean): Promise<MarketCache> {
+  private async loadCache(
+    source: MarketplaceSource,
+    forceRefresh: boolean,
+    policyApproved = false,
+  ): Promise<MarketCache> {
     const sourceConfig = SOURCES[source];
     const cachePath = join(this.cacheRoot, sourceConfig.cacheName);
     let cached: MarketCache | null = null;
@@ -284,6 +301,7 @@ export class SkillMarketplaceService {
     }
 
     try {
+      this.assertMarketplaceOperation("技能市场更新", policyApproved);
       const treeResponse = await fetchJson<GitHubTreeResponse>(
         `https://api.github.com/repos/${sourceConfig.repository}/git/trees/${sourceConfig.branch}?recursive=1`,
       );
@@ -334,5 +352,11 @@ export class SkillMarketplaceService {
       }
       throw error;
     }
+  }
+
+  private assertMarketplaceOperation(operation: string, approved: boolean): void {
+    this.managedPolicy?.assertOperational(operation);
+    this.managedPolicy?.assertCapability("marketplace.update", { approved });
+    this.managedPolicy?.assertCapability("network.request", { approved });
   }
 }

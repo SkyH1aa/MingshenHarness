@@ -441,12 +441,84 @@ describe("ChatService cache-prefix integration", () => {
     await f.run();
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(JSON.stringify(f.repository.getMessages(f.session.id))).toContain("CHECK_PASSED");
-    expect(f.repository.getSetting(`workbench.ledger.${f.session.id}`)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ callId: "exec" })]),
-    );
+    const ledger = f.repository.getSetting(`workbench.ledger.${f.session.id}`) as Array<{
+      callId: string;
+      fingerprint: string;
+    }>;
+    expect(ledger).toHaveLength(1);
+    expect(ledger).toEqual([
+      expect.objectContaining({
+        callId: "exec",
+        fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
     expect(registry.cancelRun).toHaveBeenCalled();
     expect(f.events.filter((event) => event.type === "run_failed")).toEqual([]);
     expect(f.events.some((event) => event.type === "run_completed")).toBe(true);
+  });
+
+  it("keeps a failed persistent-command poll uncertain without writing a final ledger entry", async () => {
+    const f = fixture("openai_responses");
+    f.append("Run the failing check and report its actual state.");
+    let running = false;
+    Object.assign(f.registry, {
+      commandSessions: () => [
+        {
+          id: "process-failed",
+          sessionId: f.session.id,
+          command: "node check.js",
+          cwd: process.cwd(),
+          running,
+        },
+      ],
+      hasRunningCommands: () => running,
+      cancelRun: vi.fn(async () => undefined),
+    });
+    f.registry.execute.mockImplementation(async (name: string) => {
+      if (name === "exec_command") {
+        running = true;
+        return {
+          output: "Started.",
+          isError: false,
+          commandSession: { id: "process-failed", running: true },
+        };
+      }
+      expect(name).toBe("write_stdin");
+      running = false;
+      return {
+        output: "CHECK_FAILED: the command exited before producing a verified result.",
+        isError: true,
+        commandSession: { id: "process-failed", running: false },
+      };
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        reply("openai_responses", [
+          { id: "exec", name: "exec_command", arguments: { command: "node check.js" } },
+        ]),
+      )
+      .mockImplementation(async () => reply("openai_responses", [], "Wait for the check."));
+    vi.stubGlobal("fetch", fetcher);
+    await f.run();
+
+    const failedTool = f.repository
+      .getMessages(f.session.id)
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type === "tool_result" && part.output.includes("CHECK_FAILED"))
+      .at(-1);
+    expect(failedTool).toMatchObject({
+      isError: true,
+      outcome: {
+        status: "failed",
+        effect: "uncertain",
+      },
+    });
+    expect(f.repository.getSetting(`workbench.ledger.${f.session.id}`)).toEqual([]);
+    expect(f.repository.getSetting(`workbench.recovery.${f.session.id}`)).toMatchObject({
+      uncertain: expect.any(Array),
+    });
+    expect(f.events.some((event) => event.type === "run_failed")).toBe(true);
   });
 
   it("reads a closed command's remaining output before allowing a final answer", async () => {

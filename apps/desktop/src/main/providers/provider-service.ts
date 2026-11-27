@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type {
   ConnectionTestResult,
   InputModality,
@@ -20,11 +21,15 @@ import {
   validatePromptCachingSettings,
 } from "../../shared/prompt-caching";
 import { recordRuntimeError } from "../diagnostics/runtime-log";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
+import { isPrivateAddress } from "../security/network-policy";
 import { redactSecrets as redactDiagnostic } from "../security/redact";
 import type { Repository } from "../storage/repository";
 import type { SecretStore } from "../storage/secret-store";
 import { geminiModelPath, geminiRecord } from "./gemini-format";
-import { parseImageGenerationResponse } from "./image-generation";
+import { parseImageGenerationCandidatesDetailed } from "./image-generation";
+import { normalizeRemoteImageUrl } from "./image-result-download";
+import type { BeforeModelRequestHook } from "./model-stream";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_DIAGNOSTIC_BODY = 50_000;
@@ -34,12 +39,14 @@ const PROTOCOLS = [
   "anthropic_messages",
   "openai_responses",
   "openai_chat_completions",
+  "openai_images",
   "gemini_generate_content",
 ];
 const AUTH_MODES = ["bearer", "x_api_key", "api_key", "x_goog_api_key", "custom"];
 const IMAGE_GENERATION_PROTOCOLS = new Set<ProviderProtocol>([
   "openai_chat_completions",
   "openai_responses",
+  "openai_images",
 ]);
 
 interface ProviderWireContext {
@@ -90,6 +97,19 @@ export function normalizeBaseUrl(input: string, protocol?: ProviderProtocol): st
   }
 
   const pathname = url.pathname.replace(/\/+$/, "");
+  if (protocol === "openai_images") {
+    if (/\/images\/(?:generations|edits)$/i.test(pathname)) {
+      throw new Error(
+        "OpenAI Images Base URL 应填写到 /v1，不要包含 /images/generations 或 /images/edits 端点。",
+      );
+    }
+    if (!pathname.endsWith("/v1")) {
+      throw new Error(
+        "OpenAI Images Base URL 必须以 /v1 结尾，不要填写 /images/generations 或 /images/edits 端点。",
+      );
+    }
+    return `${url.origin}${pathname}`;
+  }
   if (protocol === "gemini_generate_content") {
     if (!/\/v1(?:beta)?$/.test(pathname))
       throw new Error("Gemini 原生 Base URL 必须以 /v1beta 或 /v1 结尾，不含 /openai 或模型端点。");
@@ -384,7 +404,10 @@ function assertPositiveInteger(value: number, field: string): number {
   return value;
 }
 
-function validateModelInput(input: ModelCreateInput | ModelUpdateInput): NormalizedModelInput {
+function validateModelInput(
+  input: ModelCreateInput | ModelUpdateInput,
+  protocol: ProviderProtocol,
+): NormalizedModelInput {
   if (!input.modelId.trim() || input.modelId.length > 256) {
     throw new Error("Model ID 长度必须为 1 到 256 个字符。");
   }
@@ -395,6 +418,9 @@ function validateModelInput(input: ModelCreateInput | ModelUpdateInput): Normali
     throw new Error("最大输出 token 不能超过上下文长度。");
   }
 
+  const defaultOutputModalities: InputModality[] =
+    protocol === "openai_images" ? ["image"] : ["text"];
+
   return {
     providerId: "providerId" in input ? input.providerId : "",
     modelId: input.modelId.trim(),
@@ -402,7 +428,7 @@ function validateModelInput(input: ModelCreateInput | ModelUpdateInput): Normali
     contextWindow: assertPositiveInteger(input.contextWindow, "上下文长度"),
     maxOutputTokens: assertPositiveInteger(input.maxOutputTokens, "最大输出 token"),
     inputModalities: [...new Set(input.inputModalities)],
-    outputModalities: [...new Set(input.outputModalities ?? (["text"] as InputModality[]))],
+    outputModalities: [...new Set(input.outputModalities ?? defaultOutputModalities)],
     toolCalls: input.toolCalls,
     parallelToolCalls: input.parallelToolCalls,
     reasoningLevels: [
@@ -418,9 +444,26 @@ function assertImageOutputProtocol(
 ): void {
   if (outputModalities.includes("image") && !IMAGE_GENERATION_PROTOCOLS.has(protocol)) {
     throw new Error(
-      "图片输出模型的供应商协议必须为 OpenAI Chat Completions 或 OpenAI Responses 兼容协议。",
+      "图片输出模型的供应商协议必须为 OpenAI Images、OpenAI Chat Completions 或 OpenAI Responses 兼容协议。",
     );
   }
+}
+
+type ModelProtocolShape = Pick<ModelConfig, "outputModalities" | "toolCalls" | "parallelToolCalls">;
+
+function assertModelProtocolCompatibility(
+  protocol: ProviderProtocol,
+  model: ModelProtocolShape,
+): void {
+  if (protocol === "openai_images") {
+    if (model.outputModalities.length !== 1 || model.outputModalities[0] !== "image") {
+      throw new Error("OpenAI Images 协议仅支持纯图片输出模型。");
+    }
+    if (model.toolCalls || model.parallelToolCalls) {
+      throw new Error("OpenAI Images 协议不支持工具调用或并行工具调用。");
+    }
+  }
+  assertImageOutputProtocol(protocol, model.outputModalities);
 }
 
 function buildConnectionTestRequest(
@@ -474,6 +517,8 @@ function buildConnectionTestRequest(
           max_tokens: Math.min(16, model.maxOutputTokens),
         },
       };
+    case "openai_images":
+      throw new Error("OpenAI Images 协议仅支持纯图片输出模型。");
   }
 }
 
@@ -534,11 +579,75 @@ function summarizeImageResponse(payload: unknown): string {
     : "[image response omitted]";
 }
 
+const REMOTE_IMAGE_CONNECTION_MESSAGE =
+  "已检测到远程图片结果。连接测试不会下载图片，请在生图工作台预览并确认保存。";
+
+function isSafeRemoteImageConnectionCandidate(value: string): boolean {
+  try {
+    const normalized = normalizeRemoteImageUrl(value);
+    const hostname = new URL(normalized).hostname.replace(/^\[|\]$/g, "");
+    return isIP(hostname) === 0 || !isPrivateAddress(hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function imageConnectionTestMessage(payload: unknown): Promise<{
+  responseText: string;
+  error: string | null;
+}> {
+  const parsed = await parseImageGenerationCandidatesDetailed(payload);
+  let firstBase64: Extract<(typeof parsed.candidates)[number], { base64: string }> | null = null;
+  let hasRemoteImage = false;
+  for (const candidate of parsed.candidates) {
+    if ("base64" in candidate) {
+      firstBase64 ??= candidate;
+      continue;
+    }
+    if (isSafeRemoteImageConnectionCandidate(candidate.url)) hasRemoteImage = true;
+  }
+  if (hasRemoteImage)
+    return {
+      responseText: REMOTE_IMAGE_CONNECTION_MESSAGE,
+      error: null,
+    };
+  if (firstBase64)
+    return {
+      responseText: `图片生成测试成功（${firstBase64.mimeType}，${firstBase64.byteLength} bytes）。`,
+      error: null,
+    };
+  return {
+    responseText: "",
+    error: parsed.warnings[0]?.message ?? "连接测试未检测到可用的图片结果。",
+  };
+}
+
 export class ProviderService {
+  private managedPolicy: ManagedPolicyService | null;
+
   constructor(
     private readonly repository: Repository,
     private readonly secretStore: SecretStore,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
+
+  managedPolicyRequestHook(
+    options: { approved?: boolean } = {},
+  ): BeforeModelRequestHook | undefined {
+    const policy = this.managedPolicy;
+    if (!policy) return undefined;
+    return async (provider, model) => {
+      policy.assertProvider(provider.id, model.id, options);
+      policy.assertCapability("provider.request", options);
+      policy.assertCapability("network.request", options);
+    };
+  }
 
   createProvider(input: ProviderCreateInput): ProviderView {
     if (!PROTOCOLS.includes(input.protocol)) throw new Error("API 协议无效。");
@@ -639,26 +748,37 @@ export class ProviderService {
         customHeaderName !== provider.customHeaderName)
     )
       throw new Error("请先等待所有会话结束或停止任务，再修改供应商地址或协议。");
+    if (input.protocol !== provider.protocol) {
+      for (const model of provider.models) {
+        assertModelProtocolCompatibility(input.protocol, model);
+      }
+    }
 
     const currentPromptCaching = normalizePromptCachingSettings(provider.promptCaching);
     let promptCaching = currentPromptCaching;
-    if (input.protocol !== provider.protocol) {
+    let persistPromptCaching = false;
+    if (input.protocol !== provider.protocol && input.protocol !== "openai_images") {
       try {
         validatePromptCachingSettings(promptCaching, input.protocol);
       } catch {
         promptCaching = { ...promptCaching, mode: "auto", ttl: "5m" };
       }
+      persistPromptCaching = JSON.stringify(promptCaching) !== JSON.stringify(currentPromptCaching);
     }
-    return this.repository.updateProvider({
-      providerId: provider.id,
-      name,
-      baseUrl,
-      protocol: input.protocol,
-      authMode,
-      customHeaderName,
-      ...(JSON.stringify(promptCaching) !== JSON.stringify(currentPromptCaching)
-        ? { promptCaching }
-        : {}),
+    return this.repository.runInSavepoint(() => {
+      this.repository.updateProvider({
+        providerId: provider.id,
+        name,
+        baseUrl,
+        protocol: input.protocol,
+        authMode,
+        customHeaderName,
+        ...(persistPromptCaching ? { promptCaching } : {}),
+      });
+      if (input.protocol === "openai_images") {
+        this.repository.removeSetting(providerPromptCachingKey(provider.id));
+      }
+      return this.requireProvider(provider.id);
     });
   }
 
@@ -748,8 +868,8 @@ export class ProviderService {
 
   createModel(input: ModelCreateInput): ProviderView {
     const provider = this.requireProvider(input.providerId);
-    const normalized = validateModelInput(input);
-    assertImageOutputProtocol(provider.protocol, normalized.outputModalities);
+    const normalized = validateModelInput(input, provider.protocol);
+    assertModelProtocolCompatibility(provider.protocol, normalized);
     this.repository.insertModel({
       ...normalized,
       providerId: provider.id,
@@ -758,11 +878,11 @@ export class ProviderService {
   }
 
   updateModel(input: ModelUpdateInput): ProviderView {
-    const normalized = validateModelInput(input);
     const current = this.repository.getModel(input.id);
     if (!current) throw new Error("模型配置不存在。");
     const provider = this.requireProvider(current.providerId);
-    assertImageOutputProtocol(provider.protocol, normalized.outputModalities);
+    const normalized = validateModelInput(input, provider.protocol);
+    assertModelProtocolCompatibility(provider.protocol, normalized);
     const providerId = this.repository.updateModel(input.id, normalized);
     return this.requireProvider(providerId);
   }
@@ -788,6 +908,7 @@ export class ProviderService {
   }
 
   private async fetchModelList(providerId: string): Promise<ModelDiscoveryResult> {
+    this.managedPolicy?.assertProvider(providerId, undefined, { approved: true });
     const provider = this.requireProvider(providerId);
     const apiKey = this.readActiveKey(provider);
     const headers = this.wireContext(provider, apiKey);
@@ -860,17 +981,14 @@ export class ProviderService {
   }
 
   async testConnection(providerId: string, modelConfigId: string): Promise<ConnectionTestResult> {
+    this.managedPolicy?.assertProvider(providerId, modelConfigId, { approved: true });
     const provider = this.requireProvider(providerId);
     const model = this.repository.getModel(modelConfigId);
     if (!model || model.providerId !== providerId) {
       throw new Error("模型配置不存在或不属于该供应商。");
     }
+    assertModelProtocolCompatibility(provider.protocol, model);
     const imageTest = isImageOutputModel(model);
-    if (imageTest && !IMAGE_GENERATION_PROTOCOLS.has(provider.protocol)) {
-      throw new Error(
-        "图片输出模型的供应商协议必须为 OpenAI Chat Completions 或 OpenAI Responses 兼容协议。",
-      );
-    }
 
     const apiKey = this.readActiveKey(provider);
     const request = buildConnectionTestRequest(provider.protocol, model);
@@ -905,8 +1023,9 @@ export class ProviderService {
       let imageError: string | null = null;
       if (imageTest && response.ok) {
         try {
-          const image = await parseImageGenerationResponse(payload);
-          responseText = `图片生成测试成功（${image.mimeType}，${image.byteLength} bytes）。`;
+          const result = await imageConnectionTestMessage(payload);
+          responseText = result.responseText;
+          imageError = result.error;
         } catch (error) {
           imageError = error instanceof Error ? error.message : String(error);
         }
@@ -959,7 +1078,12 @@ export class ProviderService {
     return this.requireProvider(providerId);
   }
 
-  getActiveApiKey(providerId: string): string {
+  getActiveApiKey(
+    providerId: string,
+    options: { approved?: boolean; modelConfigId?: string } = {},
+  ): string {
+    this.managedPolicy?.assertOperational("供应商请求");
+    this.managedPolicy?.assertProvider(providerId, options.modelConfigId, options);
     return this.readActiveKey(this.requireProvider(providerId));
   }
 

@@ -259,6 +259,11 @@ function parseMcpTools(value: unknown): McpToolSummary[] {
               item.parameters && typeof item.parameters === "object"
                 ? (item.parameters as Record<string, unknown>)
                 : { type: "object", additionalProperties: true },
+            ...(item.outputSchema &&
+            typeof item.outputSchema === "object" &&
+            !Array.isArray(item.outputSchema)
+              ? { outputSchema: item.outputSchema as Record<string, unknown> }
+              : {}),
           }))
           .filter((item) => item.name)
       : [];
@@ -1805,6 +1810,28 @@ export class Repository {
         parentSessionId: null,
         forkedFromMessageId: target?.id ?? null,
       });
+      const rawPlanMetadata = this.getSetting(`workbench.plan.${source.id}`);
+      const sourcePlanMetadata =
+        rawPlanMetadata && typeof rawPlanMetadata === "object" && !Array.isArray(rawPlanMetadata)
+          ? (rawPlanMetadata as Record<string, unknown>)
+          : null;
+      const storedGeneration = this.database
+        .prepare("select generation from plan_generations where session_id = ?")
+        .get(source.id) as { generation?: number } | undefined;
+      const metadataGeneration =
+        typeof sourcePlanMetadata?.generation === "number" ? sourcePlanMetadata.generation : 1;
+      const sourceGeneration = Math.max(
+        1,
+        Number(storedGeneration?.generation) || 1,
+        Number.isSafeInteger(metadataGeneration) ? metadataGeneration : 1,
+      );
+      const forkGeneration = sourceGeneration + 1;
+      this.database
+        .prepare(
+          `insert into plan_generations (session_id, generation, updated_at)
+           values (?, ?, ?)`,
+        )
+        .run(fork.id, forkGeneration, new Date().toISOString());
       const mapped = new Map<string, SessionMessage>();
       const insert = this.database.prepare(
         "insert into messages (id, session_id, seq, role, parts_json, created_at) values (?, ?, ?, ?, ?, ?)",
@@ -1873,13 +1900,16 @@ export class Repository {
             fork.id,
             todo.id,
             todo.content,
-            todo.status,
+            todo.status === "in_progress" ? "pending" : todo.status,
             todo.priority,
             todo.updatedAt,
           );
-      if (!messageId || target?.id === history.at(-1)?.id) {
-        const plan = this.getSetting(`workbench.plan.${source.id}`);
-        if (plan) this.setSetting(`workbench.plan.${fork.id}`, plan);
+      if ((!messageId || target?.id === history.at(-1)?.id) && sourcePlanMetadata) {
+        const { activeClaims: _activeClaims, ...snapshot } = sourcePlanMetadata;
+        this.setSetting(`workbench.plan.${fork.id}`, {
+          ...snapshot,
+          generation: forkGeneration,
+        });
       }
       this.database.exec("release fork_conversation");
       return this.getSession(fork.id) ?? fork;
@@ -2042,6 +2072,21 @@ export class Repository {
   }
 
   latestSessionRun(sessionId: string): import("../../shared/domain").SessionRunState | null {
+    const runtime = this.database
+      .prepare(
+        `select id, status, created_at, started_at, completed_at, updated_at
+         from runtime_runs where session_id = ?
+         order by updated_at desc, rowid desc limit 1`,
+      )
+      .get(sessionId) as Row | undefined;
+    if (runtime)
+      return {
+        sessionId,
+        runId: asString(runtime.id),
+        startedAt: asString(runtime.started_at) || asString(runtime.created_at),
+        completedAt: asNullableString(runtime.completed_at),
+        status: asString(runtime.status) as import("../../shared/runtime").RuntimeRunStatus,
+      };
     const started = this.database
       .prepare(
         "select run_id, created_at from trajectories where session_id = ? and type = 'run_started' order by created_at desc, rowid desc limit 1",

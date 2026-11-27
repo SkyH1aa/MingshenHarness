@@ -3,9 +3,17 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderProtocol } from "../../shared/domain";
 import { ModelOutputLimitError, ModelRequestError } from "./model-request-error";
-import { type ModelStreamEvent, type StreamTurnInput, streamModelTurn } from "./model-stream";
+import {
+  getProtocolPath,
+  type ModelStreamEvent,
+  type StreamTurnInput,
+  streamModelTurn,
+} from "./model-stream";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 function input(protocol: ProviderProtocol): StreamTurnInput {
   return {
@@ -75,6 +83,42 @@ function fixture(events: unknown[]) {
   );
   vi.stubGlobal("fetch", fetcher);
   return fetcher;
+}
+
+type TextProtocol = Exclude<ProviderProtocol, "openai_images">;
+
+function completedStreamEvents(protocol: TextProtocol, text: string): unknown[] {
+  switch (protocol) {
+    case "anthropic_messages":
+      return [
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+        { type: "message_stop" },
+      ];
+    case "openai_responses":
+      return [{ type: "response.output_text.delta", delta: text }, { type: "response.completed" }];
+    case "openai_chat_completions":
+      return [{ choices: [{ delta: { content: text }, finish_reason: "stop" }] }, "[DONE]"];
+    case "gemini_generate_content":
+      return [
+        {
+          candidates: [
+            {
+              index: 0,
+              content: { role: "model", parts: [{ text }] },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ];
+  }
+}
+
+function sseResponse(events: unknown[]): Response {
+  return new Response(
+    events
+      .map((event) => `data: ${typeof event === "string" ? event : JSON.stringify(event)}\n\n`)
+      .join(""),
+  );
 }
 
 function decodedCalls(events: ModelStreamEvent[]) {
@@ -512,6 +556,28 @@ describe("Tool argument compatibility", () => {
       { type: "response.completed" },
     ]);
     await expect(collect(input("openai_responses"))).rejects.toThrow("Conflicting tool call IDs");
+  });
+});
+
+describe("OpenAI Images protocol isolation", () => {
+  it("fails closed before a text request or tool hook can run", async () => {
+    const fetcher = vi.fn();
+    const beforeEachRequest = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const value = input("openai_images");
+    value.beforeEachRequest = beforeEachRequest;
+
+    await expect(collect(value)).rejects.toThrow(
+      "OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求",
+    );
+    expect(beforeEachRequest).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a text protocol path", () => {
+    expect(() => getProtocolPath("openai_images", "image-model")).toThrow(
+      "OpenAI Images 是纯生图协议，不能用于文本或 Agent 请求",
+    );
   });
 });
 
@@ -1127,4 +1193,136 @@ describe("explicit model output limits", () => {
       expect(error).toHaveProperty("retryable", true);
     },
   );
+});
+
+describe("model response watchdog", () => {
+  it.each([
+    "anthropic_messages",
+    "openai_responses",
+    "openai_chat_completions",
+    "gemini_generate_content",
+  ] as const)(
+    "aborts and retries a %s request that never receives a meaningful response",
+    async (protocol) => {
+      vi.useFakeTimers();
+      let calls = 0;
+      const fetcher = vi.fn((_url: string, options: RequestInit) => {
+        calls++;
+        if (calls > 1)
+          return Promise.resolve(sseResponse(completedStreamEvents(protocol, "Recovered")));
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = options.signal;
+          if (!signal) throw new Error("Fixture request signal missing");
+          const abort = () => reject(signal.reason);
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      const onRetry = vi.fn();
+      const result = collect({
+        ...input(protocol),
+        reasoningLevel: protocol === "gemini_generate_content" ? null : "none",
+        retry: { maxRetries: 1, onRetry },
+        watchdog: { firstResponseTimeoutMs: 300_000, idleTimeoutMs: 900_000 },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(onRetry).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          attempt: 1,
+          maxRetries: 1,
+          error: expect.stringContaining("没有收到有效响应"),
+        }),
+      );
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(result).resolves.toContainEqual({ type: "text_delta", text: "Recovered" });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not let SSE heartbeat comments renew an idle stream", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const heartbeatTimes: number[] = [];
+    let heartbeatCount = 0;
+    const fetcher = vi.fn((_url: string, options: RequestInit) => {
+      calls++;
+      if (calls > 1)
+        return Promise.resolve(
+          new Response(
+            [
+              'data: {"type":"response.output_text.delta","delta":"Recovered"}\n\n',
+              'data: {"type":"response.completed"}\n\n',
+            ].join(""),
+          ),
+        );
+      const encoder = new TextEncoder();
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode('data: {"type":"response.output_text.delta","delta":"First"}\n\n'),
+              );
+              const heartbeat = setInterval(() => {
+                heartbeatTimes.push(Date.now());
+                heartbeatCount++;
+                controller.enqueue(
+                  encoder.encode(
+                    heartbeatCount % 2 === 0
+                      ? 'data: {"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}\n\n'
+                      : ": provider heartbeat\n\n",
+                  ),
+                );
+              }, 60_000);
+              const signal = options.signal;
+              if (!signal) throw new Error("Fixture request signal missing");
+              signal.addEventListener(
+                "abort",
+                () => {
+                  clearInterval(heartbeat);
+                  try {
+                    controller.error(signal.reason);
+                  } catch {
+                    // The stream may already have been cancelled by its reader.
+                  }
+                },
+                { once: true },
+              );
+            },
+          }),
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const onRetry = vi.fn();
+    const result = collect({
+      ...input("openai_responses"),
+      retry: { maxRetries: 1, onRetry },
+      watchdog: { firstResponseTimeoutMs: 300_000, idleTimeoutMs: 900_000 },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(heartbeatTimes).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(899_999);
+    expect(onRetry).not.toHaveBeenCalled();
+    expect(heartbeatTimes.length).toBeGreaterThanOrEqual(14);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(onRetry.mock.calls[0]?.[0].error).toContain("连续 15 分钟没有有效进展");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(result).resolves.toEqual(
+      expect.arrayContaining([
+        { type: "text_delta", text: "First" },
+        { type: "text_delta", text: "Recovered" },
+      ]),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
 });

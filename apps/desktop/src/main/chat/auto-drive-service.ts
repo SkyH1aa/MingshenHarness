@@ -9,7 +9,7 @@ import type { ModelConfig, ProviderView, SessionMessage, SessionView } from "../
 import { isTextModel } from "../../shared/model-capabilities";
 import type { TokenUsageTotals } from "../../shared/token-saver";
 import type { SessionPlan } from "../../shared/workbench";
-import { streamModelTurn } from "../providers/model-stream";
+import { type BeforeModelRequestHook, streamModelTurn } from "../providers/model-stream";
 import { redactSecrets } from "../security/redact";
 import type { RequestUsage } from "../token-saver/usage";
 import { listGuardedWorkspaceFiles, readGuardedFile } from "../workspace/guarded-workspace-io";
@@ -61,7 +61,11 @@ interface AutoDriveRepository {
 }
 
 interface AutoDriveProviderService {
-  getActiveApiKey(providerId: string): string;
+  getActiveApiKey(
+    providerId: string,
+    options?: { approved?: boolean; modelConfigId?: string },
+  ): string;
+  managedPolicyRequestHook?(options?: { approved?: boolean }): BeforeModelRequestHook | undefined;
 }
 
 export interface AutoDriveProjectContext {
@@ -79,6 +83,7 @@ interface AutoDriveModelRequest {
   userPrompt: string;
   signal: AbortSignal;
   onRequestUsage?: (usage: RequestUsage) => void;
+  beforeEachRequest?: BeforeModelRequestHook;
 }
 
 type AutoDriveModelRunner = (input: AutoDriveModelRequest) => Promise<string>;
@@ -243,6 +248,7 @@ async function defaultModelRunner(input: AutoDriveModelRequest): Promise<string>
     maxOutputTokens: Math.min(AUTODRIVE_MAX_OUTPUT_TOKENS, input.model.maxOutputTokens),
     signal: input.signal,
     ...(input.onRequestUsage ? { onRequestUsage: input.onRequestUsage } : {}),
+    ...(input.beforeEachRequest ? { beforeEachRequest: input.beforeEachRequest } : {}),
   })) {
     if (event.type === "tool_call_started")
       throw new Error("AutoDrive unexpectedly requested a tool.");
@@ -419,14 +425,18 @@ export class AutoDriveService {
         ? context.snippets.filter((snippet) => this.canReadPath(effectiveSession, snippet.path))
         : [],
     };
+    const policyHook = this.providerService.managedPolicyRequestHook?.();
     const raw = await this.modelRunner({
       provider,
       model,
-      apiKey: this.providerService.getActiveApiKey(provider.id),
+      apiKey: this.providerService.getActiveApiKey(provider.id, {
+        modelConfigId: model.id,
+      }),
       systemPrompt: systemPrompt(String(this.repository.getSetting("desktop.locale") ?? "")),
       userPrompt: userPrompt(session, permittedContext),
       signal: requestSignal,
       onRequestUsage: usageRecorder(this.repository, session.id),
+      ...(policyHook ? { beforeEachRequest: policyHook } : {}),
     });
     requestSignal.throwIfAborted();
     return parseAutoDriveResult(raw, {

@@ -198,6 +198,7 @@ describe("approval protocol failover", () => {
           openai_responses: "/responses",
           anthropic_messages: "/messages",
           openai_chat_completions: "/chat/completions",
+          openai_images: "/images/generations",
           gemini_generate_content: "/models/primary:streamGenerateContent?alt=sse",
         };
         expect(fetcher.mock.calls.map((call) => call[0])).toEqual([

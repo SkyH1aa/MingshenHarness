@@ -19,6 +19,7 @@ const screenshots = [];
 const layoutMeasurements = [];
 const requests = [];
 const shortcutEvidence = {};
+let initialPageEvidence = null;
 const LEASE_MS = 10 * 60 * 1000;
 const MAIN_INSPECT_PORT = 9472;
 const RENDERER_DEBUG_PORT = 9471;
@@ -139,13 +140,30 @@ async function connectTarget(target, label) {
     if (message.error) waiter.reject(new Error(message.error.message));
     else waiter.done(message.result);
   });
+  const rejectPending = (cause) => {
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(cause);
+    }
+    pending.clear();
+  };
+  socket.addEventListener("close", () => {
+    rejectPending(new Error(`CDP target closed in ${label}`));
+  });
+  socket.addEventListener("error", () => {
+    rejectPending(new Error(`CDP socket failed in ${label}`));
+  });
   const send = (method, params = {}) =>
     new Promise((done, reject) => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        reject(new Error(`CDP socket is not open in ${label}: ${method}`));
+        return;
+      }
       const id = ++sequence;
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`CDP timeout in ${label}: ${method}`));
-      }, 60_000);
+      }, 20_000);
       pending.set(id, { done, reject, timer });
       socket.send(JSON.stringify({ id, method, params }));
     });
@@ -220,6 +238,41 @@ async function until(client, expression, timeout = 30_000) {
   throw new Error(
     `Timed out: ${expression}${lastError ? `\nLast evaluation error: ${String(lastError)}` : ""}`,
   );
+}
+
+async function waitForMainCondition(expression, timeout = 60_000) {
+  const deadline = Date.now() + timeout;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      if (await mainRenderer.evaluate(expression)) return;
+    } catch (error) {
+      lastError = error;
+      mainRenderer?.close();
+      mainRenderer = undefined;
+      try {
+        mainRenderer = await connectPage(
+          "main",
+          Math.max(1_000, Math.min(10_000, deadline - Date.now())),
+        );
+      } catch (reconnectError) {
+        lastError = reconnectError;
+      }
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `Timed out with page recovery: ${expression}${lastError ? `\nLast evaluation error: ${String(lastError)}` : ""}`,
+  );
+}
+
+async function reloadSurface(surface) {
+  const current = surface === "main" ? mainRenderer : quickRenderer;
+  await current.send("Page.reload").catch(() => undefined);
+  current.close();
+  const next = await connectPage(surface, 60_000);
+  if (surface === "main") mainRenderer = next;
+  else quickRenderer = next;
 }
 
 function api(client, name, ...args) {
@@ -311,8 +364,7 @@ async function capture(client, name, width, height) {
 }
 
 async function completeFirstRun() {
-  await until(
-    mainRenderer,
+  await waitForMainCondition(
     'Boolean(document.querySelector(".policy-consents, .app-shell, .setup-shell"))',
     60_000,
   );
@@ -325,9 +377,9 @@ async function completeFirstRun() {
       await until(mainRenderer, `Boolean(${button})`);
       await mainRenderer.evaluate(`${button}.click();true`);
     }
-    await until(mainRenderer, '!document.querySelector(".policy-dialog")');
+    await waitForMainCondition('!document.querySelector(".policy-dialog")');
   }
-  await until(mainRenderer, 'Boolean(document.querySelector(".app-shell, .setup-shell"))', 60_000);
+  await waitForMainCondition('Boolean(document.querySelector(".app-shell, .setup-shell"))', 60_000);
 }
 
 async function launch() {
@@ -374,6 +426,17 @@ async function launch() {
   );
   mainRenderer = await connectPage("main", 60_000);
   await completeFirstRun();
+  initialPageEvidence = await mainRenderer.evaluate(`(()=>({
+    url:location.href,
+    title:document.title,
+    readyState:document.readyState,
+    surface:document.body.dataset.surface??"main",
+    viewport:{width:innerWidth,height:innerHeight,devicePixelRatio},
+    hasPolicyDialog:Boolean(document.querySelector(".policy-dialog")),
+    hasAppShell:Boolean(document.querySelector(".app-shell")),
+    bodyClass:document.body.className
+  }))()`);
+  await capture(mainRenderer, "initial-shell-1040x680", 1040, 680);
 }
 
 async function close() {
@@ -661,8 +724,8 @@ try {
     anthropicNoneBehavior: "disabled",
   });
   assert.ok(configured.models[0]?.id);
-  await mainRenderer.send("Page.reload");
-  await until(mainRenderer, 'Boolean(document.querySelector(".app-shell"))', 60_000);
+  await reloadSurface("main");
+  await waitForMainCondition('Boolean(document.querySelector(".app-shell"))', 60_000);
 
   const first = await api(mainRenderer, "quickChatAction", "show");
   assert.ok(first?.session, "Configured Quick Chat must create a Chat session");
@@ -1001,6 +1064,20 @@ try {
   assert.equal(longEnding.type, "run_completed", JSON.stringify(longEnding));
   await until(
     quickRenderer,
+    `globalThis.__quickEvents.some(event=>event.type==="runtime_run_updated"&&event.runId===${JSON.stringify(longRunId)}&&event.run.status==="completed")`,
+  );
+  const longRuntimeStatuses = await quickRenderer.evaluate(
+    `globalThis.__quickEvents.filter(event=>event.type==="runtime_run_updated"&&event.runId===${JSON.stringify(longRunId)}).map(event=>event.run.status)`,
+  );
+  for (const status of ["accepted", "preparing", "running", "completed"]) {
+    assert.ok(longRuntimeStatuses.includes(status), `Missing runtime status ${status}: ${longRuntimeStatuses.join(",")}`);
+  }
+  assert.equal(
+    await quickRenderer.evaluate('document.querySelector(".quick-chat")?.dataset.runState'),
+    "completed",
+  );
+  await until(
+    quickRenderer,
     'document.body.innerText.includes("QUICK_LONG_RESPONSE_END")',
     120_000,
   );
@@ -1013,7 +1090,44 @@ try {
   assert.deepEqual(toolNames, ["web_fetch", "web_search"]);
   assert.ok(JSON.stringify(normalRequest.input).includes("QUICK_LONG"));
   await capture(quickRenderer, "quick-chat-long-day", 480, 680);
-  passed.push("A real streamed Chat round trip renders a long Markdown response and receives only web_search/web_fetch tools");
+  passed.push("A real streamed Chat round trip renders a long Markdown response, follows accepted→preparing→running→completed runtime state and receives only web_search/web_fetch tools");
+
+  const idempotentRequestsBefore = requests.length;
+  const idempotencyKey = `quick-chat-smoke-${Date.now()}`;
+  const duplicateRuns = await mainRenderer.evaluate(`Promise.all([
+    window.mingshen.sendChat({
+      sessionId:${JSON.stringify(currentSession.id)},
+      text:"QUICK_IDEMPOTENT",
+      idempotencyKey:${JSON.stringify(idempotencyKey)}
+    }),
+    window.mingshen.sendChat({
+      sessionId:${JSON.stringify(currentSession.id)},
+      text:"QUICK_IDEMPOTENT",
+      idempotencyKey:${JSON.stringify(idempotencyKey)}
+    })
+  ])`);
+  assert.equal(duplicateRuns.length, 2);
+  assert.equal(duplicateRuns[0].runId, duplicateRuns[1].runId);
+  const idempotentEnding = await waitQuickEvent(duplicateRuns[0].runId, [
+    "run_completed",
+    "run_failed",
+  ]);
+  assert.equal(idempotentEnding.type, "run_completed", JSON.stringify(idempotentEnding));
+  assert.equal(
+    requests.length,
+    idempotentRequestsBefore + 1,
+    "A duplicate idempotent turn must not issue a second provider request",
+  );
+  const idempotencyConflict = await mainRenderer.evaluate(`window.mingshen.sendChat({
+    sessionId:${JSON.stringify(currentSession.id)},
+    text:"QUICK_IDEMPOTENT_DIFFERENT",
+    idempotencyKey:${JSON.stringify(idempotencyKey)}
+  }).then(()=>null,error=>String(error?.message??error))`);
+  assert.ok(
+    idempotencyConflict?.includes("idempotency key was already used with a different request"),
+    String(idempotencyConflict),
+  );
+  passed.push("Concurrent duplicate turns with one idempotency key share the original run and only one provider request; a changed payload is rejected as a conflict");
 
   await quickRenderer.evaluate(
     'localStorage.setItem("mingshen.theme","night");document.documentElement.dataset.theme="night";true',
@@ -1032,6 +1146,10 @@ try {
   const holdDeadline = Date.now() + 20_000;
   while (!heldResponse && Date.now() < holdDeadline) await sleep(100);
   assert.ok(heldResponse, "Hold fixture did not reach the local Responses server");
+  await until(
+    quickRenderer,
+    'document.querySelector(".quick-chat")?.dataset.runState==="running"',
+  );
   await capture(quickRenderer, "quick-chat-running", 480, 680);
   await quickRenderer.evaluate(`(()=>{
     const button=[...document.querySelectorAll(".composer button")].find(button=>button.textContent.includes("停止"));
@@ -1414,13 +1532,30 @@ try {
   const retried = await api(mainRenderer, "setDesktopShortcutSettings", recordedState.settings);
   assert.equal(retried.ok, true);
   assert.deepEqual(retried.errors, {});
+  await until(
+    mainRenderer,
+    'Boolean((()=>{const button=document.querySelector(\'[data-shortcut-reset="quickChat"]\');return button&&!button.disabled})())',
+  );
   await mainRenderer.evaluate(
     'document.querySelector(\'[data-shortcut-reset="quickChat"]\').click();true',
   );
-  await until(
-    mainRenderer,
-    'window.mingshen.getDesktopShortcutSettings().then(state=>state.settings.quickChat==="Control+M"&&state.status.quickChat)',
-  );
+  if (unavailable.includes("Ctrl+M")) {
+    await until(
+      mainRenderer,
+      'Boolean(document.querySelector(\'[data-shortcut-error="quickChat"]\'))',
+    );
+    const resetQuickChat = await api(mainRenderer, "getDesktopShortcutSettings");
+    assert.equal(resetQuickChat.settings.quickChat, recordedQuickChat);
+    assert.equal(resetQuickChat.status.quickChat, true);
+    assert.equal(resetQuickChat.errors.quickChat?.code, "shortcut-occupied");
+  } else {
+    await until(
+      mainRenderer,
+      'window.mingshen.getDesktopShortcutSettings().then(state=>state.settings.quickChat==="Control+M")',
+    );
+    const resetQuickChat = await api(mainRenderer, "getDesktopShortcutSettings");
+    assert.equal(resetQuickChat.status.quickChat, true);
+  }
   const restoredCustomPair = await api(
     mainRenderer,
     "setDesktopShortcutSettings",
@@ -1504,9 +1639,9 @@ try {
 
   const uiPreferences = await api(mainRenderer, "getUiPreferences");
   await api(mainRenderer, "saveUiPreferences", { ...uiPreferences, interfaceStyle: "orbit" });
-  await mainRenderer.send("Page.reload");
-  await quickRenderer.send("Page.reload");
-  await until(mainRenderer, 'Boolean(document.querySelector(".app-shell--orbit"))', 60_000);
+  await reloadSurface("main");
+  await reloadSurface("quick-chat");
+  await waitForMainCondition('Boolean(document.querySelector(".app-shell--orbit"))', 60_000);
   await until(quickRenderer, 'document.documentElement.dataset.interfaceStyle==="orbit"&&Boolean(document.querySelector(".composer"))', 60_000);
   await mainRenderer.evaluate(`(()=>{
     const button=[...document.querySelectorAll("button")].find(node=>["打开设置","Open settings"].includes(node.getAttribute("aria-label")??""));
@@ -1611,6 +1746,7 @@ try {
     layoutMeasurements,
     requests: requests.length,
     shortcutEvidence,
+    initialPageEvidence,
     shortcuts: shortcuts.shortcuts,
     evidence,
     boundaries:
@@ -1631,6 +1767,7 @@ try {
         layoutMeasurements,
         requests: requests.length,
         shortcutEvidence,
+        initialPageEvidence,
         shortcutDiagnostics: await mainRenderer?.evaluate(`(async()=>({
           events:globalThis.__shortcutKeyEvents,
           state:await window.mingshen.getDesktopShortcutSettings(),

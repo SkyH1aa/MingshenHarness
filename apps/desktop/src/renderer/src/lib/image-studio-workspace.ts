@@ -7,6 +7,14 @@ import {
 type SaveResult = { status: "saved" } | { status: "error"; error: unknown };
 type PendingSave = { workspace: ImageStudioWorkspace; onResult: (result: SaveResult) => void };
 
+export function shouldDispatchImageGeneration(
+  activeRequestIds: ReadonlySet<string>,
+  cancellingRequestIds: ReadonlySet<string>,
+  requestId: string,
+): boolean {
+  return activeRequestIds.has(requestId) && !cancellingRequestIds.has(requestId);
+}
+
 export class ImageStudioWorkspaceQueue {
   private tail: Promise<unknown> = Promise.resolve();
   private pending: PendingSave | null = null;
@@ -40,6 +48,42 @@ export class ImageStudioWorkspaceQueue {
       } finally {
         await this.savePending();
       }
+    });
+  }
+
+  commitCanonical(
+    readCurrent: () => ImageStudioWorkspace,
+    action: () => Promise<ImageStudioWorkspace>,
+    merge: (canonical: ImageStudioWorkspace, live: ImageStudioWorkspace) => ImageStudioWorkspace,
+    onApply: (workspace: ImageStudioWorkspace) => void,
+    onResult: (result: SaveResult) => void = () => undefined,
+  ): Promise<ImageStudioWorkspace> {
+    return this.run(async () => {
+      const canonical = await action();
+      const reconciled = merge(canonical, readCurrent());
+      this.clearTimer();
+      this.pending = {
+        workspace: reconciled,
+        onResult: this.pending?.onResult ?? onResult,
+      };
+      onApply(reconciled);
+      return reconciled;
+    });
+  }
+
+  commit(
+    readCurrent: () => ImageStudioWorkspace,
+    update: (current: ImageStudioWorkspace) => ImageStudioWorkspace,
+    onApply: (workspace: ImageStudioWorkspace) => void,
+    onResult: (result: SaveResult) => void = () => undefined,
+  ): Promise<ImageStudioWorkspace> {
+    return this.run(async () => {
+      const current = readCurrent();
+      const next = update(current);
+      if (next === current) return current;
+      onApply(next);
+      this.schedule(next, onResult);
+      return next;
     });
   }
 
@@ -143,6 +187,22 @@ export function mergeRemovedAssets(
   };
 }
 
+export function mergeCanvasMutationResult(
+  canonical: ImageStudioWorkspace,
+  live: ImageStudioWorkspace,
+): ImageStudioWorkspace {
+  const assetIds = new Set(canonical.assets.map((asset) => asset.id));
+  return {
+    ...canonical,
+    imageModel: live.imageModel,
+    textModel: live.textModel,
+    generation: live.generation,
+    prompt: live.prompt,
+    negativePrompt: live.negativePrompt,
+    selectedAssetIds: live.selectedAssetIds.filter((id) => assetIds.has(id)),
+  };
+}
+
 export function mergeGeneratedResult(
   current: ImageStudioWorkspace,
   result: ImageStudioGenerateResult,
@@ -164,4 +224,37 @@ export function mergeGeneratedResult(
       return layers.length ? { ...document, layers: [...document.layers, ...layers] } : document;
     }),
   };
+}
+
+export function mergeConcurrentGenerationResult(
+  current: ImageStudioWorkspace,
+  result: ImageStudioGenerateResult,
+  targetDocumentId: string | null,
+): ImageStudioWorkspace {
+  const generatedIds = new Set(result.generatedAssets.map((asset) => asset.id));
+  const knownAssetIds = new Set(current.assets.map((asset) => asset.id));
+  const assets = [
+    ...current.assets,
+    ...result.generatedAssets.filter((asset) => !knownAssetIds.has(asset.id)),
+  ];
+  const targetDocument = targetDocumentId
+    ? result.workspace.documents.find((document) => document.id === targetDocumentId)
+    : undefined;
+  const safeServerDocument = targetDocument
+    ? {
+        ...targetDocument,
+        layers: targetDocument.layers.filter((layer) => generatedIds.has(layer.assetId)),
+      }
+    : null;
+  return mergeGeneratedResult(current, {
+    ...result,
+    workspace: {
+      ...result.workspace,
+      activeDocumentId: current.activeDocumentId,
+      prompt: current.prompt,
+      negativePrompt: current.negativePrompt,
+      assets,
+      documents: safeServerDocument ? [safeServerDocument] : [],
+    },
+  });
 }

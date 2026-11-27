@@ -12,6 +12,7 @@ import {
   MAX_INTERACTIVE_TERMINALS_PER_WINDOW,
   MAX_INTERACTIVE_TERMINALS_TOTAL,
 } from "../../shared/terminal";
+import type { ManagedPolicyService } from "../policy/managed-policy-service";
 
 interface TerminalSessionSource {
   getSession(sessionId: string): SessionView | null;
@@ -94,6 +95,7 @@ interface TerminalServiceOptions {
   exitTimeoutMs?: number;
   platform?: NodeJS.Platform;
   environment?: NodeJS.ProcessEnv;
+  managedPolicy?: ManagedPolicyService;
 }
 
 const DEFAULT_COLS = 100;
@@ -259,6 +261,7 @@ export class TerminalService {
   private readonly exitTimeoutMs: number;
   private readonly platform: NodeJS.Platform;
   private readonly environment: NodeJS.ProcessEnv;
+  private managedPolicy: ManagedPolicyService | null;
   private disposed = false;
   private disposal: Promise<void> | null = null;
 
@@ -272,6 +275,11 @@ export class TerminalService {
     this.exitTimeoutMs = options.exitTimeoutMs ?? STOP_TIMEOUT_MS;
     this.platform = options.platform ?? process.platform;
     this.environment = options.environment ?? process.env;
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
   }
 
   list(ownerId: number, sessionId: string): InteractiveTerminalView[] {
@@ -291,6 +299,14 @@ export class TerminalService {
     validateTerminalId(input.sessionId);
     this.assertCreateAllowed(ownerId, input.sessionId);
     const binding = this.currentBinding(input.sessionId);
+    const session = this.sessions.getSession(input.sessionId);
+    if (session) {
+      this.managedPolicy?.assertOperational("交互式终端");
+      this.managedPolicy?.assertCapability("terminal.interactive", { approved: true });
+      this.managedPolicy?.assertCapability("command.execute");
+      this.managedPolicy?.assertPermissionMode(session.permissionMode);
+      this.managedPolicy?.assertExecutionMode(session.executionMode);
+    }
     const cols = validateDimension(input.cols, DEFAULT_COLS, MIN_COLS, MAX_COLS);
     const rows = validateDimension(input.rows, DEFAULT_ROWS, MIN_ROWS, MAX_ROWS);
     const ownerCount =
@@ -403,6 +419,7 @@ export class TerminalService {
     }
     const record = this.ownedRecord(ownerId, terminalId);
     if (record.view.status !== "running") throw new Error("终端进程当前不可写入。");
+    this.assertExecutionStillAllowed(record);
     this.assertBinding(record);
     record.pty.write(data);
     record.view.updatedAt = new Date().toISOString();
@@ -497,6 +514,16 @@ export class TerminalService {
     if (this.ownerDisposals.has(ownerId) || this.sessionDisposals.has(sessionId)) {
       throw new Error("终端所属窗口或会话正在关闭。");
     }
+  }
+
+  private assertExecutionStillAllowed(record: TerminalRecord): void {
+    const session = this.sessions.getSession(record.view.sessionId);
+    if (!session) throw new Error("终端所属会话不存在。");
+    this.managedPolicy?.assertOperational("终端输入");
+    this.managedPolicy?.assertCapability("terminal.interactive", { approved: true });
+    this.managedPolicy?.assertCapability("command.execute");
+    this.managedPolicy?.assertPermissionMode(session.permissionMode);
+    this.managedPolicy?.assertExecutionMode(session.executionMode);
   }
 
   private nextTitle(ownerId: number): string {

@@ -1,7 +1,14 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ApprovalRequest, ExtensionView, SessionView } from "../../shared/domain";
+import type { ManagedCapability } from "../../shared/managed-policy";
+import {
+  successfulToolOutcome,
+  type ToolOutcome,
+  type ToolOutcomeCompatibilityResult,
+} from "../../shared/tool-outcome";
 import type { McpService } from "../mcp/mcp-service";
+import { ManagedPolicyError, type ManagedPolicyService } from "../policy/managed-policy-service";
 import type { Repository } from "../storage/repository";
 import { isDangerousCommand } from "../tools/tool-registry";
 import { expandPluginRootTokens, loadLocalPluginJsonDeclaration } from "./local-plugin-manifest";
@@ -14,6 +21,7 @@ const MAX_HOOK_COMMAND_OUTPUT_CHARS = 20_000;
 const MAX_HOOK_DEPTH = 12;
 const MAX_HOOK_CONTEXT_STRING_CHARS = 20_000;
 const MAX_HOOK_CONTEXT_ITEMS = 100;
+const HOOK_TERMINATION_CONFIRMATION_TIMEOUT_MS = 10_000;
 
 export type PluginHookExecutionEvent =
   | "PreToolUse"
@@ -88,6 +96,7 @@ export interface HookExecutionResult {
   extensionName: string;
   status: "completed" | "failed" | "skipped";
   detail: string;
+  outcome?: ToolOutcome;
 }
 
 export type HookApproval = (request: ApprovalRequest, signal: AbortSignal) => Promise<boolean>;
@@ -329,75 +338,310 @@ function invocationPayload(
   return payload;
 }
 
-function runCommand(
+interface HookCommandResult {
+  ok: boolean;
+  output: string;
+  outcome: ToolOutcome;
+}
+
+export interface HookCommandRuntime {
+  spawn?: typeof spawn;
+  terminationConfirmationTimeoutMs?: number;
+}
+
+function shellOutcome(input: {
+  output: string;
+  status: ToolOutcome["status"];
+  effect: ToolOutcome["effect"];
+  retryable?: boolean;
+  codes?: string[];
+  evidenceSummary?: string;
+}): ToolOutcome {
+  const codes = [...new Set(input.codes ?? [])];
+  if (input.effect === "uncertain" && !codes.includes("EXTENSION_OUTCOME_UNCERTAIN")) {
+    codes.push("EXTENSION_OUTCOME_UNCERTAIN");
+  }
+  const output = input.output.slice(0, MAX_HOOK_COMMAND_OUTPUT_CHARS);
+  return {
+    output,
+    isError: input.status !== "success",
+    status: input.status,
+    effect: input.effect,
+    retryable: input.retryable === true,
+    codes,
+    validation: { status: "not_declared", source: "custom" },
+    evidence: [
+      {
+        kind: "side-effect",
+        summary:
+          input.evidenceSummary ??
+          (input.effect === "none"
+            ? "No hooked command side effect was expected."
+            : input.effect === "confirmed"
+              ? "The hooked command process was observed closed; child processes were not independently inspected."
+              : "The hooked command process-tree cleanup could not be confirmed; inspect the host before retrying side effects."),
+      },
+    ],
+  };
+}
+
+function mcpHookOutcome(
+  result: ToolOutcomeCompatibilityResult,
+  readOnly: boolean | null,
+): ToolOutcome {
+  if (result.outcome) return result.outcome;
+  const status = result.status ?? (result.isError ? "failed" : "success");
+  const effect =
+    result.effect ?? (readOnly === true ? "none" : result.isError ? "uncertain" : "confirmed");
+  const codes = [...new Set(result.codes ?? [])];
+  if (effect === "uncertain" && !codes.includes("EXTENSION_OUTCOME_UNCERTAIN")) {
+    codes.push("EXTENSION_OUTCOME_UNCERTAIN");
+  }
+  return {
+    output: result.output,
+    isError:
+      result.isError === true ||
+      status === "failed" ||
+      status === "denied" ||
+      status === "cancelled" ||
+      status === "unverified",
+    status,
+    effect,
+    retryable: result.retryable === true,
+    codes,
+    validation: result.validation ?? { status: "not_declared", source: "mcp" },
+    evidence: result.evidence ?? [
+      {
+        kind: "side-effect",
+        summary:
+          effect === "none"
+            ? "The MCP tool was declared read-only, so no side effect was expected."
+            : effect === "confirmed"
+              ? "The legacy MCP result reported success; external state was not independently verified."
+              : "The legacy MCP result failed without proof that the remote operation stopped; inspect server state before retrying.",
+      },
+    ],
+  };
+}
+
+function hookOutcomeStatus(outcome: ToolOutcome): HookExecutionResult["status"] {
+  return successfulToolOutcome(outcome) && outcome.effect !== "uncertain" ? "completed" : "failed";
+}
+
+function hookResultDetail(extensionName: string, outcome: ToolOutcome): string {
+  const base = `${extensionName}: ${outcome.output.slice(0, MAX_HOOK_COMMAND_OUTPUT_CHARS)}`;
+  if (outcome.effect !== "uncertain") return base;
+  return `${base}\n[EXTENSION_OUTCOME_UNCERTAIN] Cleanup or remote completion is unconfirmed; inspect external state before retrying side effects.`;
+}
+
+export function runHookCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
   signal: AbortSignal,
   stdinPayload: Record<string, unknown>,
   pluginRoot: string,
-): Promise<{ ok: boolean; output: string }> {
-  signal.throwIfAborted();
+  runtime: HookCommandRuntime = {},
+): Promise<HookCommandResult> {
+  if (signal.aborted) {
+    const output = "Hook command cancelled before process start.";
+    return Promise.resolve({
+      ok: false,
+      output,
+      outcome: shellOutcome({
+        output,
+        status: "cancelled",
+        effect: "none",
+        codes: ["EXTENSION_COMMAND_CANCELLED"],
+      }),
+    });
+  }
+  const spawnProcess = runtime.spawn ?? spawn;
+  const terminationConfirmationTimeoutMs =
+    runtime.terminationConfirmationTimeoutMs ?? HOOK_TERMINATION_CONFIRMATION_TIMEOUT_MS;
   return new Promise((resolveResult) => {
-    const child = spawn(
-      process.env.SystemRoot
-        ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-        : "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-      {
-        cwd,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          MINGSHEN_PLUGIN_ROOT: pluginRoot,
-          CLAUDE_PLUGIN_ROOT: pluginRoot,
-          ZCODE_PLUGIN_ROOT: pluginRoot,
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(
+        process.env.SystemRoot
+          ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+          : "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        {
+          cwd,
+          windowsHide: true,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            MINGSHEN_PLUGIN_ROOT: pluginRoot,
+            CLAUDE_PLUGIN_ROOT: pluginRoot,
+            ZCODE_PLUGIN_ROOT: pluginRoot,
+          },
         },
-      },
-    );
+      ) as ChildProcessWithoutNullStreams;
+    } catch (error) {
+      const output = `Hook command could not start: ${causeMessage(error)}`;
+      resolveResult({
+        ok: false,
+        output,
+        outcome: shellOutcome({
+          output,
+          status: "failed",
+          effect: "none",
+          retryable: true,
+          codes: ["EXTENSION_COMMAND_SPAWN_FAILED"],
+        }),
+      });
+      return;
+    }
     let output = "";
     let settled = false;
-    let interrupted: string | null = null;
-    let termination: Promise<void> | undefined;
+    let childSpawned = false;
+    let childClosed = false;
+    let childExitCode: number | null | undefined;
+    let interruption:
+      | {
+          kind: "cancelled" | "timed_out" | "failed";
+          summary: string;
+          alreadyExitedNormally: boolean;
+        }
+      | undefined;
+    let terminationStarted = false;
+    let killerSettled = false;
+    let killerExitCode: number | null | undefined;
+    let killerError: string | undefined;
+    let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+    let commandTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (ok: boolean, detail: string) => {
+    const finish = (outcome: ToolOutcome) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (commandTimer) clearTimeout(commandTimer);
+      if (terminationTimer) clearTimeout(terminationTimer);
       signal.removeEventListener("abort", abort);
       resolveResult({
-        ok,
-        output: detail.slice(0, MAX_HOOK_COMMAND_OUTPUT_CHARS),
+        ok: outcome.status === "success",
+        output: outcome.output,
+        outcome,
       });
     };
+
+    const withCommandOutput = (summary: string): string => {
+      const captured = output.trim();
+      return captured ? `${summary}\n${captured}` : summary;
+    };
+
+    const interruptedOutcome = (confirmed: boolean): ToolOutcome => {
+      if (!interruption) {
+        throw new Error("Cannot build an interrupted outcome without an interruption.");
+      }
+      const cleanupEvidence = confirmed
+        ? interruption.alreadyExitedNormally
+          ? "The command process had already exited successfully before cancellation."
+          : "Process-tree termination was confirmed by both taskkill exit code 0 and the target child close event."
+        : "Process-tree cleanup is UNCONFIRMED; the command process or its descendants may still be running.";
+      const cleanupSummary = confirmed
+        ? `${interruption.summary} ${cleanupEvidence}`
+        : `${interruption.summary} ${cleanupEvidence} taskkill=${
+            killerError
+              ? `error:${killerError}`
+              : killerExitCode === undefined
+                ? "pending"
+                : String(killerExitCode)
+          }, child_close=${childClosed ? "observed" : "missing"}.`;
+      const status = interruption.kind === "cancelled" ? "cancelled" : "failed";
+      const code =
+        interruption.kind === "cancelled"
+          ? "EXTENSION_COMMAND_CANCELLED"
+          : interruption.kind === "timed_out"
+            ? "EXTENSION_COMMAND_TIMEOUT"
+            : "EXTENSION_COMMAND_FAILED";
+      return shellOutcome({
+        output: withCommandOutput(cleanupSummary),
+        status,
+        effect: confirmed ? "confirmed" : "uncertain",
+        codes: [code],
+        evidenceSummary: cleanupEvidence,
+      });
+    };
+
+    const maybeFinishInterrupted = () => {
+      if (!interruption || settled) return;
+      if (interruption.alreadyExitedNormally) {
+        finish(interruptedOutcome(true));
+        return;
+      }
+      if (childClosed && killerSettled && killerExitCode === 0) {
+        finish(interruptedOutcome(true));
+        return;
+      }
+      if (killerSettled && killerExitCode !== 0) {
+        finish(interruptedOutcome(false));
+      }
+    };
+
+    const beginInterruption = (kind: NonNullable<typeof interruption>["kind"], summary: string) => {
+      if (interruption || settled) return;
+      interruption = {
+        kind,
+        summary,
+        alreadyExitedNormally: childClosed && childExitCode === 0,
+      };
+      if (commandTimer) clearTimeout(commandTimer);
+      terminationTimer = setTimeout(() => {
+        if (!settled) finish(interruptedOutcome(false));
+      }, terminationConfirmationTimeoutMs);
+      if (childClosed) {
+        maybeFinishInterrupted();
+        return;
+      }
+      terminate();
+    };
+
     const terminate = () => {
-      if (termination) return;
-      if (child.pid) {
-        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      if (terminationStarted || settled || childClosed) return;
+      if (!child.pid) return;
+      terminationStarted = true;
+      let killer: ChildProcessWithoutNullStreams;
+      try {
+        killer = spawnProcess("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
           windowsHide: true,
           stdio: "ignore",
-        });
-        termination = new Promise<void>((done) => {
-          killer.once("error", () => {
-            child.kill();
-            done();
-          });
-          killer.once("close", () => done());
-        });
-      } else child.kill();
+        }) as ChildProcessWithoutNullStreams;
+      } catch (error) {
+        killerSettled = true;
+        killerError = causeMessage(error);
+        maybeFinishInterrupted();
+        return;
+      }
+      killer.once("error", (error) => {
+        if (killerSettled) return;
+        killerSettled = true;
+        killerError = causeMessage(error);
+        maybeFinishInterrupted();
+      });
+      killer.once("close", (code) => {
+        if (killerSettled) return;
+        killerSettled = true;
+        killerExitCode = code;
+        maybeFinishInterrupted();
+      });
     };
-    const abort = () => {
-      interrupted = "Hook command cancelled; process tree terminated.";
-      terminate();
-    };
-    const timer = setTimeout(() => {
-      interrupted = `Hook command timed out (${timeoutMs} ms); process tree terminated.`;
-      terminate();
+
+    function abort() {
+      beginInterruption("cancelled", "Hook command cancelled.");
+    }
+
+    commandTimer = setTimeout(() => {
+      beginInterruption("timed_out", `Hook command timed out (${timeoutMs} ms).`);
     }, timeoutMs);
 
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
+    child.once("spawn", () => {
+      childSpawned = true;
+      if (interruption) terminate();
+    });
     child.stdout.on("data", (chunk: Buffer) => {
       if (output.length < MAX_HOOK_COMMAND_OUTPUT_CHARS)
         output = (output + chunk.toString("utf8")).slice(0, MAX_HOOK_COMMAND_OUTPUT_CHARS);
@@ -410,17 +654,47 @@ function runCommand(
     try {
       child.stdin.end(JSON.stringify(stdinPayload));
     } catch (error) {
-      interrupted = `Cannot send Hook input: ${causeMessage(error)}`;
-      terminate();
+      beginInterruption("failed", `Cannot send Hook input: ${causeMessage(error)}.`);
     }
     child.on("error", (error) => {
-      clearTimeout(timer);
-      finish(false, error.message);
+      if (!childSpawned && !childClosed && !child.pid) {
+        if (commandTimer) clearTimeout(commandTimer);
+        const detail =
+          `${interruption?.summary ?? ""} Hook command could not start: ${error.message}`.trim();
+        finish(
+          shellOutcome({
+            output: detail,
+            status: interruption?.kind === "cancelled" ? "cancelled" : "failed",
+            effect: "none",
+            retryable: true,
+            codes: [
+              "EXTENSION_COMMAND_SPAWN_FAILED",
+              ...(interruption?.kind === "cancelled" ? ["EXTENSION_COMMAND_CANCELLED"] : []),
+            ],
+          }),
+        );
+        return;
+      }
+      beginInterruption("failed", `Hook command process error: ${error.message}.`);
+      maybeFinishInterrupted();
     });
-    child.on("close", async (code) => {
-      clearTimeout(timer);
-      await termination;
-      finish(!interrupted && code === 0, interrupted ?? (output || `exit_code: ${code ?? "null"}`));
+    child.once("close", (code) => {
+      childClosed = true;
+      childExitCode = code;
+      if (interruption) {
+        maybeFinishInterrupted();
+        return;
+      }
+      if (commandTimer) clearTimeout(commandTimer);
+      const detail = withCommandOutput(output || `exit_code: ${code ?? "null"}`);
+      finish(
+        shellOutcome({
+          output: detail,
+          status: code === 0 ? "success" : "failed",
+          effect: code === null ? "uncertain" : "confirmed",
+          codes: code === 0 ? [] : ["EXTENSION_COMMAND_FAILED"],
+        }),
+      );
     });
   });
 }
@@ -429,6 +703,17 @@ function clippedPromptText(value: string): string {
   const clean = value.replaceAll("\0", "").trim();
   if (clean.length <= MAX_PROMPT_HOOK_CHARS) return clean;
   return `${clean.slice(0, MAX_PROMPT_HOOK_CHARS)}\n[PLUGIN_PROMPT_TRUNCATED]`;
+}
+
+function assertPluginCapabilities(policy: ManagedPolicyService | null, approved?: boolean): void {
+  if (!policy) return;
+  if (approved === undefined) {
+    policy.assertCapability("plugin.use");
+    policy.assertCapability("plugin.hooks");
+    return;
+  }
+  policy.assertCapability("plugin.use", { approved });
+  policy.assertCapability("plugin.hooks", { approved });
 }
 
 export function formatPluginPromptContext(entries: PluginPromptContextEntry[]): string {
@@ -508,10 +793,19 @@ export function formatBeforeModelRequestContext(
 }
 
 export class PluginHookService {
+  private managedPolicy: ManagedPolicyService | null;
+
   constructor(
     private readonly repository: Repository,
     private readonly mcpService: McpService,
-  ) {}
+    options: { managedPolicy?: ManagedPolicyService } = {},
+  ) {
+    this.managedPolicy = options.managedPolicy ?? null;
+  }
+
+  setManagedPolicy(policy: ManagedPolicyService | null): void {
+    this.managedPolicy = policy;
+  }
 
   private enabledPlugins(
     session: SessionView,
@@ -558,10 +852,17 @@ export class PluginHookService {
    * Loads only declarative `type: "prompt"` UserPromptSubmit hooks.
    * Command and MCP actions in this event are intentionally ignored.
    */
-  async loadPromptContext(session: SessionView): Promise<PluginPromptContextResult> {
+  async loadPromptContext(
+    session: SessionView,
+    options: { policyApproved?: boolean } = {},
+  ): Promise<PluginPromptContextResult> {
     const contexts: PluginPromptContextEntry[] = [];
     const errors: PluginPromptContextError[] = [];
     if (session.agentMode === "chat" || session.parentSessionId) return { contexts, errors };
+    if (this.enabledPlugins(session).length) {
+      this.managedPolicy?.assertOperational("插件提示上下文");
+      assertPluginCapabilities(this.managedPolicy, options.policyApproved);
+    }
     let remaining = MAX_PROMPT_CONTEXT_CHARS;
     for (const { extension, manifest } of this.enabledPlugins(session)) {
       if (remaining <= 0) break;
@@ -603,7 +904,7 @@ export class PluginHookService {
     signal: AbortSignal,
     additionalExtensionIds: readonly string[] = [],
     context: PluginHookInvocationContext = {},
-    options: { allowSubagentPromptContext?: boolean } = {},
+    options: { allowSubagentPromptContext?: boolean; policyApproved?: boolean } = {},
   ): Promise<PluginPromptContextResult> {
     const contexts: PluginPromptContextEntry[] = [];
     const errors: PluginPromptContextError[] = [];
@@ -612,6 +913,10 @@ export class PluginHookService {
       (session.parentSessionId && !options.allowSubagentPromptContext)
     )
       return { contexts, errors };
+    if (this.enabledPlugins(session, additionalExtensionIds, options).length) {
+      this.managedPolicy?.assertOperational("逐次模型请求 Hook");
+      assertPluginCapabilities(this.managedPolicy, options.policyApproved);
+    }
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(BEFORE_MODEL_HOOK_TIMEOUT_MS)]);
     let remaining = MAX_PROMPT_CONTEXT_CHARS;
     pluginLoop: for (const { extension, manifest } of this.enabledPlugins(
@@ -707,6 +1012,97 @@ export class PluginHookService {
     return { contexts, errors };
   }
 
+  private async authorizeHookActionPolicy(input: {
+    event: PluginHookExecutionEvent;
+    session: SessionView;
+    runId: string;
+    signal: AbortSignal;
+    requestApproval: HookApproval;
+    label: string;
+    capabilities: readonly ManagedCapability[];
+    toolName?: string;
+  }): Promise<string | null> {
+    const policy = this.managedPolicy;
+    if (!policy) return null;
+    while (true) {
+      input.signal.throwIfAborted();
+      policy.assertOperational(`插件 ${input.label} Hook`);
+      policy.assertPermissionMode(input.session.permissionMode);
+      policy.assertExecutionMode(input.session.executionMode);
+      const revision = policy.status().revision;
+      const evaluations = input.capabilities.map((capability) =>
+        policy.evaluateCapability(capability),
+      );
+      if (input.toolName) evaluations.push(policy.evaluateTool(input.toolName));
+      const denied = evaluations.find((evaluation) => evaluation.decision === "deny");
+      if (denied) {
+        throw new ManagedPolicyError(
+          "POLICY_BLOCKED",
+          denied.reason,
+          denied.revision,
+          denied.sources,
+        );
+      }
+      const asks = evaluations.filter((evaluation) => evaluation.decision === "ask");
+      if (asks.length) {
+        const approved = await input.requestApproval(
+          {
+            id: randomUUID(),
+            sessionId: input.session.id,
+            runId: input.runId,
+            toolCallId: randomUUID(),
+            toolName: `managed:hook:${input.event}`,
+            summary: `管理策略审批：插件 ${input.label}`,
+            detail: asks
+              .map((evaluation) => `${evaluation.reason} (${evaluation.revision})`)
+              .join("\n"),
+            pathScope: null,
+            commandPrefix: null,
+            risk: "elevated",
+            manualOnly: true,
+            createdAt: new Date().toISOString(),
+          },
+          input.signal,
+        );
+        if (!approved) {
+          throw new Error(`POLICY_APPROVAL_DENIED: 插件 ${input.label} 的管理策略审批被拒绝。`);
+        }
+      }
+      if (policy.status().revision !== revision) continue;
+      for (const capability of input.capabilities) {
+        policy.assertCapability(capability, { approved: true });
+      }
+      if (input.toolName) policy.assertToolAllowed(input.toolName, { approved: true });
+      return revision;
+    }
+  }
+
+  private async reassertHookActionPolicy(input: {
+    event: PluginHookExecutionEvent;
+    session: SessionView;
+    runId: string;
+    signal: AbortSignal;
+    requestApproval: HookApproval;
+    label: string;
+    capabilities: readonly ManagedCapability[];
+    toolName?: string;
+    approvedRevision: string | null;
+  }): Promise<void> {
+    const policy = this.managedPolicy;
+    if (!policy) return;
+    if (!input.approvedRevision || policy.status().revision !== input.approvedRevision) {
+      await this.authorizeHookActionPolicy(input);
+      return;
+    }
+    policy.assertOperational(`插件 ${input.label} Hook`);
+    policy.assertPermissionMode(input.session.permissionMode);
+    policy.assertExecutionMode(input.session.executionMode);
+    for (const capability of input.capabilities) {
+      policy.assertCapability(capability, { approved: true });
+    }
+    if (input.toolName) policy.assertToolAllowed(input.toolName, { approved: true });
+  }
+
   /**
    * Interrupt is deliberately a non-blocking declarative notification.
    * It never executes command/MCP actions or requests approval.
@@ -717,8 +1113,13 @@ export class PluginHookService {
     signal: AbortSignal,
     context: PluginHookInvocationContext = {},
     additionalExtensionIds: readonly string[] = [],
+    options: { policyApproved?: boolean } = {},
   ): Promise<HookExecutionResult[]> {
     if (session.agentMode === "chat" || session.parentSessionId) return [];
+    if (this.enabledPlugins(session, additionalExtensionIds).length) {
+      this.managedPolicy?.assertOperational("插件中断 Hook");
+      assertPluginCapabilities(this.managedPolicy, options.policyApproved);
+    }
     const results: HookExecutionResult[] = [];
     let remaining = MAX_PROMPT_CONTEXT_CHARS;
     for (const { extension, manifest } of this.enabledPlugins(session, additionalExtensionIds)) {
@@ -783,10 +1184,15 @@ export class PluginHookService {
     requestApproval: HookApproval,
     context: PluginHookInvocationContext = {},
     additionalExtensionIds: readonly string[] = [],
+    options: { policyApproved?: boolean } = {},
   ): Promise<HookExecutionResult[]> {
     if (event === "Interrupt")
-      return this.runInterrupt(session, runId, signal, context, additionalExtensionIds);
+      return this.runInterrupt(session, runId, signal, context, additionalExtensionIds, options);
     if (session.agentMode === "chat" || session.parentSessionId) return [];
+    if (this.enabledPlugins(session, additionalExtensionIds).length) {
+      this.managedPolicy?.assertOperational(`插件 ${event} Hook`);
+      assertPluginCapabilities(this.managedPolicy, options.policyApproved);
+    }
     const results: HookExecutionResult[] = [];
     const shellHooksEnabled = this.repository.getSetting("plugin.shellHooksEnabled") === true;
     for (const { extension, manifest } of this.enabledPlugins(session, additionalExtensionIds)) {
@@ -840,6 +1246,23 @@ export class PluginHookService {
             extension.installedPath,
             variables,
           ) as Record<string, unknown>;
+          const actionCapabilities: ManagedCapability[] = [
+            "plugin.use",
+            "plugin.hooks",
+            "mcp.connect",
+            "mcp.call",
+          ];
+          if (server.transport !== "stdio") actionCapabilities.push("network.request");
+          const approvedRevision = await this.authorizeHookActionPolicy({
+            event,
+            session,
+            runId,
+            signal,
+            requestApproval,
+            label: `MCP ${server.name}/${action.tool}`,
+            capabilities: actionCapabilities,
+            toolName: action.tool,
+          });
           const approved = await requestApproval(
             {
               id: randomUUID(),
@@ -867,13 +1290,29 @@ export class PluginHookService {
             });
             continue;
           }
-          const result = await this.mcpService.callTool(server.id, action.tool, input, signal);
+          await this.reassertHookActionPolicy({
+            event,
+            session,
+            runId,
+            signal,
+            requestApproval,
+            label: `MCP ${server.name}/${action.tool}`,
+            capabilities: actionCapabilities,
+            toolName: action.tool,
+            approvedRevision,
+          });
+          const result = await this.mcpService.callTool(server.id, action.tool, input, signal, {
+            approved: true,
+          });
+          const configuredTool = server.tools?.find((tool) => tool.name === action.tool);
+          const outcome = mcpHookOutcome(result, configuredTool?.readOnly ?? null);
           results.push({
             event,
             extensionId: extension.id,
             extensionName: extension.name,
-            status: result.isError ? "failed" : "completed",
-            detail: `${extension.name}: ${result.output.slice(0, MAX_HOOK_COMMAND_OUTPUT_CHARS)}`,
+            status: hookOutcomeStatus(outcome),
+            detail: hookResultDetail(extension.name, outcome),
+            outcome,
           });
           continue;
         }
@@ -915,6 +1354,22 @@ export class PluginHookService {
           });
           continue;
         }
+        const actionCapabilities: ManagedCapability[] = [
+          "plugin.use",
+          "plugin.hooks",
+          "command.execute",
+          "file.read",
+          "file.write",
+        ];
+        const approvedRevision = await this.authorizeHookActionPolicy({
+          event,
+          session,
+          runId,
+          signal,
+          requestApproval,
+          label: `Shell ${extension.name}`,
+          capabilities: actionCapabilities,
+        });
         const approved = await requestApproval(
           {
             id: randomUUID(),
@@ -942,7 +1397,17 @@ export class PluginHookService {
           });
           continue;
         }
-        const result = await runCommand(
+        await this.reassertHookActionPolicy({
+          event,
+          session,
+          runId,
+          signal,
+          requestApproval,
+          label: `Shell ${extension.name}`,
+          capabilities: actionCapabilities,
+          approvedRevision,
+        });
+        const result = await runHookCommand(
           command,
           session.workspacePath,
           Math.min(120_000, Math.max(1_000, action.timeoutMs ?? 60_000)),
@@ -954,8 +1419,9 @@ export class PluginHookService {
           event,
           extensionId: extension.id,
           extensionName: extension.name,
-          status: result.ok ? "completed" : "failed",
-          detail: `${extension.name}: ${result.output}`,
+          status: hookOutcomeStatus(result.outcome),
+          detail: hookResultDetail(extension.name, result.outcome),
+          outcome: result.outcome,
         });
       }
     }

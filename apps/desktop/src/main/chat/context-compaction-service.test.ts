@@ -2045,7 +2045,10 @@ describe("context compaction", () => {
       });
       f.service.recordResponse(f.input, { inputTokens: 17000, outputTokens: 0 });
       await f.service.prepare(f.input);
-      expect(key).toHaveBeenCalledWith(separate.id);
+      expect(key).toHaveBeenCalledWith(separate.id, {
+        approved: true,
+        modelConfigId: summaryModel.id,
+      });
       expect(fetcher.mock.calls[0]?.[0]).toBe("https://summary.invalid/v1/messages");
       expect(fetcher.mock.calls[0]?.[1].headers).toMatchObject({
         "x-api-key": "summary-fixture-key",

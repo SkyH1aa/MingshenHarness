@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { ChatStreamEvent, SessionTodo } from "../../shared/domain";
 import type {
+  BeginPlanStepInput,
   ExecutionCheckpoint,
+  PlanStepClaimView,
   PlanUpdateInput,
   SavedProjectPlan,
   SessionPlan,
+  SettlePlanStepInput,
   WorkbenchState,
 } from "../../shared/workbench";
 import type { Repository } from "../storage/repository";
+import { PlanClaimError, type PlanClaimService } from "../workbench/plan-claim-service";
 
 export function persistedPlanPrompt(plan: SessionPlan): string {
   return [
@@ -17,10 +21,12 @@ export function persistedPlanPrompt(plan: SessionPlan): string {
       : "For continuation, preserve step IDs, completed/cancelled states, dependencies and breakpoints. Use the supplied revision for changes. This is the only active plan: older todo tool results are history, including when steps is empty. Do not revive a cleared plan unless the user asks.",
     JSON.stringify({
       revision: plan.revision,
+      generation: plan.generation,
       paused: plan.paused,
       reviewRequired: Boolean(plan.reviewRequired),
       breakpoints: plan.breakpoints,
       steps: plan.steps,
+      activeClaims: plan.activeClaims ?? [],
     }),
   ].join("\n");
 }
@@ -29,12 +35,23 @@ export class SessionWorkbenchService {
   constructor(
     private readonly repository: Repository,
     private readonly emit: (event: ChatStreamEvent) => void,
+    private readonly claims?: PlanClaimService,
   ) {}
 
   state(sessionId: string): WorkbenchState {
+    if (this.claims) {
+      return {
+        plan: this.claims.plan(sessionId),
+        checkpoint: this.repository.getSetting(
+          `workbench.checkpoint.${sessionId}`,
+        ) as ExecutionCheckpoint | null,
+        queued: Boolean(this.repository.getSetting(`workbench.queued.${sessionId}`)),
+      };
+    }
     if (!this.repository.getSession(sessionId)) throw new Error("会话不存在。");
     const meta = this.repository.getSetting(`workbench.plan.${sessionId}`) as {
       revision?: number;
+      generation?: number;
       paused?: boolean;
       reviewRequired?: boolean;
       order?: string[];
@@ -50,6 +67,7 @@ export class SessionWorkbenchService {
     return {
       plan: {
         revision: meta?.revision ?? 0,
+        generation: meta?.generation ?? 1,
         paused: meta?.paused ?? false,
         reviewRequired: meta?.reviewRequired ?? false,
         breakpoints: meta?.breakpoints ?? [],
@@ -117,6 +135,8 @@ export class SessionWorkbenchService {
     fromAgent = false,
     reviewRequired?: boolean,
     emitUpdates = true,
+    ownerRunId: string | null = null,
+    forceGenerationAdvance = false,
   ): SessionPlan {
     const current = this.state(input.sessionId).plan;
     if (current.revision !== input.revision) throw new Error("计划已更新，请刷新后再保存。");
@@ -184,17 +204,177 @@ export class SessionWorkbenchService {
           step.status === "in_progress" &&
           current.steps.find((old) => old.id === step.id)?.status !== "in_progress",
       );
-    this.repository.replaceSessionTodos(input.sessionId, steps, {
-      revision: current.revision + 1,
-      paused: hitBreakpoint || (input.paused ?? current.paused),
-      reviewRequired: steps.length > 0 && (reviewRequired ?? current.reviewRequired ?? false),
-      breakpoints,
-      order: steps.map((step) => step.id),
-      dependencies: Object.fromEntries(steps.map((step) => [step.id, step.dependsOn])),
-      updatedAt: now,
-    });
+    const currentIds = new Set(current.steps.map((item) => item.id));
+    const rebuild =
+      current.steps.length > 0 &&
+      steps.length > 0 &&
+      steps.every((item) => !currentIds.has(item.id));
+    const advanceGeneration =
+      forceGenerationAdvance || (current.steps.length > 0 && steps.length === 0) || rebuild;
+    const save = (generation: number) =>
+      this.repository.replaceSessionTodos(input.sessionId, steps, {
+        revision: current.revision + 1,
+        generation,
+        paused: hitBreakpoint || (input.paused ?? current.paused),
+        reviewRequired: steps.length > 0 && (reviewRequired ?? current.reviewRequired ?? false),
+        breakpoints,
+        order: steps.map((step) => step.id),
+        dependencies: Object.fromEntries(steps.map((step) => [step.id, step.dependsOn])),
+        updatedAt: now,
+      });
+    if (this.claims)
+      this.claims.withPlanUpdate(
+        {
+          sessionId: input.sessionId,
+          nextSteps: steps,
+          ownerRunId,
+          advanceGeneration,
+          requireOwnedStatusTransitions: fromAgent,
+        },
+        save,
+      );
+    else save(current.generation + (advanceGeneration ? 1 : 0));
     if (emitUpdates) this.publishState(input.sessionId);
     return this.state(input.sessionId).plan;
+  }
+
+  updateWithOwner(
+    input: PlanUpdateInput,
+    ownerRunId: string,
+    fromAgent = true,
+    reviewRequired?: boolean,
+    emitUpdates = true,
+  ): SessionPlan {
+    return this.update(input, fromAgent, reviewRequired, emitUpdates, ownerRunId);
+  }
+
+  beginStep(input: BeginPlanStepInput): {
+    plan: SessionPlan;
+    claim: PlanStepClaimView | null;
+  } {
+    if (this.claims) {
+      const result = this.claims.begin(input);
+      this.publishState(input.sessionId);
+      return result;
+    }
+    const current = this.state(input.sessionId).plan;
+    if (input.revision !== current.revision)
+      throw new Error(
+        `Plan changed (revision ${current.revision}). Refresh before starting a step.`,
+      );
+    const step = current.steps.find((item) => item.id === input.stepId);
+    if (!step) throw new Error("Plan step not found.");
+    const saved = this.update(
+      {
+        sessionId: input.sessionId,
+        revision: current.revision,
+        steps: current.steps.map((item) =>
+          item.id === step.id ? { ...item, status: "in_progress" } : item,
+        ),
+      },
+      true,
+    );
+    return { plan: saved, claim: null };
+  }
+
+  heartbeatClaim(claimId: string, ownerRunId: string): void {
+    if (!this.claims) throw new Error("Persistent plan claims are unavailable.");
+    const claim = this.claims.heartbeat({ claimId, ownerRunId });
+    this.publishState(claim.sessionId);
+  }
+
+  settleStep(input: SettlePlanStepInput): SessionPlan {
+    if (!this.claims) throw new Error("Persistent plan claims are unavailable.");
+    const current = this.claims.getClaim(input.claimId);
+    if (!current) throw new PlanClaimError("claim_not_found", "Plan step claim not found.");
+    const result = this.claims.settle(input);
+    this.publishState(current.sessionId);
+    return result.plan;
+  }
+
+  settleLiveStep(input: SettlePlanStepInput & { expectedVersion: number }): {
+    plan: SessionPlan;
+    claim: PlanStepClaimView;
+  } {
+    if (!this.claims) throw new Error("Persistent plan claims are unavailable.");
+    const current = this.claims.getClaim(input.claimId);
+    if (!current) throw new Error("Plan step claim not found.");
+    const result = this.claims.settleLive(input);
+    this.publishState(current.sessionId);
+    return result;
+  }
+
+  settleOwnerRun(
+    ownerRunId: string,
+    status: "completed" | "stale" | "released" | "cancel_requested",
+    summary?: string,
+  ): void {
+    if (!this.claims) return;
+    for (const sessionId of this.claims.settleOwnerRun(ownerRunId, status, summary))
+      this.publishState(sessionId);
+  }
+
+  listOwnerRunClaims(ownerRunId: string, includeTerminal = false): PlanStepClaimView[] {
+    if (!this.claims) return [];
+    return this.claims.listOwnerRunClaims(ownerRunId, includeTerminal);
+  }
+
+  recoverClaim(input: Parameters<PlanClaimService["recover"]>[0]): {
+    plan: SessionPlan;
+    claim: PlanStepClaimView;
+  } {
+    if (!this.claims) throw new Error("Persistent plan claims are unavailable.");
+    const result = this.claims.recover(input);
+    this.publishState(input.sessionId);
+    return result;
+  }
+
+  materializeCoordinationSteps(
+    sessionId: string,
+    revision: number,
+    tasks: Parameters<PlanClaimService["materializeCoordinationSteps"]>[0]["tasks"],
+  ): Array<{ taskId: string; planStepId: string }> {
+    if (this.claims)
+      return this.claims.materializeCoordinationSteps(
+        { sessionId, revision, tasks },
+        (targetSessionId, targetRevision, steps, ownerRunId) => {
+          const result = this.updateWithOwner(
+            {
+              sessionId: targetSessionId,
+              revision: targetRevision,
+              steps,
+            },
+            ownerRunId ?? "host:coordination-link",
+            true,
+            false,
+            false,
+          );
+          return result;
+        },
+      );
+    const current = this.state(sessionId).plan;
+    if (current.revision !== revision) throw new Error("Plan changed before coordination.");
+    const timestamp = new Date().toISOString();
+    const steps = [...current.steps];
+    const result = tasks.map((task, index) => {
+      const existing = current.steps.find(
+        (step) => step.id === task.planStepId || step.content.startsWith(`${task.label}:`),
+      );
+      if (existing) return { taskId: task.taskId, planStepId: existing.id };
+      const planStepId = task.planStepId || `coordination-${task.taskId}`;
+      steps.push({
+        id: planStepId,
+        content: `${task.label}: ${task.scope}`.slice(0, 4_000),
+        status: "pending",
+        priority: index === 0 ? "high" : "medium",
+        updatedAt: timestamp,
+        dependsOn: [],
+      });
+      return { taskId: task.taskId, planStepId };
+    });
+    if (steps.length !== current.steps.length)
+      this.update({ sessionId, revision, steps }, true, false, false);
+    return result;
   }
 
   publishState(sessionId: string): void {
@@ -230,7 +410,11 @@ export class SessionWorkbenchService {
       sourceSessionId: sessionId,
       savedAt: new Date().toISOString(),
       revision: (existing?.revision ?? 0) + 1,
-      plan: this.state(sessionId).plan,
+      plan: (() => {
+        const current = this.state(sessionId).plan;
+        const { activeClaims: _activeClaims, ...snapshot } = current;
+        return snapshot;
+      })(),
     };
     this.repository.setSetting(`workbench.library.${value.id}`, value);
     return value;
@@ -263,16 +447,23 @@ export class SessionWorkbenchService {
       path?.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase() ?? null;
     if (normalize(session.workspacePath) !== normalize(stored.workspacePath))
       throw new Error("只可绑定同一项目的计划。");
-    return this.update({
-      sessionId,
-      revision,
-      paused: false,
-      breakpoints: stored.plan.breakpoints,
-      steps: stored.plan.steps.map((step) => ({
-        ...step,
-        status: resetCompleted || step.status === "in_progress" ? "pending" : step.status,
-      })),
-    });
+    return this.update(
+      {
+        sessionId,
+        revision,
+        paused: false,
+        breakpoints: stored.plan.breakpoints,
+        steps: stored.plan.steps.map((step) => ({
+          ...step,
+          status: resetCompleted || step.status === "in_progress" ? "pending" : step.status,
+        })),
+      },
+      false,
+      false,
+      true,
+      null,
+      true,
+    );
   }
 
   removeProjectPlan(id: string): void {

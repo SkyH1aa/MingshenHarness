@@ -1,5 +1,5 @@
 export interface ModelRetrySettings {
-  /** Consecutive reconnection attempts per interruption, reset after forward progress. */
+  /** Additional attempts allowed for one model request; partial output does not reset the budget. */
   maxRetries: number;
 }
 

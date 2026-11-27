@@ -50,8 +50,39 @@ function fixture() {
   });
   const emit = vi.fn();
   const tools = vi.fn();
+  const runtimeRun = (runId: string, status: string) => ({
+    runId,
+    sessionId: session.id,
+    status,
+    source: "compaction",
+    createdAt: "2026-11-27T00:00:00.000Z",
+    startedAt: null,
+    updatedAt: "2026-11-27T00:00:00.000Z",
+    completedAt: null,
+    terminalReason: null,
+    policyRevision: "",
+    delegatedRunId: null,
+    lastEventId: 0,
+  });
+  const runtime = {
+    admitTurn: vi.fn(() => ({
+      turnId: "turn-compact",
+      runId: "run-compact",
+      sessionId: session.id,
+      idempotencyKey: "compact",
+      requestHash: "a".repeat(64),
+      source: "compaction",
+      createdAt: "2026-11-27T00:00:00.000Z",
+      duplicate: false,
+    })),
+    getRun: vi.fn((runId: string) => runtimeRun(runId, "accepted")),
+    markPreparing: vi.fn((runId: string) => runtimeRun(runId, "preparing")),
+    transitionRun: vi.fn((runId: string, status: string) => runtimeRun(runId, status)),
+    recordPolicyDenial: vi.fn((runId: string) => runtimeRun(runId, "blocked_policy")),
+  };
   const chat = new ChatService({
     repository,
+    runtimeService: runtime,
     emit,
     toolRegistry: { execute: tools },
     mcpService: { connect: tools },
@@ -59,7 +90,7 @@ function fixture() {
     questionBroker: { cancelSession: vi.fn() },
     permissions: { clearSession: vi.fn() },
   } as unknown as ConstructorParameters<typeof ChatService>[0]);
-  return { database, repository, session, chat, emit, tools };
+  return { database, repository, runtime, session, chat, emit, tools };
 }
 
 describe("manual compaction lifecycle", () => {
@@ -117,6 +148,12 @@ describe("manual compaction lifecycle", () => {
     });
     try {
       const started = f.chat.compactSession(f.session.id);
+      expect(f.emit).toHaveBeenCalledWith({
+        type: "runtime_run_updated",
+        sessionId: f.session.id,
+        runId: started.runId,
+        run: expect.objectContaining({ status: "accepted" }),
+      });
       release();
       await vi.waitFor(() => expect(f.chat.activeConversationCount()).toBe(0));
       expect(f.emit).toHaveBeenCalledWith({

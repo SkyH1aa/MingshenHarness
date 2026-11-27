@@ -929,18 +929,6 @@ export class ContextCompactionService {
       ];
       const failures: string[] = [];
       const secrets: string[] = [];
-      try {
-        secrets.push(this.providers.getActiveApiKey(input.provider.id));
-      } catch {
-        /* A custom compactor can still run if the main credential is unavailable. */
-      }
-      for (const candidate of candidates) {
-        try {
-          secrets.push(this.providers.getActiveApiKey(candidate.providerId));
-        } catch {
-          /* Report unavailable credentials with the corresponding model attempt. */
-        }
-      }
       for (const [index, candidate] of candidates.entries()) {
         input.signal.throwIfAborted();
         if (index > 0) {
@@ -959,7 +947,51 @@ export class ContextCompactionService {
           const model = provider?.models.find((model) => model.id === candidate.modelId);
           if (!provider || !model)
             throw new Error("压缩模型不存在、已禁用或不属于所选供应商，请重新配置。");
-          const apiKey = this.providers.getActiveApiKey(provider.id);
+          const policyHook =
+            typeof this.providers.managedPolicyRequestHook === "function"
+              ? this.providers.managedPolicyRequestHook()
+              : undefined;
+          // The primary ChatService hook already performs managed-policy authorization.
+          // Only fall back to the provider policy hook for callers without that host hook.
+          const requestHook = input.beforeEachRequest ?? policyHook;
+          const loadRequestHookContext = async (): Promise<ModelRequestContext> => {
+            if (!requestHook) return "";
+            try {
+              const context = (await requestHook(provider, model)) ?? "";
+              input.signal.throwIfAborted();
+              return context;
+            } catch (cause) {
+              input.signal.throwIfAborted();
+              recordRuntimeError("plugin.beforeModelRequest", cause, {
+                sessionId: input.session.id,
+                providerId: provider.id,
+                modelId: model.id,
+                operation: "BeforeModelRequest",
+              });
+              throw new Error(
+                `BeforeModelRequest failed; the compaction request was not sent. ${cause instanceof Error ? cause.message : String(cause)}`,
+                { cause },
+              );
+            }
+          };
+          let initialRequestContext: ModelRequestContext | undefined =
+            await loadRequestHookContext();
+          let apiKey: string;
+          try {
+            // The hook above performs the actual policy/approval gate. Reading a credential
+            // afterwards is scoped to this already-authorized request.
+            apiKey = this.providers.getActiveApiKey(provider.id, {
+              approved: true,
+              modelConfigId: model.id,
+            });
+            secrets.push(apiKey);
+          } catch (cause) {
+            input.signal.throwIfAborted();
+            throw new Error(
+              `Compaction model credential is unavailable. ${cause instanceof Error ? cause.message : String(cause)}`,
+              { cause },
+            );
+          }
           const basePrompt = await readPromptFile(this.promptDirectory, "compaction");
           const inputOverhead = estimateTextTokens(basePrompt) + 512;
           const summaryBudget = summarySegmentBudget(input.model.contextWindow);
@@ -1019,25 +1051,11 @@ export class ContextCompactionService {
               throw new Error("历史记录过大，已停止本次压缩；原始记录已保留。");
             let result = "";
             const signal = AbortSignal.any([input.signal, AbortSignal.timeout(300_000)]);
-            let loadedRequestContext: ModelRequestContext = "";
-            if (input.beforeEachRequest) {
-              try {
-                loadedRequestContext = (await input.beforeEachRequest(provider, model)) ?? "";
-                input.signal.throwIfAborted();
-              } catch (cause) {
-                input.signal.throwIfAborted();
-                recordRuntimeError("plugin.beforeModelRequest", cause, {
-                  sessionId: input.session.id,
-                  providerId: provider.id,
-                  modelId: model.id,
-                  operation: "BeforeModelRequest",
-                });
-                throw new Error(
-                  `BeforeModelRequest failed; the compaction request was not sent. ${cause instanceof Error ? cause.message : String(cause)}`,
-                  { cause },
-                );
-              }
-            }
+            const loadedRequestContext =
+              initialRequestContext !== undefined
+                ? initialRequestContext
+                : await loadRequestHookContext();
+            initialRequestContext = undefined;
             let requestForEstimate = withModelRequestContext(request, loadedRequestContext);
             const remainingOutput = () =>
               Math.floor(
@@ -1077,7 +1095,7 @@ export class ContextCompactionService {
                 ? { requestContext: requestForEstimate.requestContext }
                 : {}),
               baseSystemPrompt: request.baseSystemPrompt ?? request.systemPrompt,
-              ...(input.beforeEachRequest ? { beforeEachRequest: input.beforeEachRequest } : {}),
+              ...(requestHook ? { beforeEachRequest: requestHook } : {}),
               onRequestUsage: usageRecorder(this.repository, input.session.id, "compaction"),
               retry: {
                 ...normalizeModelRetrySettings(this.repository.getSetting(MODEL_RETRY_SETTING)),

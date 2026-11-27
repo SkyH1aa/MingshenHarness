@@ -14,12 +14,26 @@
 .composer-edit-menu button:disabled:hover { background: transparent; }
 body { letter-spacing: 0; }
 .desktop-caption { height: 48px; flex-basis: 48px; }
-.desktop-caption__workspace { flex: 1; min-width: 0; height: 100%; }
+.desktop-caption__workspace { flex: 1 1 0; min-width: 0; height: 100%; overflow: hidden; }
 .desktop-caption__workspace:has(.app-topbar) > .desktop-caption__name { display: none; }
-.desktop-caption__actions { flex-shrink: 0; }
+.desktop-caption__actions { position: relative; z-index: 2; flex-shrink: 0; background: var(--surface); }
 .desktop-caption__actions button { width: 36px; }
 .app-shell { display: flex; flex-direction: column; height: 100%; container-type: inline-size; }
-.desktop-caption .app-topbar { height: 48px; padding: 0 8px 0 12px; gap: 12px; border: 0; background: transparent; }
+.desktop-caption .app-topbar {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding: 0 8px 0 12px;
+  gap: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+  border: 0;
+  background: transparent;
+}
+.desktop-caption .app-topbar::-webkit-scrollbar { display: none; }
 .app-topbar button, .app-topbar select { -webkit-app-region: no-drag; }
 .app-topbar .brand { min-width: 0; flex-shrink: 0; gap: 8px; }
 .app-topbar .brand-mark { width: 24px; height: 24px; border: 0; background: transparent; border-radius: 4px; }
@@ -339,6 +353,11 @@ body { letter-spacing: 0; }
   .conversation-viewport .conversation { width: calc(100% - 88px); }
   .composer-wrap { padding: 8px 16px 12px; }
 }
+
+@media (max-width: 760px) {
+  .settings-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   button { transition: color var(--feedback-duration) ease, background-color var(--feedback-duration) ease, border-color var(--feedback-duration) ease; }
   .model-picker__menu, .composer-slash-menu, .session-menu, .permission-details[open] > div { animation: workbench-menu var(--menu-duration) var(--ease-ui); }
